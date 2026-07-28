@@ -6,15 +6,36 @@
 ' Ctrl+Alt+Break ....... alterna fullscreen <-> janela (volta pro Windows)
 ' Fechar a janela ...... a sessao Linux continua viva; reabrir retoma tudo
 '                        exatamente onde estava.
+'
+' Copie ESTE arquivo E o "Linux Fullscreen.rdp" juntos para a Area de
+' Trabalho - os dois precisam ficar na mesma pasta. Sem o .rdp o script ainda
+' conecta, so que com as opcoes padrao do mstsc (mais lentas).
 
 Set WshShell = CreateObject("WScript.Shell")
+Set fso      = CreateObject("Scripting.FileSystemObject")
 
 ' 1) acorda a WSL e garante o xrdp no ar (oculto, espera terminar)
 WshShell.Run "wsl.exe -d Ubuntu-24.04 -u root /usr/local/bin/linux-desktop-up", 0, True
 
-' 2) abre a sessao: /multimon espalha por todos os monitores, /f entra em
-'    fullscreen. Em fullscreen o mstsc entrega a tecla Windows para a sessao
-'    remota - e o Super dos atalhos do xfwm4 (Super+setas, Super+D, Super+R).
-'    Isso foi medido: tanto Win+Direita quanto Win+Esquerda chegam ao Linux,
-'    entao NAO e preciso um .rdp com keyboardhook:i:1 aqui.
-WshShell.Run "mstsc.exe /v:localhost:3390 /multimon /f", 1, False
+' 2) abre a sessao. O .rdp ao lado deste script leva as opcoes afinadas para
+'    uma conexao local: LAN, sem deteccao automatica de banda e sem compressao
+'    do lado do cliente. Num loopback essas heuristicas so custam CPU - e CPU
+'    e exatamente o gargalo aqui, porque nao ha GPU no caminho: o xrdp
+'    comprime 4480x1080 por software a cada quadro.
+'
+'    O fullscreen multimonitor agora vem de dentro do .rdp
+'    ("screen mode id:i:2" + "use multimon:i:1"), nao mais dos parametros
+'    /f e /multimon da linha de comando.
+'
+'    Em fullscreen o mstsc entrega a tecla Windows para a sessao remota - e o
+'    Super dos atalhos do xfwm4 (Super+setas, Super+D, Super+R). Isso foi
+'    medido: tanto Win+Direita quanto Win+Esquerda chegam ao Linux, entao NAO
+'    e preciso "keyboardhook:i:1" no .rdp.
+perfil = fso.GetParentFolderName(WScript.ScriptFullName) & "\Linux Fullscreen.rdp"
+
+If fso.FileExists(perfil) Then
+    WshShell.Run "mstsc.exe """ & perfil & """", 1, False
+Else
+    ' Plano B: sem o .rdp por perto, conecta do jeito antigo.
+    WshShell.Run "mstsc.exe /v:localhost:3390 /multimon /f", 1, False
+End If

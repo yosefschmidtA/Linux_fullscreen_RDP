@@ -13,6 +13,12 @@ set -euo pipefail
 
 RDP_PORT=3390   # 3389 e do RDP nativo do Windows - nao dá pra usar
 
+# Profundidade de cor negociada com o mstsc. Nao ha GPU no caminho: o xrdp
+# comprime 4480x1080 em CPU a cada quadro, e 24 bits tiram 25% dos bytes que
+# ele tem que mastigar, sem diferenca visivel num desktop. Volte para 32 se
+# for trabalhar com cor critica (edicao de foto, calibracao).
+MAX_BPP=24
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "Precisa de root. Rode: sudo bash $0" >&2
     exit 1
@@ -58,10 +64,13 @@ systemctl enable --quiet x11-unix-writable.service
 /usr/local/bin/fix-x11-unix
 
 echo
-echo "==> [3/7] Configurando xrdp na porta $RDP_PORT"
+echo "==> [3/7] Configurando xrdp na porta $RDP_PORT (max_bpp=$MAX_BPP)"
 [ -f /etc/xrdp/xrdp.ini.orig ] || cp /etc/xrdp/xrdp.ini /etc/xrdp/xrdp.ini.orig
 sed -i "s/^port=3389$/port=$RDP_PORT/"          /etc/xrdp/xrdp.ini
 sed -i "s/^new_cursors=true$/new_cursors=false/" /etc/xrdp/xrdp.ini
+# ^max_bpp=.*$ em vez de ^max_bpp=32$ para o script continuar idempotente
+# depois que este valor ja tiver sido trocado uma vez.
+sed -i "s/^max_bpp=.*$/max_bpp=$MAX_BPP/"        /etc/xrdp/xrdp.ini
 # xrdp precisa ler o certificado TLS gerado na instalacao
 adduser xrdp ssl-cert >/dev/null 2>&1 || true
 

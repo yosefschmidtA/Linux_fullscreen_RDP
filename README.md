@@ -64,8 +64,13 @@ desliga o WSLg. Sem isso as janelas abrem soltas no desktop do Windows.
 
 **5. Windows — o atalho**
 
-Copie `windows/Linux Fullscreen.vbs` para a Área de Trabalho e clique.
-Login = seu usuário Linux + a senha do passo 1.
+Copie **os dois** arquivos de `windows/` — `Linux Fullscreen.vbs` e
+`Linux Fullscreen.rdp` — para a Área de Trabalho, na mesma pasta, e clique no
+`.vbs`. Login = seu usuário Linux + a senha do passo 1.
+
+O `.rdp` ao lado é que carrega o fullscreen multimonitor e as opções afinadas
+de desempenho (veja "Fluidez"). Se ele faltar, o `.vbs` ainda conecta, mas cai
+nas opções padrão do mstsc.
 
 `Ctrl+Alt+Break` sai do fullscreen e devolve o Windows.
 

@@ -105,5 +105,31 @@ fi
 echo "  $HELP -> xfce4-terminal"
 
 echo
+echo "== fluidez da sessao remota =="
+# Esta sessao nao tem GPU nenhuma desenhando: o Xorg roda com o driver virtual
+# xrdpdev, que desenha por CPU e entrega os pixels ao xrdp, que comprime (em
+# CPU) e manda por TCP. Sao 4480x1080 a cada quadro. Tudo que evite trabalho
+# nesse caminho vale mais do que parece.
+perf() {   # perf <propriedade> <tipo> <valor>
+    xfconf-query -c xfwm4 -p "$1" -n -t "$2" -s "$3" 2>/dev/null \
+        || xfconf-query -c xfwm4 -p "$1" -s "$3"
+    echo "  $1 -> $3"
+}
+
+# O compositor do xfwm4 recompoe regioes grandes a cada movimento, e aqui isso
+# sai caro porque nao ha GPU para absorver. Medido em 28/07/2026 com glxgears
+# numa janela 1600x900: 197 FPS com compositing, 225 sem - +14%. O ganho no
+# ARRASTO e maior que isso; o glxgears mede uma janela parada se redesenhando,
+# nao uma janela se movendo. O preco e perder sombra e transparencia.
+perf /general/use_compositing bool false
+
+# Arrastar/redimensionar mostrando so o contorno. Com o conteudo visivel, cada
+# pixel de movimento do mouse vira um quadro cheio para comprimir e transmitir.
+perf /general/box_move   bool true
+perf /general/box_resize bool true
+
+echo
 echo "Pronto. Os atalhos valem na hora, sem reiniciar a sessao."
 echo "Os do teclado numerico (Super+KP_*) continuam funcionando em paralelo."
+echo "Para ter sombra/transparencia de volta:"
+echo "  xfconf-query -c xfwm4 -p /general/use_compositing -s true"
