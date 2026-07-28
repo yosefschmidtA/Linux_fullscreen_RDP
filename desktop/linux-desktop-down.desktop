@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Desligar
+Name[pt_BR]=Desligar
+GenericName=Desligar a VM da WSL
+Comment=Encerra a sessao e desliga a VM, devolvendo a RAM ao Windows
+Comment[pt_BR]=Encerra a sessao e desliga a VM, devolvendo a RAM ao Windows
+Exec=/usr/local/bin/linux-desktop-down
+Icon=system-shutdown
+Terminal=false
+Categories=System;
+Keywords=desligar;shutdown;poweroff;halt;wsl;sair;
+StartupNotify=false

@@ -1,0 +1,172 @@
+#!/bin/bash
+# linux-desktop-down - o "botao de desligar" desta sessao.
+#
+#   linux-desktop-down            desliga a VM da WSL inteira (devolve a RAM)
+#   linux-desktop-down --session  so encerra a sessao grafica (a VM continua)
+#   linux-desktop-down -y         sem perguntar
+#
+# E o par do linux-desktop-up, que o atalho do Windows chama para SUBIR tudo.
+# Este faz o caminho de volta, e existe para resolver um incomodo concreto:
+# fechar a janela do mstsc NAO encerra nada - nem a sessao, nem a VM. Sem isto
+# era preciso fechar o RDP e depois ir ao PowerShell rodar "wsl --shutdown".
+#
+# Nao depende de xfce4-session nem de nenhum desktop environment: e bash, os
+# pkill certos, e o wsl.exe. O dialogo usa zenity se houver tela, e cai para
+# xmessage ou whiptail se nao houver.
+set -u
+
+MODO=vm          # vm | sessao
+PERGUNTA=sim
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -s|--session|--sessao) MODO=sessao ;;
+        -y|--yes|--sim)        PERGUNTA=nao ;;
+        -h|--help)
+            sed -n '2,10p' "$0" | sed 's/^# \?//'
+            exit 0 ;;
+        *) echo "opcao desconhecida: $1 (tente --help)" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# ---------------------------------------------------------------------------
+# Confirmacao.
+#
+# Nao e frescura: os dois modos matam aplicativos sem pedir para salvar. O
+# xfwm4 morrendo derruba a sessao inteira de uma vez, e o "wsl --shutdown"
+# termina a VM na hora. Como este script vai virar um item do appfinder, um
+# Enter distraido nao pode desligar a maquina.
+# ---------------------------------------------------------------------------
+if [ "$MODO" = vm ]; then
+    TITULO="Desligar o Linux"
+    TEXTO="Desligar a VM da WSL agora?\n\nIsto encerra a sessao e devolve a RAM ao Windows.\nTrabalho nao salvo sera perdido."
+    OK="Desligar"
+else
+    TITULO="Sair da sessao"
+    TEXTO="Encerrar a sessao grafica agora?\n\nA VM continua ligada; o atalho do Windows reabre em segundos.\nTrabalho nao salvo sera perdido."
+    OK="Sair"
+fi
+
+confirma() {
+    if [ -n "${DISPLAY:-}" ] && command -v zenity >/dev/null 2>&1; then
+        zenity --question --title="$TITULO" --text="$TEXTO" \
+               --ok-label="$OK" --cancel-label="Cancelar" \
+               --width=340 2>/dev/null
+        return $?
+    fi
+    if [ -n "${DISPLAY:-}" ] && command -v xmessage >/dev/null 2>&1; then
+        # xmessage devolve o "button number": 1 = primeiro botao.
+        printf '%b\n' "$TEXTO" | xmessage -file - -center \
+            -buttons "Cancelar:0,$OK:1" -default "Cancelar" >/dev/null 2>&1
+        [ $? -eq 1 ]
+        return $?
+    fi
+    if [ -t 0 ] && command -v whiptail >/dev/null 2>&1; then
+        whiptail --title "$TITULO" --yesno "$(printf '%b' "$TEXTO")" 12 60
+        return $?
+    fi
+    if [ -t 0 ]; then
+        printf '%b\n' "$TEXTO"
+        read -r -p "Confirma? [s/N] " r
+        case "$r" in [sSyY]*) return 0 ;; *) return 1 ;; esac
+    fi
+    # Sem tela e sem terminal: nao da para perguntar, entao nao age.
+    echo "linux-desktop-down: sem como confirmar; use -y para agir sem perguntar." >&2
+    return 1
+}
+
+if [ "$PERGUNTA" = sim ]; then
+    confirma || { echo "cancelado."; exit 0; }
+fi
+
+# ---------------------------------------------------------------------------
+# Log de debug do startwm.sh (~/startwm-debug.log).
+#
+# O startwm.sh abre esse arquivo com "exec >", que trunca a cada novo login -
+# entao mante-lo depois que ESTA sessao encerrou nao preserva nada util: o
+# proximo login sobrescreve do mesmo jeito. Removido aqui so por arrumacao,
+# para nao deixar o arquivo orfao parado no $HOME entre uma sessao e outra.
+# ---------------------------------------------------------------------------
+rm -f "$HOME/startwm-debug.log" 2>/dev/null
+
+# ---------------------------------------------------------------------------
+# Encerrar a sessao grafica.
+#
+# A ordem importa e nao e obvia:
+#
+# 1. xfsettingsd ANTES. Se ele tiver sido reiniciado a mao durante a sessao
+#    (o conserto do grab orfao faz isso), foi desacoplado com setsid e pode
+#    sobreviver ao fim da sessao. Sobrevivendo, a sessao seguinte sobe um
+#    segundo, os dois disputam os mesmos grabs de teclado e o Super+Direita
+#    volta a nao funcionar. Ver README, "Um atalho existe ... e nao faz nada".
+#
+# 2. xfwm4 DEPOIS. O startwm.sh termina em "exec xfwm4" dentro de um
+#    "dbus-launch --exit-with-session", entao matar o xfwm4 derruba o sh, que
+#    derruba o dbus-launch, que encerra a sessao inteira. E o unico jeito de
+#    fazer o xrdp-sesman soltar a sessao: fechar a janela do mstsc apenas
+#    desconecta, e ele devolve a MESMA sessao ao reconectar.
+#
+#    Nao existe "xfwm4 --quit" - o 4.18 responde "Unknown option --quit".
+# ---------------------------------------------------------------------------
+encerra_sessao() {
+    sync
+    pkill -x xfsettingsd 2>/dev/null
+    sleep 1
+    pkill -x xfwm4 2>/dev/null
+}
+
+if [ "$MODO" = sessao ]; then
+    encerra_sessao
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Desligar a VM.
+#
+# Quem termina a VM e devolve a RAM ao Windows e o wsl.exe do lado de la. Duas
+# armadilhas:
+#
+# - O PATH do Windows nao esta no PATH desta sessao ("cmd.exe: command not
+#   found"), embora o interop esteja ligado. Por isso o caminho completo.
+# - O "--shutdown" mata a VM que hospeda este proprio script. Chamado direto,
+#   o processo morre no meio da chamada. Por isso o setsid: ele sai do grupo
+#   de processos e a ordem chega ao Windows mesmo com tudo caindo em volta.
+#
+# O sync antes nao e supersticao: o --shutdown e abrupto, nao para servicos
+# nem desmonta nada. Descarregar os buffers antes evita perder escrita recente.
+# ---------------------------------------------------------------------------
+WSLEXE=""
+for c in /mnt/c/Windows/System32/wsl.exe "$(command -v wsl.exe 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { WSLEXE="$c"; break; }
+done
+
+sync; sync
+
+if [ -n "$WSLEXE" ]; then
+    setsid "$WSLEXE" --shutdown >/dev/null 2>&1 &
+    sleep 5
+    # Se ainda estamos vivos, o interop nao levou a ordem adiante.
+    echo "linux-desktop-down: o wsl.exe nao desligou a VM; tentando pelo systemd." >&2
+fi
+
+# Sem interop (ou se ele falhou): caminho pelo proprio Linux, que funciona
+# porque esta WSL roda com systemd como PID 1.
+#
+# CUIDADO com sudo aqui. Este script costuma ser lancado pelo appfinder, ou
+# seja, SEM terminal: um "sudo" comum ficaria esperando uma senha que nao tem
+# onde ser digitada, e o processo penduraria em silencio - do ponto de vista do
+# usuario, o botao de desligar simplesmente nao faz nada. Por isso "sudo -n",
+# que desiste na hora em vez de perguntar.
+systemctl poweroff 2>/dev/null && exit 0          # via polkit, se permitido
+sudo -n systemctl poweroff 2>/dev/null && exit 0  # se houver sudo sem senha
+
+# Nada funcionou. Como pode nao haver terminal, o aviso tem que ir para a tela.
+AVISO="Nao consegui desligar a VM automaticamente.\n\nRode no PowerShell do Windows:\n    wsl --shutdown"
+if [ -n "${DISPLAY:-}" ] && command -v zenity >/dev/null 2>&1; then
+    zenity --error --title="Desligar o Linux" --text="$AVISO" --width=340 2>/dev/null
+elif [ -n "${DISPLAY:-}" ] && command -v xmessage >/dev/null 2>&1; then
+    printf '%b\n' "$AVISO" | xmessage -file - -center >/dev/null 2>&1
+fi
+printf '%b\n' "$AVISO" >&2
+exit 1

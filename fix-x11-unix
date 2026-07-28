@@ -1,0 +1,35 @@
+#!/bin/sh
+# O WSLg monta /tmp/.X11-unix como read-only, mas o Xorg da sessao xrdp
+# precisa criar o socket dela (X10) exatamente ali dentro. Sem isso a
+# sessao nao sobe.
+#
+# Cuidado importante: o socket X0 do WSLg vive nesse mesmo diretorio e e o
+# que faz os atalhos .vbs atuais (nautilus etc.) funcionarem. Por isso a
+# primeira tentativa e so remontar rw, preservando o conteudo.
+
+# Com o WSLg desligado (guiApplications=false no .wslconfig) ninguem cria
+# /tmp/.X11-unix, e sem o diretorio todo o resto deste script falha em
+# silencio: o touch nao acha o caminho, o remount nao tem ponto de montagem e
+# o mount do tmpfs tambem nao. Criar antes torna o script valido nos dois
+# mundos - com e sem WSLg.
+mkdir -p /tmp/.X11-unix
+chmod 1777 /tmp/.X11-unix 2>/dev/null
+
+# Ja esta gravavel? (testa de fato: sob mount ro ate o root falha)
+if touch /tmp/.X11-unix/.rwtest 2>/dev/null; then
+    rm -f /tmp/.X11-unix/.rwtest
+    exit 0
+fi
+
+if mount -o remount,rw /tmp/.X11-unix 2>/dev/null; then
+    chmod 1777 /tmp/.X11-unix
+    exit 0
+fi
+
+# Fallback: tmpfs gravavel por cima, recriando o link para o socket do WSLg
+echo "fix-x11-unix: remount falhou, usando tmpfs sobreposto" >&2
+mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp/.X11-unix
+if [ -S /mnt/wslg/.X11-unix/X0 ]; then
+    ln -sf /mnt/wslg/.X11-unix/X0 /tmp/.X11-unix/X0
+fi
+exit 0

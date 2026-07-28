@@ -1,0 +1,14 @@
+[Unit]
+Description=Torna /tmp/.X11-unix gravavel (WSLg monta read-only)
+Documentation=file:/home/yosef/linux-fullscreen/README.md
+DefaultDependencies=no
+After=local-fs.target
+Before=xrdp-sesman.service xrdp.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/fix-x11-unix
+
+[Install]
+WantedBy=multi-user.target

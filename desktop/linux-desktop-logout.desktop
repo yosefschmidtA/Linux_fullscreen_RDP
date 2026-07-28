@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Sair da sessao
+Name[pt_BR]=Sair da sessao
+GenericName=Encerrar a sessao grafica
+Comment=Encerra a sessao grafica; a VM continua ligada
+Comment[pt_BR]=Encerra a sessao grafica; a VM continua ligada
+Exec=/usr/local/bin/linux-desktop-down --session
+Icon=system-log-out
+Terminal=false
+Categories=System;
+Keywords=sair;logout;sessao;encerrar;reiniciar sessao;
+StartupNotify=false
