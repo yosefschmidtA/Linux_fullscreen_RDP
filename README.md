@@ -470,6 +470,72 @@ aí é à mão.
 xrdp roda na porta **3390** (3389 é do RDP nativo do Windows).
 Os originais viram `.orig` ao lado (`/etc/xrdp/xrdp.ini.orig`, etc.).
 
+## O caminho de volta: quando a sessão RDP não sobe
+
+**Leia isto antes de mexer no xrdp, no `startwm.sh` ou no Xorg.**
+
+A sessão gráfica não é a única porta de entrada desta máquina, e isso é o que
+torna seguro experimentar nela. A WSL responde por dois caminhos que **não
+passam pelo xrdp nem pelo Xorg**:
+
+```powershell
+wsl -d Ubuntu-24.04            # terminal comum, direto do Windows
+```
+
+E o **VS Code do Windows** com a extensão WSL, que sobe o `vscode-server`
+dentro da distro pelo interop — também sem tocar em xrdp, Xorg ou sessão
+gráfica. Vale a pena deixar um preparado antes de qualquer experimento: com
+ele você continua editando, compilando e rodando comandos mesmo com a sessão
+fullscreen completamente quebrada.
+
+Ou seja: **nada que você faça no xrdp tranca você fora da máquina.** O pior
+caso é ficar sem a sessão gráfica até desfazer — e desfazer se faz de fora.
+
+### Desfazer, do mais brando ao mais radical
+
+```bash
+# 1. Configuração quebrada (startwm.sh, xrdp.ini, atalhos):
+sudo bash ~/linux-fullscreen/install.sh
+
+# 2. Binários do xrdp quebrados (uma compilação da fonte que deu errado):
+sudo apt install --reinstall xrdp xorgxrdp
+sudo bash ~/linux-fullscreen/install.sh
+
+# 3. Voltar o repositório a um estado que funcionava:
+cd ~/linux-fullscreen && git log --oneline && git checkout <commit>
+```
+
+Depois de qualquer um dos três, reconecte pelo `.vbs`.
+
+Se nem isso resolver, os originais intocados do sistema estão em
+`/etc/xrdp/*.orig`, e a distro inteira pode ser exportada antes de um
+experimento grande:
+
+```powershell
+wsl --export Ubuntu-24.04 D:\ubuntu-antes.tar
+```
+
+### Onde olhar para saber o que quebrou
+
+```bash
+cat ~/startwm-debug.log                    # a sessao inteira; e o mais util
+sudo journalctl -u xrdp -u xrdp-sesman -n 40 --no-pager
+cat ~/.xorgxrdp.10.log
+systemctl is-active xrdp xrdp-sesman
+```
+
+O `startwm-debug.log` existe exatamente por isso: o `xrdp-sesman.log` só
+registra o código de saída do gerenciador de janelas, nunca a mensagem de erro.
+Veja "Log de depuração da sessão".
+
+> **Risco específico de trocar o xrdp por uma versão compilada.** Substituir o
+> `xrdp` e o `xorgxrdp` da distribuição por uma compilação da fonte (para ter o
+> GFX do 0.10 — veja "Fluidez") mexe nas duas peças que sustentam a sessão, e
+> as versões dos dois precisam casar. É o experimento mais arriscado deste
+> projeto. Faça só com o repositório empurrado para o GitHub e com um terminal
+> WSL ou VS Code de fora já aberto e testado — não abra os dois pela primeira
+> vez *depois* de quebrar.
+
 ## Problemas conhecidos
 
 **Rodei o `install.sh` de dentro da sessão RDP e ela fechou na hora.**
