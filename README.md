@@ -253,8 +253,15 @@ correções opostas. Confundir os dois foi o erro que atrasou este trabalho.
 
 | Gargalo | Quem limita | Como se mede |
 |---|---|---|
-| **Desenhar** o quadro | `llvmpipe`, em CPU | `glxgears` |
+| **Desenhar** o quadro | o renderizador OpenGL | `glxgears` |
 | **Entregar** o quadro | codec + intervalo de captura do xrdp | seus olhos |
+
+> **Sobre os números desta seção.** Todos foram medidos com `llvmpipe`, que era
+> o renderizador padrão na época. Hoje a sessão usa a GPU por escolha (veja
+> "A GPU"), e o mesmo `glxgears` marca ~77 FPS em vez de ~331 — sem que a
+> fluidez piore, porque os dois valores estão acima do teto de entrega de
+> 62 fps. Para comparar com o que está registrado aqui, force a CPU:
+> `GALLIUM_DRIVER=llvmpipe glxgears ...`
 
 ### O trabalho de 28/07/2026: atacando o desenho
 
@@ -455,41 +462,134 @@ nunca chega nele. Não é configuração faltando.
 
 ### OpenGL na placa dedicada
 
-Por padrão a sessão usa `llvmpipe` (software puro). Dá para usar a 4060:
+**Esta sessão usa a 4060 por padrão.** O `startwm.sh` exporta:
 
 ```bash
-GALLIUM_DRIVER=d3d12 MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA <o-app>
+export GALLIUM_DRIVER=d3d12
+export MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA
 ```
 
-Sem a segunda variável ele pega a **Intel integrada** — foi o que veio no
-primeiro teste.
+Sem a segunda variável o d3d12 escolhe a **Intel integrada**, não a NVIDIA. Sem
+a primeira, o Mesa cai no `llvmpipe`, que executa os shaders na CPU.
 
-**Mas meça antes de adotar.** O resultado contraintuitivo, medido aqui:
+Para rodar **um** aplicativo na CPU, se algo renderizar errado:
 
-| Renderizador | glxgears (janela 300x300) |
+```bash
+GALLIUM_DRIVER=llvmpipe <o-app>
+```
+
+### O pedágio, medido
+
+Sob o xrdp 0.10, `glxgears`, mesmas condições:
+
+| Janela | `llvmpipe` (CPU) | `d3d12` (RTX 4060) | ms por quadro |
+|---|---|---|---|
+| 300x300 | **1084,6 FPS** | 102,8 FPS | 0,9 vs 9,7 |
+| 1600x900 | **262,5 FPS** | 77,0 FPS | 3,8 vs 13,0 |
+
+A CPU ganha do jeito que está — e não é pouco. O `d3d12` paga um **pedágio fixo
+de ~9,5 ms por quadro**: o `xrdpdev` só lê pixels da RAM, então todo quadro
+renderizado na placa precisa ser copiado de volta atravessando o `/dev/dxg`.
+
+O detalhe que importa: esse pedágio é **latência de sincronização, não largura
+de banda**. Repare que 16 vezes mais pixels custam só 25% a mais ao `d3d12`
+(9,7 → 13,0 ms), enquanto o `llvmpipe` fica 4 vezes mais lento (0,9 → 3,8 ms).
+O custo da GPU quase não cresce com o tamanho da tela; o da CPU cresce.
+
+**A escolha deste projeto é manter a GPU mesmo assim**, porque o pedágio é fixo
+e o `llvmpipe` degrada com a carga: numa cena pesada de verdade (malha grande,
+shader complexo) a conta inverte, e é para isso que a máquina existe.
+
+A regra, com o número certo: a GPU compensa quando a cena faria o `llvmpipe`
+gastar **mais de ~10 ms por quadro**. Para o `glxgears` (0,9 ms) é absurdo;
+para visualização científica, quase sempre vale.
+
+### O canal de volta serializa — e é isso que decide a configuração
+
+Este é o achado que fecha a seção. O `/dev/dxg` não é só lento por quadro: ele
+**divide vazão entre clientes**. Medido com `glxgears` a 800x600:
+
+| | FPS por cliente | Vazão total |
+|---|---|---|
+| 1 cliente na GPU | **76,0** | 76 |
+| 2 clientes na GPU | 51,4 e 51,8 | 103 |
+
+Não é serialização pura — a vazão total sobe — mas **cada cliente perde cerca
+de um terço**. E com um cliente pesado junto é pior: a 1600x900, um app sozinho
+faz 77 FPS; dividindo o canal com o VS Code, cai para **37**.
+
+A consequência é contraintuitiva: **deixar a GPU ligada para todo mundo
+prejudica justamente o app que você quer acelerar.** O VS Code e o Firefox são
+interfaces 2D — não ganham nada com a placa e tomam metade do canal.
+
+Por isso a configuração deste projeto é:
+
+- **GPU por padrão na sessão** (`startwm.sh`), para que qualquer app 3D novo já
+  nasça acelerado, sem prefixo nem lembrete;
+- **VS Code e Firefox fora do canal**, pela configuração nativa de cada um, que
+  vale independente de como o app é aberto:
+
+| App | Onde | O quê |
+|---|---|---|
+| VS Code | `~/.config/Code/User/argv.json` | `"disable-hardware-acceleration": true` |
+| Firefox | `user.js` do perfil | `user_pref("gfx.webrender.software", true);` |
+
+O `xfwm-atalhos.sh` cria os dois. **Não** dá para resolver isso com variável de
+ambiente por aplicativo: o Mesa não expõe seleção de driver no `drirc`
+(conferido em `/usr/share/drirc.d/00-mesa-defaults.conf` — não existe
+`gallium_driver`), e os `.desktop` dos snaps usam caminho absoluto, então um
+wrapper em `/usr/local/bin` não intercepta o lançamento pela interface.
+
+Os dois apps precisam ser **fechados e reabertos** para valer — não é preciso
+reiniciar a sessão.
+
+### O resultado
+
+Com VS Code e Firefox fora do canal, `glxgears` a 1600x900, 45 s:
+
+```
+68,9   26,9   64,0   62,1   62,9   62,7   62,3   62,4   25,5   63,0  FPS
+```
+
+| | |
 |---|---|
-| `llvmpipe` (CPU) | **~500 FPS** |
-| `d3d12` na RTX 4060 | **~21-31 FPS** |
+| Mediana | **62,4 FPS** |
+| Teto teórico (`h264_frame_interval=16`) | **62,5 FPS** |
+| Amostras ≥ 60 FPS | 7 de 9 |
+| Antes do conserto | 37,2 FPS |
 
-A GPU ficou **16 a 24 vezes mais lenta**. O motivo é a leitura de volta: cada
-quadro renderizado na placa precisa ser copiado para a memória do sistema,
-porque o `xrdpdev` só lê pixels da RAM. Essa cópia atravessa o `/dev/dxg` de
-forma síncrona e custa ~35 ms — um **teto de ~30 FPS fixo**, que hardware
-melhor não remove. Com `llvmpipe` os pixels já nascem na RAM.
+**O app encostou no teto de entrega da sessão.** Não é mais a GPU que limita —
+é o próprio RDP, que não transmite mais que 62,5 quadros por segundo. Esse é o
+melhor resultado possível nesta arquitetura: a placa renderiza mais rápido do
+que a sessão consegue mostrar.
 
-A GPU só ganha quando a cena for pesada o bastante para o `llvmpipe` ficar
-abaixo desses 30 FPS sozinho. Por isso **não** ative isso para a sessão inteira
-— use por aplicativo, e meça.
+Repare que a **média seria 54,6** por causa de duas quedas isoladas a ~26 FPS
+(atividade de fundo). Aqui a mediana descreve melhor o comportamento que a
+média — mesmo cuidado de método da seção "Fluidez".
+
+Como confirmar que os dois apps saíram mesmo do canal:
+
+```bash
+ps -eo cmd | grep -c "type=gpu-process"   # VS Code: 0 = fora
+pgrep -af "firefox.*gpu"                  # Firefox: vazio = fora
+```
+
+> **Correção (29/07/2026).** Este README afirmava que o `d3d12` era "16 a 24
+> vezes mais lento", com "teto de ~30 FPS fixo, que hardware melhor não
+> remove", a partir de uma medição de 21–31 FPS. **Estava contaminado:** aquilo
+> foi medido sob o xrdp 0.9.24, cujo NSCodec disputava CPU pesadamente. Sob o
+> 0.10 a mesma janela dá 103 FPS. O pedágio real é ~10 ms, não ~35 ms. Um
+> gargalo estava mascarando o outro — o mesmo erro que a seção "Fluidez"
+> descreve.
 
 ### Jogos: não
 
-Três obstáculos somados, e o primeiro sozinho já basta:
+Dois obstáculos, e o primeiro sozinho já basta:
 
 1. **Não há ICD Vulkan para a NVIDIA.** Os instalados são todos do Mesa
    (`nouveau`, `radeon`, `intel`, `lvp`…), nenhum serve, e não há lib Vulkan da
    NVIDIA em `/usr/lib/wsl/lib`. Jogo moderno, Steam/Proton e DXVK são Vulkan.
-2. O teto de ~30 FPS da leitura de volta, acima.
-3. O encode do RDP em CPU, depois disso tudo.
+2. O encode do RDP em CPU e o teto de 62 fps na entrega.
 
 O lugar do jogo é o Windows, onde a 4060 é dona do display. `Ctrl+Alt+Break`
 devolve o Windows com a sessão Linux intacta rodando por trás.

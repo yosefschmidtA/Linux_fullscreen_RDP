@@ -129,7 +129,53 @@ perf /general/box_move   bool true
 perf /general/box_resize bool true
 
 echo
+echo "== apps 2D fora do canal da GPU =="
+# A sessao roda com GALLIUM_DRIVER=d3d12 (veja startwm.sh): todo cliente
+# OpenGL renderiza na RTX 4060. Mas o resultado precisa voltar para a RAM,
+# porque o xorgxrdp so le pixels de la - e esse canal, pelo /dev/dxg,
+# SERIALIZA entre clientes.
+#
+# Medido em 29/07/2026, glxgears a 1600x900:
+#   um cliente sozinho no canal ......... 77 FPS
+#   dividindo o canal com o VS Code ..... 37 FPS
+#
+# VS Code e Firefox sao interfaces 2D: nao ganham nada com a GPU e tomam
+# metade da vazao de quem ganha. Tira-los dali devolve o canal ao 3D.
+#
+# Nao da para fazer isso com variavel de ambiente por app (o Mesa nao tem
+# selecao de driver no drirc - conferido). Entao usa-se a configuracao NATIVA
+# de cada um, que vale independente de como o app foi aberto.
+
+# VS Code: JSONC (aceita comentario), lido no arranque do Electron.
+CODEARGV="$HOME/.config/Code/User/argv.json"
+if [ ! -f "$CODEARGV" ]; then
+    mkdir -p "$(dirname "$CODEARGV")"
+    printf '{\n    "disable-hardware-acceleration": true\n}\n' > "$CODEARGV"
+    echo "  $CODEARGV -> aceleracao desligada"
+elif grep -q '"disable-hardware-acceleration"' "$CODEARGV"; then
+    echo "  $CODEARGV -> ja configurado"
+else
+    echo "  ATENCAO: $CODEARGV existe e nao tem disable-hardware-acceleration."
+    echo "           Nao vou mexer num arquivo seu; acrescente a mao:"
+    echo '             "disable-hardware-acceleration": true'
+fi
+
+# Firefox: user.js no perfil. O nome do perfil e aleatorio por maquina, dai o
+# glob. Snap e deb guardam em lugares diferentes.
+for base in "$HOME/snap/firefox/common/.mozilla/firefox" "$HOME/.mozilla/firefox"; do
+    for prof in "$base"/*.default*; do
+        [ -d "$prof" ] || continue
+        if ! grep -q "gfx.webrender.software" "$prof/user.js" 2>/dev/null; then
+            echo 'user_pref("gfx.webrender.software", true);' >> "$prof/user.js"
+        fi
+        echo "  $prof/user.js -> renderizacao por software"
+    done
+done
+
+echo
 echo "Pronto. Os atalhos valem na hora, sem reiniciar a sessao."
+echo "O VS Code e o Firefox precisam ser FECHADOS e reabertos para a"
+echo "configuracao de GPU valer - reiniciar a sessao nao e necessario."
 echo "Os do teclado numerico (Super+KP_*) continuam funcionando em paralelo."
 echo "Para ter sombra/transparencia de volta:"
 echo "  xfconf-query -c xfwm4 -p /general/use_compositing -s true"

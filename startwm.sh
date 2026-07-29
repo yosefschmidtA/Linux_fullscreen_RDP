@@ -53,6 +53,28 @@ export ELECTRON_OZONE_PLATFORM_HINT=x11  # VS Code e afins
 export XAUTHORITY="$HOME/.Xauthority"
 
 # ---------------------------------------------------------------------------
+# OpenGL na GPU dedicada (RTX 4060) em vez do rasterizador por software.
+#
+# Sem isto, o Mesa cai no llvmpipe - que executa os shaders na CPU. Funciona,
+# e para cena leve chega a ser MAIS RAPIDO (medido: glxgears a 1084 FPS contra
+# 103 do d3d12 numa janela 300x300), porque o d3d12 paga um pedagio fixo de
+# ~10 ms por quadro copiando o resultado da GPU de volta para a memoria do
+# sistema - o xorgxrdp so le pixels da RAM.
+#
+# A escolha aqui e deliberada: prioridade para a GPU, mesmo custando FPS em
+# app leve. O pedagio e LATENCIA, nao largura de banda - 16x mais pixels
+# custam so 25% a mais - entao ele nao piora com telas grandes, e os 77 FPS
+# medidos a 1600x900 ficam acima do teto de entrega da sessao (62 fps).
+#
+# Sem o ADAPTER_NAME o d3d12 escolhe a Intel integrada, nao a NVIDIA.
+#
+# Para rodar UM aplicativo na CPU (util se algo renderizar errado):
+#     GALLIUM_DRIVER=llvmpipe <o-app>
+# ---------------------------------------------------------------------------
+export GALLIUM_DRIVER=d3d12
+export MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA
+
+# ---------------------------------------------------------------------------
 # DISABLE_WAYLAND - impede o lancador do snap de sabotar o GDK_BACKEND.
 #
 # Os exports de X11 acima NAO bastam para snaps desktop (Firefox, Chromium,
