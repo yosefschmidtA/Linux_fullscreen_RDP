@@ -528,6 +528,34 @@ O `startwm-debug.log` existe exatamente por isso: o `xrdp-sesman.log` só
 registra o código de saída do gerenciador de janelas, nunca a mensagem de erro.
 Veja "Log de depuração da sessão".
 
+### Desfazer o xrdp 0.10 compilado (29/07/2026)
+
+Esta máquina teve o `xrdp` e o `xorgxrdp` da distribuição **substituídos por uma
+compilação da fonte** (0.10.6.1 e 0.10.5), para ter o GFX/H.264 — veja
+"Fluidez". Se a sessão parar de subir por causa disso, o caminho de volta é:
+
+```bash
+sudo apt install --reinstall xrdp xorgxrdp
+sudo bash ~/linux-fullscreen/install.sh
+```
+
+Isso devolve os binários 0.9.24/0.9.19 do Ubuntu e reaplica a configuração
+(porta 3390, `max_bpp=24`, nosso `startwm.sh`). Há também uma cópia intacta de
+tudo que foi substituído, feita antes da instalação:
+
+```bash
+sudo ls /root/xrdp-backup-*        # etc-xrdp/, binarios e modulos do Xorg
+```
+
+O que muda com o 0.10, para saber o que conferir depois:
+
+| Arquivo | O que aconteceu |
+|---|---|
+| `/etc/xrdp/xrdp.ini` | sobrescrito pelo padrão do 0.10; porta e `max_bpp` reaplicados à mão |
+| `/etc/xrdp/startwm.sh` | sobrescrito; reinstalado a partir deste repositório |
+| `/etc/xrdp/gfx.toml` | **novo** — configura o GFX (`order = ["H.264", "RFX"]`, x264 `ultrafast`/`zerolatency`) |
+| `/lib/systemd/system/xrdp*.service` | units novas; exigem `systemctl daemon-reload` |
+
 > **Risco específico de trocar o xrdp por uma versão compilada.** Substituir o
 > `xrdp` e o `xorgxrdp` da distribuição por uma compilação da fonte (para ter o
 > GFX do 0.10 — veja "Fluidez") mexe nas duas peças que sustentam a sessão, e
