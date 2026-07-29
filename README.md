@@ -592,7 +592,9 @@ Dois obstáculos, e o primeiro sozinho já basta:
 2. O encode do RDP em CPU e o teto de 62 fps na entrega.
 
 O lugar do jogo é o Windows, onde a 4060 é dona do display. `Ctrl+Alt+Break`
-devolve o Windows com a sessão Linux intacta rodando por trás.
+devolve o Windows com a sessão Linux intacta rodando por trás — e o
+`jogo-windows` (veja "Jogar no Windows cedendo um monitor") automatiza isso
+sem precisar sair do ecrã cheio inteiro.
 
 ## Som
 
@@ -638,6 +640,161 @@ pgrep -ax pulseaudio      # tem que estar rodando
 grep audiomode "Linux Fullscreen.rdp"
 ```
 
+## Jogar no Windows cedendo um monitor
+
+O jogo continua sendo do Windows — a seção "Jogos: não" não mudou. O que muda é
+que não é mais preciso abandonar a sessão inteira com `Ctrl+Alt+Break` para
+jogar. O `jogo-windows` (`Alt+F3` → "Jogos (Windows)") **encolhe a sessão para
+um monitor só** enquanto o jogo roda, e devolve o multimonitor quando você
+fecha.
+
+O ganho é estrutural, não de conforto: **nenhum pixel do jogo passa pelo x264 do
+xrdp**. Ele é desenhado pela 4060 direto no painel, como sempre foi. Não há
+pedágio de codificação, não há o teto de 62 fps da seção "Fluidez", e a latência
+do mouse é a nativa do Windows. Qualquer solução que trouxesse a imagem do jogo
+*para dentro* da sessão pagaria dois encodes em série — é por isso que ceder o
+monitor ganha de transmitir a tela, e não é perto.
+
+**E não é preciso `Ctrl+Alt+Break`.** Verificado em 29/07/2026: com o mstsc em
+ecrã cheio de **um** monitor, o cursor atravessa livremente para o monitor
+vizinho, onde está o jogo. Ele só fica preso quando o mstsc está em multimonitor
+cobrindo tudo — aí não há para onde sair. Passar de um lado para o outro é
+arrastar o mouse, como entre duas janelas quaisquer.
+
+### Como ele escolhe o monitor — e por que não usa `selectedmonitors`
+
+O caminho óbvio seria `selectedmonitors:s:<id>` no `.rdp`. **Foi descartado**, e
+vale saber por quê antes de alguém "simplificar" isso de volta:
+
+- os IDs do mstsc só aparecem numa **caixa de diálogo** (`mstsc /l`), sem
+  nenhuma forma de ler por script;
+- a numeração **não segue** a ordem do `[System.Windows.Forms.Screen]::AllScreens`
+  do PowerShell. Medido em 29/07/2026: o `AllScreens` lista o primário de
+  2560x1080 em primeiro, mas para o mstsc ele é o **ID 1**;
+- monitores idênticos ficam **indistinguíveis** — não há como saber qual é qual.
+
+O `winposstr` resolve os três de uma vez, porque trabalha em **coordenadas do
+desktop do Windows**, que o PowerShell entrega exatas:
+
+```ini
+use multimon:i:0
+winposstr:s:0,1,<esq>,<topo>,<dir>,<base>
+```
+
+Um retângulo dentro do monitor desejado, e o mstsc entra em ecrã cheio ali.
+Testado e confirmado em 29/07/2026. É o que torna o script portátil: chegou
+noutro ambiente com três monitores, ele calcula as coordenadas novas sozinho —
+**não existe calibração**.
+
+### Escolher o monitor, e o botão "Identificar"
+
+O script **pergunta em qual monitor o jogo abre**, toda vez. Não é preguiça de
+adivinhar: é a única resposta que não pode errar, e corrigir custa um clique.
+A escolha anterior daquele ambiente aparece marcada com `[ultima vez]`.
+
+Como saber qual é qual num ambiente estranho, a lista tem um item
+**"Identificar monitores"**, que pisca `MONITOR 1`, `MONITOR 2`… na tela — o
+mesmo que o botão "Identificar" das Configurações do Windows. Sozinho:
+
+```bash
+jogo-windows --identificar
+```
+
+O que faz isso funcionar é a **numeração por posição**: os monitores são
+contados da esquerda para a direita (e depois de cima para baixo), critério
+aplicado **igual dos dois lados** — na lista, que vem do PowerShell, e no
+overlay, que vem do `xrandr`. Por isso o número que pisca é o número da lista,
+sem depender de nenhuma correspondência entre os IDs do mstsc e as saídas do
+xrdp — que, como a seção anterior mostra, não são a mesma coisa.
+
+Os números desenhados vivem **dentro da sessão Linux**, que neste momento cobre
+todos os monitores físicos. Nada é desenhado do lado Windows.
+
+O ambiente é reconhecido sozinho: o script guarda as escolhas em
+`~/.config/linux-fullscreen/monitores.conf`, indexadas por uma **assinatura do
+conjunto de monitores** (todas as geometrias, ordenadas). Casa e trabalho geram
+assinaturas diferentes, então cada um tem a sua memória.
+
+```bash
+jogo-windows --listar       # o que o Windows está reportando agora
+jogo-windows --perfil       # gera o .rdp e mostra, sem mexer na sessão
+```
+
+Os jogos ficam em `~/.config/linux-fullscreen/jogos.conf`, um por linha
+(`Nome|linha de comando do Windows`). O script cria o arquivo na primeira
+execução com o que achou instalado e **nunca mais o reescreve** — é seu.
+
+### Com três monitores: o Linux fica em um só (por ora)
+
+Se você cede um monitor ao jogo e sobram dois, o natural seria o Linux ocupar os
+dois. **Ainda não faz isso**, e o motivo é o `winposstr`: ele posiciona uma
+janela, logo entrega **um** monitor. Dois exigiriam voltar ao
+`selectedmonitors:s:<id>,<id>` e, com ele, ao problema dos IDs opacos.
+
+Há uma pista que pode tornar isso barato, mas está com **uma medição só** e por
+isso não virou código: o `selectedmonitors:s:1` trouxe o monitor que o `xrandr`
+chama de `rdp1`. Se **ID do mstsc = índice da saída do xrdp** se confirmar, o
+mapa inteiro sai de um `xrandr --listmonitors` na sessão normal, sem reconexão
+nenhuma. Falta testar a outra ponta (o ID 0 tem que trazer o `rdp0`).
+
+E há um problema que nenhum ID resolve: **jogo no monitor do meio deixa o Linux
+com um vão**. Não se sabe se o mstsc aceita seleção não contígua, e se aceitar,
+o xrdp provavelmente aloca o retângulo envolvente — o vão viraria uma **zona
+morta dentro da sessão X**, onde uma janela se perde sem estar em tela nenhuma
+(o `Alt+Tab` ainda a traria de volta, por causa do `cycle_hidden`).
+
+O desvio que dispensa tudo isso: **ponha o jogo num monitor da ponta**. Aí os
+monitores do Linux ficam adjacentes e não há vão. A restrição real não é "qual
+monitor", é **não partir a sessão ao meio**.
+
+> **E por que não deixar o Linux nos três, com o jogo por cima?** Porque em
+> multimonitor o mstsc é **uma janela só** cobrindo todos os monitores. No
+> instante em que você clica na sessão Linux, ela sobe no z-order e engole o
+> jogo junto. É exatamente por isso que dividir os monitores precisa existir.
+
+### Por que a sessão sobrevive à troca — e o que a quebraria
+
+Trocar de perfil é matar o mstsc e reabrir. Isso só é seguro por causa de uma
+linha do `/etc/xrdp/sesman.ini`:
+
+```ini
+[Sessions]
+Policy=Default
+```
+
+A política `Default` casa a sessão existente por **usuário e bpp**. A checagem
+de dimensões (`Dimensions don't match for 'D' policy`, no binário do sesman) só
+roda nas políticas que incluem `D`. **Se alguém puser `Policy=UBD`, reconectar
+com um monitor a menos abre um desktop novo em branco** e todo o seu trabalho
+fica preso numa sessão órfã. É o pré-requisito silencioso deste script.
+
+O outro pré-requisito é o **xrdp 0.10**: o redimensionamento da sessão viva
+(`process_display_control_monitor_layout_data`) não existe no 0.9.24. Voltar
+para o xrdp da distribuição, como descreve "O caminho de volta", desliga este
+recurso junto.
+
+### Três coisas que enganam
+
+- **Salve a senha do RDP.** Cada partida troca de perfil duas vezes; sem
+  credencial guardada, são duas senhas por jogo. Marque **"Lembrar-me"** na
+  próxima vez que o mstsc perguntar — os dois perfis apontam para o mesmo
+  `localhost:3390`, então uma credencial serve para ambos. Conferir com
+  `cmdkey /list` (procure `TERMSRV/localhost`).
+- **Os números não batem com as Configurações do Windows.** O `--listar` mostra
+  o monitor de 1920x1080 como **1536x864**: são coordenadas *lógicas*, já
+  divididas pela escala de 125%. Está certo, e é obrigatório — o `winposstr`
+  também fala nesse espaço. Não "corrija" para a resolução física.
+- **Escolher o monitor não obriga o jogo a obedecer.** O script escolhe onde a
+  *sessão Linux* fica; o jogo abre onde o Windows mandar, que costuma ser o
+  **primário**. Por isso a lista marca qual é o primário. Se um jogo teimar em
+  abrir no lugar errado, o ajuste é do lado Windows (o primário nas
+  Configurações, ou a opção de monitor do próprio jogo) — e o script se adapta
+  sozinho na próxima vez.
+
+Um efeito colateral sem conserto barato: ao encolher, o xfwm4 empilha as janelas
+no monitor que sobrou, e elas **não voltam sozinhas** ao lugar quando a sessão
+retoma o multimonitor.
+
 ## Arquivos instalados
 
 | Origem | Destino |
@@ -646,6 +803,7 @@ grep audiomode "Linux Fullscreen.rdp"
 | `fix-x11-unix` | `/usr/local/bin/fix-x11-unix` |
 | `linux-desktop-up` | `/usr/local/bin/linux-desktop-up` |
 | `linux-desktop-down` | `/usr/local/bin/linux-desktop-down` |
+| `jogo-windows` | `/usr/local/bin/jogo-windows` |
 | `desktop/*.desktop` | `/usr/share/applications/` (itens do appfinder) |
 | `x11-unix-writable.service` | `/etc/systemd/system/` |
 | `i3.config` | `~/.config/i3/config` (só serve se voltar ao i3) |
@@ -1423,6 +1581,12 @@ o comportamento do `Alt+Tab` à mão, copie `~/.config/xfce4/` junto.
 
 O mesmo vale para o som: o `instalar-som.sh` refaz tudo — inclusive as máscaras
 do PipeWire em `~/.config/systemd/user/`, que também não estão aqui.
+
+E há `~/.config/linux-fullscreen/`, do `jogo-windows`. Só metade importa: o
+`monitores.conf` é descartável (ele repergunta uma vez por ambiente e refaz),
+mas o **`jogos.conf` é curado à mão** e não tem como ser reconstruído — copie
+esse. É o único arquivo deste projeto que guarda uma escolha sua e não vive no
+repositório.
 
 Lembre que a WSL inteira some ao formatar: `~`, pacotes apt, snaps, tudo.
 `wsl --export Ubuntu-24.04 D:\ubuntu.tar` salva a distro completa, se preferir

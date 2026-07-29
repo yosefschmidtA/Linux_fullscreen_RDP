@@ -58,6 +58,7 @@ echo "==> [2/7] Scripts auxiliares, servico do X11-unix e itens do menu"
 install -m 755 "$SRC/fix-x11-unix"       /usr/local/bin/fix-x11-unix
 install -m 755 "$SRC/linux-desktop-up"   /usr/local/bin/linux-desktop-up
 install -m 755 "$SRC/linux-desktop-down" /usr/local/bin/linux-desktop-down
+install -m 755 "$SRC/jogo-windows"       /usr/local/bin/jogo-windows
 install -m 644 "$SRC/x11-unix-writable.service" /etc/systemd/system/
 
 # Os .desktop sao a "interface": sem painel, quem lista aplicativos e o

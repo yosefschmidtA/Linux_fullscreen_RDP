@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+#
+# jogo-windows — cede um monitor da sessao para um jogo do Windows.
+#
+# A sessao Linux encolhe para UM monitor enquanto o jogo roda e volta ao
+# multimonitor quando voce fecha. O jogo roda NATIVO no Windows: nenhum pixel
+# dele passa pelo x264 do xrdp, entao nao ha pedagio de latencia nem o teto de
+# 62 fps da sessao. E o que faz esta abordagem ganhar de qualquer streaming.
+#
+#   jogo-windows                 menu de jogos, depois de monitores
+#   jogo-windows "<nome>"        pula o menu de jogos
+#   jogo-windows --identificar   pisca o numero de cada monitor e sai
+#   jogo-windows --listar        mostra os monitores vistos agora
+#   jogo-windows --perfil        gera o .rdp e mostra, sem mexer na sessao
+#
+# Como escolhe o monitor: nao usa `selectedmonitors`, que depende dos IDs
+# opacos do mstsc (`mstsc /l`, so visiveis numa caixa de dialogo, sem jeito de
+# ler por script, e ambiguos entre monitores identicos). Usa `winposstr`, que
+# aceita COORDENADAS do desktop do Windows — que o PowerShell entrega exatas.
+# Por isso funciona em qualquer ambiente sem calibracao.
+#
+# Os monitores sao numerados pela POSICAO, da esquerda para a direita: o 1 e
+# sempre o mais a esquerda. E o mesmo criterio dos dois lados (Windows e
+# xrandr), entao o numero que pisca na tela e o numero da lista — sem depender
+# de nenhuma correspondencia de ID entre mstsc e xrdp.
+
+set -u
+export DISPLAY="${DISPLAY:-:10}"
+
+CFG="$HOME/.config/linux-fullscreen"
+JOGOS="$CFG/jogos.conf"
+MONS="$CFG/monitores.conf"
+
+PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+MSTSC=/mnt/c/Windows/System32/mstsc.exe
+TASKKILL=/mnt/c/Windows/System32/taskkill.exe
+EXPLORER=/mnt/c/Windows/explorer.exe
+CMD=/mnt/c/Windows/System32/cmd.exe
+
+msg() { printf '%s\n' "$*" >&2; }
+
+morrer() {
+    msg "erro: $*"
+    command -v zenity >/dev/null &&
+        zenity --error --width=380 --title="jogo-windows" --text="$*" 2>/dev/null
+    exit 1
+}
+
+# --- perguntar, com a mesma escada do linux-desktop-down -------------------
+# zenity (bonito) -> terminal. O xmessage aqui e usado para outra coisa
+# (os numeros dos monitores), entao nao serve de degrau intermediario.
+escolher() {   # $1=titulo $2=texto resto=opcoes ; imprime a escolhida
+    local titulo="$1" texto="$2"; shift 2
+    if command -v zenity >/dev/null; then
+        zenity --list --title="$titulo" --text="$texto" \
+               --column="Opcao" --width=520 --height=340 "$@" 2>/dev/null
+        return
+    fi
+    local i=1
+    msg "$texto"
+    for o in "$@"; do msg "  $i) $o"; i=$((i+1)); done
+    read -r -p "numero: " n </dev/tty || return 1
+    [ -n "${n:-}" ] && printf '%s\n' "${@:$n:1}"
+}
+
+# --- o Windows: perfil do usuario + monitores ------------------------------
+# Uma chamada so; o powershell.exe custa ~1s e nao vale pagar duas vezes.
+ler_windows() {
+    cd /tmp || return 1
+    "$PS" -NoProfile -Command '
+        Add-Type -AssemblyName System.Windows.Forms
+        "HOME`t" + [Environment]::GetFolderPath("UserProfile")
+        [System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
+          "MON`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}" -f `
+            $_.DeviceName, $_.Bounds.X, $_.Bounds.Y,
+            $_.Bounds.Width, $_.Bounds.Height, $_.Primary
+        }' 2>/dev/null | tr -d '\r'
+}
+
+WINHOME_W=""; MON_X=(); MON_Y=(); MON_W=(); MON_H=(); MON_PRI=(); ORDEM=()
+
+carregar_monitores() {
+    local campo resto n x y w h p
+    while IFS=$'\t' read -r campo resto; do
+        case "$campo" in
+            HOME) WINHOME_W="$resto" ;;
+            MON)  IFS=$'\t' read -r n x y w h p <<<"$resto"
+                  MON_X+=("$x"); MON_Y+=("$y"); MON_W+=("$w")
+                  MON_H+=("$h"); MON_PRI+=("$p") ;;
+        esac
+    done < <(ler_windows)
+    [ -n "$WINHOME_W" ] || morrer "nao consegui falar com o Windows (interop desligado?)"
+    [ "${#MON_X[@]}" -gt 0 ] || morrer "o Windows nao reportou monitor nenhum"
+
+    # Numeracao por posicao: esquerda -> direita, depois cima -> baixo.
+    # O offset de 100000 existe porque um monitor a esquerda do primario tem
+    # coordenada NEGATIVA, e `sort` textual poria o "-1920" no lugar errado.
+    local i
+    mapfile -t ORDEM < <(
+        for i in "${!MON_X[@]}"; do
+            printf '%08d %08d %d\n' "$((MON_X[i]+100000))" "$((MON_Y[i]+100000))" "$i"
+        done | sort | awk '{print $3}'
+    )
+}
+
+idx_de() { printf '%s' "${ORDEM[$(( $1 - 1 ))]}"; }   # posicao (1..N) -> indice
+
+rotulo() {   # $1 = posicao (1..N)
+    local i; i=$(idx_de "$1")
+    local extra=""
+    [ "${MON_PRI[$i]}" = "True" ] && extra=" — primario (os jogos abrem aqui)"
+    printf '%d: %sx%s%s' "$1" "${MON_W[$i]}" "${MON_H[$i]}" "$extra"
+}
+
+# Assinatura do ambiente: a geometria de todos os monitores, ordenada.
+# Muda de casa para o trabalho -> assinatura nova -> ele repergunta.
+assinatura() {
+    local p out=""
+    for p in $(seq 1 "${#ORDEM[@]}"); do
+        local i; i=$(idx_de "$p")
+        out+="${MON_W[$i]}x${MON_H[$i]}+${MON_X[$i]}+${MON_Y[$i]};"
+    done
+    printf '%s' "$out" | md5sum | cut -c1-12
+}
+
+# --- piscar o numero em cada monitor ---------------------------------------
+# Desenha DENTRO da sessao Linux, que neste momento cobre todos os monitores
+# fisicos. Cada saida do xrandr e um monitor, e a ordem espacial e a mesma da
+# lista — por isso o numero que voce ve e o numero que voce escolhe.
+saidas_espaciais() {
+    xrandr --listmonitors | awk 'NR>1 {
+        split($3, a, "+")            # a[1]=1920/344x1080/194  a[2]=x  a[3]=y
+        split(a[1], b, "x")
+        split(b[1], w, "/"); split(b[2], h, "/")
+        printf "%d %d %d %d\n", a[2], a[3], w[1], h[1]
+    }' | sort -n -k1,1 -k2,2
+}
+
+identificar() {
+    command -v xmessage >/dev/null || { msg "xmessage nao instalado"; return 1; }
+    local n=1 x y w h
+    while read -r x y w h; do
+        xmessage -fn 12x24 -timeout 7 \
+            -geometry "+$(( x + w/2 - 160 ))+$(( y + h/2 - 70 ))" \
+            "$(printf '\n   ==================\n\n       MONITOR %d\n\n   ==================\n' "$n")" \
+            >/dev/null 2>&1 &
+        n=$(( n + 1 ))
+    done < <(saidas_espaciais)
+    sleep 7
+}
+
+# --- escolher os monitores -------------------------------------------------
+# Pergunta pelo monitor do JOGO, que e como a gente pensa nisso. O Linux fica
+# com outro. Guarda a ultima escolha por ambiente, mas SEMPRE pergunta: e um
+# clique, e voce corrige na hora se abrir no lugar errado.
+POS_JOGO=0; POS_LINUX=0
+
+escolher_monitores() {
+    local n="${#ORDEM[@]}" sig; sig=$(assinatura)
+    local ult_j="" ult_l=""
+    if [ -f "$MONS" ]; then
+        IFS='|' read -r _ ult_j ult_l < <(awk -F'|' -v s="$sig" '$1==s' "$MONS" | tail -1)
+    fi
+
+    if [ "$n" -eq 1 ]; then
+        morrer "so ha um monitor: nao ha o que ceder ao jogo"
+    fi
+
+    local IDENT="Identificar monitores (pisca o numero em cada tela)"
+
+    while :; do
+        local opts=() p
+        for p in $(seq 1 "$n"); do
+            local marca=""
+            [ "$p" = "${ult_j:-}" ] && marca=" [ultima vez]"
+            opts+=("$(rotulo "$p")$marca")
+        done
+        opts+=("$IDENT")
+
+        local esc; esc=$(escolher "Monitor do jogo" \
+            "Em qual monitor o jogo vai abrir?
+Os monitores estao numerados da esquerda para a direita." "${opts[@]}")
+        [ -n "${esc:-}" ] || return 1
+        [ "$esc" = "$IDENT" ] && { identificar; continue; }
+        POS_JOGO="${esc%%:*}"
+        break
+    done
+
+    # Quem sobra para o Linux. Com dois monitores nao ha escolha; com tres ou
+    # mais, pergunta — o Linux fica em UM monitor (veja o README sobre por que
+    # ainda nao ocupa dois).
+    local restantes=() p
+    for p in $(seq 1 "$n"); do [ "$p" != "$POS_JOGO" ] && restantes+=("$p"); done
+
+    if [ "${#restantes[@]}" -eq 1 ]; then
+        POS_LINUX="${restantes[0]}"
+    else
+        local opts=() esc
+        for p in "${restantes[@]}"; do
+            local marca=""
+            [ "$p" = "${ult_l:-}" ] && marca=" [ultima vez]"
+            opts+=("$(rotulo "$p")$marca")
+        done
+        esc=$(escolher "Monitor do Linux" \
+            "E a sessao Linux, em qual monitor fica?" "${opts[@]}")
+        [ -n "${esc:-}" ] || return 1
+        POS_LINUX="${esc%%:*}"
+    fi
+
+    mkdir -p "$CFG"
+    { [ -f "$MONS" ] && grep -v "^$sig|" "$MONS"
+      printf '%s|%s|%s\n' "$sig" "$POS_JOGO" "$POS_LINUX"; } > "$MONS.novo" \
+        && mv "$MONS.novo" "$MONS"
+}
+
+# --- os dois perfis .rdp ---------------------------------------------------
+# O perfil do jogo e gerado a partir do seu perfil normal, nao de um modelo
+# proprio — assim os ajustes de fluidez (bpp 32, LAN, sem compressao) valem
+# nos dois, e afinar um afina o outro.
+preparar_perfis() {
+    local i; i=$(idx_de "$1")
+    WINHOME_U=$(wslpath -u "$WINHOME_W") || morrer "wslpath falhou em $WINHOME_W"
+    BASE_U="$WINHOME_U/Desktop/Linux Fullscreen.rdp"
+    BASE_W="$WINHOME_W\\Desktop\\Linux Fullscreen.rdp"
+    [ -f "$BASE_U" ] || morrer "nao achei o perfil base: $BASE_U"
+
+    local dir_u="$WINHOME_U/AppData/Local/linux-fullscreen"
+    JOGO_W="$WINHOME_W\\AppData\\Local\\linux-fullscreen\\jogo.rdp"
+    mkdir -p "$dir_u"
+
+    # retangulo bem dentro do monitor escolhido, em coordenadas do Windows
+    local x="${MON_X[$i]}" y="${MON_Y[$i]}" w="${MON_W[$i]}" h="${MON_H[$i]}"
+    local l=$(( x + w/4 )) t=$(( y + h/4 )) r=$(( x + 3*w/4 )) b=$(( y + 3*h/4 ))
+
+    grep -viE '^(use multimon|selectedmonitors|winposstr):' "$BASE_U" > "$dir_u/jogo.rdp"
+    printf 'use multimon:i:0\r\nwinposstr:s:0,1,%d,%d,%d,%d\r\n' "$l" "$t" "$r" "$b" \
+        >> "$dir_u/jogo.rdp"
+}
+
+# --- trocar de perfil ------------------------------------------------------
+abrir_mstsc()  { ( cd /tmp && setsid "$MSTSC" "$1" >/dev/null 2>&1 & ); sleep 1; }
+fechar_mstsc() { ( cd /tmp && "$TASKKILL" /IM mstsc.exe /F >/dev/null 2>&1 ); sleep 2; }
+
+# Quantos monitores a sessao tem agora. E assim que sabemos que a reconexao
+# assentou — dormir um tempo fixo erra nas duas pontas.
+n_monitores() { xrandr --listmonitors 2>/dev/null | awk '/^Monitors:/{print $2}'; }
+
+esperar_layout() {   # $1 = quantidade esperada
+    local i
+    for i in $(seq 1 60); do
+        [ "$(n_monitores)" = "$1" ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
+restaurado=0
+restaurar() {
+    [ "$restaurado" = 1 ] && return
+    restaurado=1
+    msg "devolvendo o multimonitor..."
+    fechar_mstsc
+    abrir_mstsc "$BASE_W"
+}
+
+# --- lancar o jogo ---------------------------------------------------------
+lancar() {   # $1 = linha de comando do Windows (url ou exe + args)
+    case "$1" in
+        *://*) ( cd /tmp && setsid "$EXPLORER" "$1" >/dev/null 2>&1 & ) ;;
+        *)     ( cd /tmp && setsid "$CMD" /c start "" $1 >/dev/null 2>&1 & ) ;;
+    esac
+}
+
+# --- o menu ----------------------------------------------------------------
+semear_jogos() {
+    mkdir -p "$CFG"
+    cat > "$JOGOS" <<'EOF'
+# Um jogo por linha:   Nome|linha de comando do Windows
+#
+# Steam:      steam://rungameid/<appid>   (o appid esta na URL da loja)
+# Executavel: "C:\caminho\jogo.exe" --args   (aspas se tiver espaco)
+#
+# Este arquivo e seu — o jogo-windows nunca o reescreve depois de criado.
+Hollow Knight: Silksong|steam://rungameid/1030300
+League of Legends|"C:\Riot Games\Riot Client\RiotClientServices.exe" --launch-product=league_of_legends --launch-patchline=live
+Battle.net|"C:\Program Files (x86)\Battle.net\Battle.net Launcher.exe"
+EOF
+    msg "criei $JOGOS com os jogos que achei. edite a vontade."
+}
+
+# ===========================================================================
+carregar_monitores
+
+case "${1:-}" in
+    --listar)
+        for p in $(seq 1 "${#ORDEM[@]}"); do rotulo "$p"; echo; done
+        echo "ambiente: $(assinatura)"
+        exit 0 ;;
+    --identificar)
+        identificar; exit 0 ;;
+    --perfil)
+        escolher_monitores || exit 1
+        preparar_perfis "$POS_LINUX"
+        msg "jogo  -> $(rotulo "$POS_JOGO")"
+        msg "Linux -> $(rotulo "$POS_LINUX")"
+        msg "perfil: $JOGO_W"
+        grep -E 'multimon|winposstr|screen mode' "$(wslpath -u "$JOGO_W")"
+        exit 0 ;;
+esac
+
+[ -f "$JOGOS" ] || semear_jogos
+
+mapfile -t linhas < <(grep -vE '^\s*(#|$)' "$JOGOS")
+[ "${#linhas[@]}" -gt 0 ] || morrer "nenhum jogo em $JOGOS"
+
+alvo="${1:-}"
+if [ -z "$alvo" ]; then
+    nomes=(); for l in "${linhas[@]}"; do nomes+=("${l%%|*}"); done
+    alvo=$(escolher "Jogos do Windows" \
+        "O Linux encolhe para um monitor enquanto o jogo roda." "${nomes[@]}")
+    [ -n "${alvo:-}" ] || exit 0
+fi
+
+comando=""
+for l in "${linhas[@]}"; do
+    [ "${l%%|*}" = "$alvo" ] && comando="${l#*|}"
+done
+[ -n "$comando" ] || morrer "jogo desconhecido: $alvo"
+
+escolher_monitores || exit 0
+preparar_perfis "$POS_LINUX"
+
+msg "jogo  -> $(rotulo "$POS_JOGO")"
+msg "Linux -> $(rotulo "$POS_LINUX")"
+
+# A partir daqui a sessao esta mexida: restaure em QUALQUER saida.
+trap restaurar EXIT INT TERM HUP
+
+fechar_mstsc
+abrir_mstsc "$JOGO_W"
+esperar_layout 1 || msg "aviso: a sessao nao encolheu como esperado; siga assim mesmo"
+
+# So depois de encolher — se lancar antes, o jogo nasce atras do mstsc.
+lancar "$comando"
+
+if command -v zenity >/dev/null; then
+    zenity --info --width=400 --title="$alvo" \
+      --text="Jogando \"$alvo\".
+
+Arraste o mouse para o monitor do jogo — nao precisa de Ctrl+Alt+Break.
+
+Feche o jogo e clique OK para voltar ao multimonitor." 2>/dev/null
+else
+    read -r -p "feche o jogo e tecle Enter: " _ </dev/tty
+fi
+# o trap devolve o multimonitor
