@@ -135,6 +135,24 @@ exec dbus-launch --exit-with-session sh -c '
     xfsettingsd &
     xfce4-terminal &
 
+    # Som. Nao ha placa de som nesta VM (aplay -l diz "no soundcards found"):
+    # o audio sai por um sink falso do PulseAudio que escreve no canal de audio
+    # do xrdp, e o mstsc toca do lado do Windows. Quem faz isso e o
+    # pulseaudio-module-xrdp, compilado contra as fontes do PA 16.1 (nao ha
+    # pacote pronto no Ubuntu 24.04) - veja "Som" no README.
+    #
+    # O instalador do modulo poe um .desktop em /etc/xdg/autostart, que aqui
+    # NAO adianta: autostart XDG depende de um desktop environment, e esta
+    # sessao nao tem nenhum. Por isso o carregador e chamado na mao.
+    #
+    # O --exit-idle-time=-1 impede o PulseAudio de se encerrar sozinho quando
+    # ninguem esta tocando nada - se ele morrer, o sink some junto e o som so
+    # volta no proximo login.
+    if [ -x /usr/libexec/pulseaudio-module-xrdp/load_pa_modules.sh ]; then
+        pulseaudio --start --exit-idle-time=-1
+        ( sleep 2; /usr/libexec/pulseaudio-module-xrdp/load_pa_modules.sh ) &
+    fi
+
     # CONTORNO, nao correcao. Alguns atalhos (aqui, o <Super>Right) nao sao
     # capturados quando o xfwm4 os le no arranque: a configuracao fica certa,
     # a tecla chega ao servidor X - da para provar com o diag-super-direita.sh

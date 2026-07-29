@@ -153,6 +153,10 @@ if ss -tln 2>/dev/null | grep -q ":$RDP_PORT "; then
     echo "     (poe o snap de meia tela no Super+setas; o padrao do XFCE usa o"
     echo "      teclado numerico e parece que nada funciona)"
     echo
+    echo "  3. Para ter SOM (opcional, demora alguns minutos):"
+    echo "       sudo bash ~/linux-fullscreen/instalar-som.sh"
+    echo "     (compila o pulseaudio-module-xrdp; nao ha pacote pronto no 24.04)"
+    echo
     echo "  O passo 1 nao e opcional. Sem ele o WSLg continua no ar e as janelas"
     echo "  abrem soltas no desktop do Windows em vez de entrar na sessao."
 else
