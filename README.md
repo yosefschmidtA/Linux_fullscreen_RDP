@@ -246,6 +246,196 @@ Para os diálogos, a sessão tem `zenity` (GTK, bonitinho) e `xmessage` (feio,
 mas quase sem dependência). O `linux-desktop-down` usa o primeiro que achar e
 cai para o terminal se não houver tela — vale como modelo para os próximos.
 
+## Fluidez
+
+Medido em 28/07/2026, com `glxgears` numa janela 1600x900 dentro da sessão —
+o que exercita o caminho inteiro: renderizar, capturar, comprimir e transmitir.
+
+| Configuração | FPS |
+|---|---|
+| Original (compositing ligado, 32 bpp, `.vbs` sem perfil) | 197 |
+| Só o compositing do xfwm4 desligado | 225 |
+| **Tudo: sem compositing + 24 bpp + `.rdp` afinado** | **497** |
+
+**2,5× no total.** Ressalva de método: o 24 bpp e o `.rdp` entraram juntos com
+uma sessão nova, então não dá para separar quanto foi de cada um. As primeiras
+amostras dessa última linha oscilaram entre 294 e 432 antes de estabilizar —
+sessão recém-nascida ainda tem trabalho de fundo. Só o valor de regime vale.
+
+### Por que este caminho é lento
+
+```
+app renderiza (CPU)
+   ↓
+xorgxrdp captura  →  xrdp comprime (CPU)  →  TCP
+   ↓
+mstsc descomprime  →  Windows compõe  →  a GPU do Windows varre o monitor
+```
+
+Não há GPU em nenhum ponto do lado Linux. O Xorg desta sessão roda com o
+driver **`xrdpdev`**, que é virtual: desenha em memória e entrega pixels. São
+4480x1080 por quadro, comprimidos por CPU.
+
+### O gargalo real: o codec negociado
+
+Confira o que o seu cliente e o servidor combinaram:
+
+```bash
+grep -i codec /var/log/xrdp.log | tail -5
+```
+
+Aqui aparece isto, e é o achado mais importante desta seção:
+
+```
+xrdp_caps_process_codecs: nscodec, codec id 1, properties len 3
+xrdp_caps_process_codecs: unknown codec id 5
+```
+
+**NSCodec** é o codec legado, o mais fraco disponível. E o `unknown codec id 5`
+é o mstsc oferecendo o pipeline **GFX** (RDP 8+), que o xrdp 0.9.24 não sabe o
+que é. O cliente pede o codec bom, o servidor não entende, e a negociação cai
+para o pior.
+
+O irônico é que este xrdp **foi compilado com RemoteFX** e não o usa:
+
+```bash
+strings /usr/sbin/xrdp | grep -E "enable-rfxcodec|rfx_encode set to"
+```
+
+Ou seja, parte da lentidão não é limite da arquitetura — é negociação
+malsucedida. A correção seria o **xrdp 0.10**, cujas notas de versão dizem que
+o GFX entrega *"more frame rates and less bandwidth"*, com ganho maior ainda
+"especially if the client is Windows 11's mstsc.exe". Não há PPA utilizável
+(o único que existe publica 0.9.4 para o xenial); seria compilar `xrdp` e
+`xorgxrdp` da fonte, com as versões casadas. Fica registrado como o próximo
+passo, não feito. E não espere GPU: as mesmas notas dizem que
+*"hardware-accelerated encoding are not supported in this version yet"*.
+
+### O que foi aplicado
+
+- `use_compositing=false` — o compositor recompõe regiões grandes a cada
+  movimento, e aqui não há GPU para absorver. Custa sombra e transparência.
+- `box_move=true` e `box_resize=true` — arrasta o contorno, não o conteúdo.
+- `max_bpp=24` no `xrdp.ini` — 25% menos bytes por quadro.
+- `windows/Linux Fullscreen.rdp` — conexão tipo LAN, sem detecção automática
+  de banda e sem compressão do cliente. Num loopback essas heurísticas só
+  custam CPU, que é justamente o recurso escasso aqui.
+
+Os três primeiros vivem no `xfwm-atalhos.sh`, que o `startwm.sh` reaplica 4
+segundos após cada login — então voltam sozinhos a cada sessão.
+
+Para ter sombra e transparência de volta:
+
+```bash
+xfconf-query -c xfwm4 -p /general/use_compositing -s true
+```
+
+## A GPU: o que dá e o que não dá
+
+Separe duas coisas que não têm nada a ver uma com a outra.
+
+**Computação (CUDA) funciona plenamente.** Medido nesta máquina com um saxpy de
+16,7 milhões de elementos: **137 GB/s**, resultado correto, numa RTX 4060
+Laptop. Não há penalidade relevante de virtualização, e nada disso passa pelo
+xrdp — as simulações falam direto com `/dev/dxg`.
+
+**Renderização é outra história**, e o motivo é estrutural:
+
+```bash
+ls /dev/dri/          # nao existe
+ls /sys/class/drm/    # so "version", nenhum card0
+```
+
+Na WSL2 **o Linux não tem controlador de display nenhum**. A GPU é alcançada só
+pelo `/dev/dxg`, que serve para computação e renderização fora-de-tela — nunca
+para varrer um monitor. No Windows a placa é dona do painel; aqui o lado Linux
+nunca chega nele. Não é configuração faltando.
+
+### OpenGL na placa dedicada
+
+Por padrão a sessão usa `llvmpipe` (software puro). Dá para usar a 4060:
+
+```bash
+GALLIUM_DRIVER=d3d12 MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA <o-app>
+```
+
+Sem a segunda variável ele pega a **Intel integrada** — foi o que veio no
+primeiro teste.
+
+**Mas meça antes de adotar.** O resultado contraintuitivo, medido aqui:
+
+| Renderizador | glxgears (janela 300x300) |
+|---|---|
+| `llvmpipe` (CPU) | **~500 FPS** |
+| `d3d12` na RTX 4060 | **~21-31 FPS** |
+
+A GPU ficou **16 a 24 vezes mais lenta**. O motivo é a leitura de volta: cada
+quadro renderizado na placa precisa ser copiado para a memória do sistema,
+porque o `xrdpdev` só lê pixels da RAM. Essa cópia atravessa o `/dev/dxg` de
+forma síncrona e custa ~35 ms — um **teto de ~30 FPS fixo**, que hardware
+melhor não remove. Com `llvmpipe` os pixels já nascem na RAM.
+
+A GPU só ganha quando a cena for pesada o bastante para o `llvmpipe` ficar
+abaixo desses 30 FPS sozinho. Por isso **não** ative isso para a sessão inteira
+— use por aplicativo, e meça.
+
+### Jogos: não
+
+Três obstáculos somados, e o primeiro sozinho já basta:
+
+1. **Não há ICD Vulkan para a NVIDIA.** Os instalados são todos do Mesa
+   (`nouveau`, `radeon`, `intel`, `lvp`…), nenhum serve, e não há lib Vulkan da
+   NVIDIA em `/usr/lib/wsl/lib`. Jogo moderno, Steam/Proton e DXVK são Vulkan.
+2. O teto de ~30 FPS da leitura de volta, acima.
+3. O encode do RDP em CPU, depois disso tudo.
+
+O lugar do jogo é o Windows, onde a 4060 é dona do display. `Ctrl+Alt+Break`
+devolve o Windows com a sessão Linux intacta rodando por trás.
+
+## Som
+
+Não há placa de som nesta VM (`aplay -l` responde *"no soundcards found"*), e
+nenhum servidor de som sobe sozinho — sem desktop environment, ninguém inicia
+pipewire nem pulseaudio. O áudio sai por um **sink falso** do PulseAudio que
+escreve no canal de áudio do xrdp; quem toca é o mstsc, do lado do Windows.
+
+```bash
+sudo bash ~/linux-fullscreen/instalar-som.sh
+```
+
+Depois, **encerre a sessão** (`Alt+F3` → "Sair da sessão") — reconectar não
+basta, o sesman devolve a mesma sessão. E teste:
+
+```bash
+paplay /usr/share/sounds/alsa/Front_Center.wav
+```
+
+Está separado do `install.sh` porque **precisa compilar**: não existe pacote
+`pulseaudio-module-xrdp` no Ubuntu 24.04, e os módulos usam a API interna do
+PulseAudio, que o `libpulse-dev` não expõe. É obrigatório ter a árvore de
+fontes do PA na mesma versão instalada, configurada com `meson setup`.
+
+Três detalhes deste setup que enganam:
+
+- **O autostart do módulo não funciona aqui.** O instalador põe um `.desktop`
+  em `/etc/xdg/autostart`, e autostart XDG depende de um desktop environment.
+  Esta sessão não tem nenhum, então o `startwm.sh` chama o
+  `load_pa_modules.sh` na mão.
+- **O PipeWire precisa ser mascarado, não só desabilitado.** Os units vêm
+  habilitados em escopo *global*; um `systemctl --user disable` não segura, e
+  ele volta a disputar o socket do PulseAudio. Os módulos do xrdp são do
+  PulseAudio e não carregam no PipeWire.
+- **`audiomode:i:0` no `.rdp`.** Com `:2` ("não reproduzir") o cliente recusa o
+  canal e não sai som, por mais correto que esteja o lado Linux.
+
+Se não sair som, confira nesta ordem:
+
+```bash
+pactl get-default-sink    # tem que dizer xrdp-sink
+pgrep -ax pulseaudio      # tem que estar rodando
+grep audiomode "Linux Fullscreen.rdp"
+```
+
 ## Arquivos instalados
 
 | Origem | Destino |
@@ -258,12 +448,17 @@ cai para o terminal se não houver tela — vale como modelo para os próximos.
 | `x11-unix-writable.service` | `/etc/systemd/system/` |
 | `i3.config` | `~/.config/i3/config` (só serve se voltar ao i3) |
 
-Dois scripts **não** são instalados — rodam de dentro da sessão, quando você
-quiser:
+Do lado Windows, os dois arquivos de `windows/` vão **juntos** para a Área de
+Trabalho: o `.vbs` é o que se clica, e o `.rdp` ao lado é o perfil de conexão
+que ele usa (fullscreen multimonitor + os ajustes de fluidez). Sem o `.rdp` o
+`.vbs` ainda conecta, mas cai nas opções padrão do mstsc.
+
+Três scripts **não** são instalados — rodam quando você quiser:
 
 | Script | Para quê |
 |---|---|
-| `xfwm-atalhos.sh` | põe os `Super+setas` e conserta o `Ctrl+Alt+T`. Rodar uma vez após instalar. |
+| `xfwm-atalhos.sh` | põe os `Super+setas`, conserta o `Ctrl+Alt+T` e aplica os ajustes de fluidez. Rodar uma vez após instalar — mas o `startwm.sh` já o reaplica a cada login. |
+| `instalar-som.sh` | compila o `pulseaudio-module-xrdp` (veja "Som"). Precisa de `sudo` e leva alguns minutos. |
 | `diag-super-direita.sh` | descobre se um atalho com a tecla Windows está sendo engolido pelo Windows antes de chegar na sessão. |
 
 Há ainda uma alteração do lado Windows, feita pelo passo 7 do `install.sh`:
@@ -387,6 +582,81 @@ wrapper, ignora o launcher e abre:
 ```bash
 /snap/firefox/current/usr/lib/firefox/firefox
 ```
+
+**Snap não abre: `cannot preserve mount namespace ... Invalid argument`.**
+
+Sintoma (visto em 28/07/2026, com o Firefox):
+
+```
+update.go:193: cannot change mount namespace according to change mount
+  (/var/lib/snapd/hostfs/usr/share/gimp/2.0/help ...): cannot write to
+  "/var/lib/snapd/hostfs/..." because it would affect the host in "/var/lib/snapd"
+  [... mais quatro linhas parecidas ...]
+cannot preserve mount namespace of process 159695 as firefox.mnt: Invalid argument
+unexpected eof from helper process
+```
+
+**Não tem nada a ver com o RDP.** A sessão RDP e um shell comum estão no mesmo
+mount namespace (compare `readlink /proc/$(pgrep -x xfwm4)/ns/mnt` com o do seu
+shell), e nenhuma linha fala de display — o Firefox nem chega a tentar abrir
+janela. É o snapd, e é **intermitente**.
+
+As linhas `update.go:193` são **ruído**, não a falha. O perfil que o snapd gera
+pede bind-mounts de diretórios de documentação do host que nesta máquina não
+existem (gimp, libreoffice, xubuntu-docs…). Sem a origem, o `snap-update-ns`
+teria que criá-la dentro de `/var/lib/snapd/hostfs`, o que mexeria no host — e
+ele recusa, corretamente. Pula essas entradas e segue. Numa execução
+bem-sucedida elas nem aparecem.
+
+A falha real são as duas últimas linhas. O `snap-confine` monta o namespace do
+snap e depois o *preserva*, com um bind-mount de `/proc/<pid>/ns/mnt` em
+`/run/snapd/ns/<app>.mnt` — é isso que faz a segunda abertura ser rápida. Esse
+bind falhou, o processo auxiliar morreu, e o app não subiu.
+
+Como reconhecer que é isto: o `.mnt` fica como **arquivo vazio de 0 byte**, em
+vez do mount `nsfs` que deveria ser.
+
+```bash
+ls -la /run/snapd/ns/firefox.mnt          # 0 byte e dono errado = quebrado
+grep firefox.mnt /proc/self/mountinfo     # saudavel mostra uma linha "nsfs"
+```
+
+**Correção** — apague o arquivo-fantasma e abra de novo:
+
+```bash
+sudo umount /run/snapd/ns/firefox.mnt 2>/dev/null
+sudo rm -f /run/snapd/ns/firefox.mnt
+firefox
+```
+
+Ou `sudo systemctl restart snapd`. Aconteceu na primeira abertura de snap
+depois que a VM subiu — mesmo padrão da seção sobre a VM desligando sozinha
+("a primeira tentativa logo após ligar o PC costumava falhar").
+
+Um agravante estrutural que vale conhecer: **`/` nesta WSL está com propagação
+privada**. Num Ubuntu normal o systemd faz `mount --make-rshared /` no arranque;
+aqui só `/run`, `/dev`, `/sys` e `/proc` aparecem como `shared:`.
+
+```bash
+awk '$5=="/"{print}' /proc/self/mountinfo   # sem "shared:" = privado
+```
+
+É o tipo de coisa que deixa a preservação de namespace do `snap-confine`
+frágil e intermitente.
+
+> **O teste do binário cru não serve aqui.** O
+> `/snap/firefox/current/usr/lib/firefox/firefox` da seção anterior pula o
+> `snap-confine` inteiro, então abre normalmente mesmo com o namespace
+> quebrado. Ele diagnostica o problema de *display*, não este.
+
+**Cliquei no `.rdp` e não conectou.**
+
+Esperado. O `.rdp` sozinho só sabe conectar — quem acorda a WSL e garante o
+xrdp no ar é o `linux-desktop-up`, chamado pelo `.vbs`. Se a VM estiver
+dormindo, não há o que conectar.
+
+**Clique sempre no `.vbs`**; ele chama o `.rdp` sozinho. O ícone novo do RDP na
+Área de Trabalho é só o perfil de configuração, não um atalho de entrada.
 
 **A sessão abre e fecha na hora.** É o `/tmp/.X11-unix`: o Xorg precisa criar o
 socket `X10` ali dentro e não consegue. Confira:
@@ -845,9 +1115,12 @@ o hábito certo é editar nesta pasta e reinstalar.
 
 Uma exceção que vale conhecer: as preferências do xfwm4 vivem em
 `~/.config/xfce4/` e **não** estão neste repositório. Numa máquina nova valem os
-padrões do XFCE, e o `xfwm-atalhos.sh` recria o que importa (os `Super+setas` e
-o `Ctrl+Alt+T`). Se você tiver ajustado tema, fontes ou o comportamento do
-`Alt+Tab` à mão, copie `~/.config/xfce4/` junto.
+padrões do XFCE, e o `xfwm-atalhos.sh` recria o que importa (os `Super+setas`,
+o `Ctrl+Alt+T` e os ajustes de fluidez). Se você tiver ajustado tema, fontes ou
+o comportamento do `Alt+Tab` à mão, copie `~/.config/xfce4/` junto.
+
+O mesmo vale para o som: o `instalar-som.sh` refaz tudo — inclusive as máscaras
+do PipeWire em `~/.config/systemd/user/`, que também não estão aqui.
 
 Lembre que a WSL inteira some ao formatar: `~`, pacotes apt, snaps, tudo.
 `wsl --export Ubuntu-24.04 D:\ubuntu.tar` salva a distro completa, se preferir
