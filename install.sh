@@ -13,11 +13,18 @@ set -euo pipefail
 
 RDP_PORT=3390   # 3389 e do RDP nativo do Windows - nao dá pra usar
 
-# Profundidade de cor negociada com o mstsc. Nao ha GPU no caminho: o xrdp
-# comprime 4480x1080 em CPU a cada quadro, e 24 bits tiram 25% dos bytes que
-# ele tem que mastigar, sem diferenca visivel num desktop. Volte para 32 se
-# for trabalhar com cor critica (edicao de foto, calibracao).
-MAX_BPP=24
+# Profundidade de cor negociada com o mstsc.
+#
+# NAO baixe para 24. Ja esteve em 24 aqui, para tirar 25% dos bytes que o
+# NSCodec tinha que comprimir - fazia sentido enquanto o servidor era o xrdp
+# 0.9.24. Com o 0.10 e o GFX, 24 bits fazem o servidor RECUSAR o pipeline:
+#
+#   [WARN] client requested gfx protocol with insufficient color depth
+#
+# ...e a sessao cai de volta no NSCodec, que e justamente o que se queria
+# abandonar. O H.264 comprime muito melhor que os 25% economizados ali.
+# O "session bpp" do Linux Fullscreen.rdp tem que casar com este valor.
+MAX_BPP=32
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Precisa de root. Rode: sudo bash $0" >&2
@@ -73,6 +80,43 @@ sed -i "s/^new_cursors=true$/new_cursors=false/" /etc/xrdp/xrdp.ini
 sed -i "s/^max_bpp=.*$/max_bpp=$MAX_BPP/"        /etc/xrdp/xrdp.ini
 # xrdp precisa ler o certificado TLS gerado na instalacao
 adduser xrdp ssl-cert >/dev/null 2>&1 || true
+
+# Xwrapper: quem pode iniciar o Xorg.
+#
+# O padrao do Debian/Ubuntu e "console", que so deixa iniciar o Xorg a partir
+# de um console fisico - e a sessao do xrdp nao e um. Com "console" a sessao
+# nao sobe, e o sintoma nao acusa a causa.
+#
+# Isto NAO e configurado uma vez e esquecido: o arquivo e regenerado a cada
+# atualizacao do pacote xserver-xorg-legacy, voltando para "console" (o proprio
+# cabecalho do arquivo avisa). Aconteceu aqui em 29/07/2026, disparado por um
+# 'apt install xserver-xorg-dev'. Se um dia a sessao parar de subir depois de
+# um 'apt upgrade', olhe este arquivo primeiro.
+XWRAP=/etc/X11/Xwrapper.config
+if [ -f "$XWRAP" ]; then
+    [ -f "$XWRAP.orig" ] || cp "$XWRAP" "$XWRAP.orig"
+    sed -i 's/^allowed_users=.*$/allowed_users=anybody/' "$XWRAP"
+else
+    echo "allowed_users=anybody" > "$XWRAP"
+fi
+grep -q "^allowed_users=anybody" "$XWRAP" || echo "allowed_users=anybody" >> "$XWRAP"
+
+# GFX/H.264: threads do x264, se este xrdp for 0.10 ou mais novo.
+#
+# O gfx.toml so existe a partir do 0.10 - no 0.9.24 do Ubuntu nao ha arquivo
+# nenhum e este bloco e ignorado, de proposito. Veja "Fluidez" no README.
+#
+# O padrao e 1 thread POR TELA. Com dois monitores isso da 2 threads numa
+# maquina de 12 nucleos, o que e conservador demais para um unico usuario. O
+# manual avisa que threads demais prejudicam a qualidade, entao 2 (= 4 no
+# total aqui) fica longe do limite. Como 'tune = "zerolatency"' faz o x264
+# usar threads fatiadas dentro do quadro, isso nao acrescenta latencia.
+GFXCFG=/etc/xrdp/gfx.toml
+if [ -f "$GFXCFG" ]; then
+    [ -f "$GFXCFG.orig" ] || cp "$GFXCFG" "$GFXCFG.orig"
+    sed -i 's/^threads = 1\b/threads = 2/' "$GFXCFG"
+    echo "    gfx.toml: threads do x264 = 2 por tela"
+fi
 
 echo
 echo "==> [4/7] Instalando startwm.sh (limpa vars do WSLg, sobe o xfwm4)"

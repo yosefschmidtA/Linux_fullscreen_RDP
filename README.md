@@ -248,19 +248,61 @@ cai para o terminal se não houver tela — vale como modelo para os próximos.
 
 ## Fluidez
 
-Medido em 28/07/2026, com `glxgears` numa janela 1600x900 dentro da sessão —
-o que exercita o caminho inteiro: renderizar, capturar, comprimir e transmitir.
+O caminho até a sua tela tem **dois** gargalos independentes, e eles pedem
+correções opostas. Confundir os dois foi o erro que atrasou este trabalho.
+
+| Gargalo | Quem limita | Como se mede |
+|---|---|---|
+| **Desenhar** o quadro | `llvmpipe`, em CPU | `glxgears` |
+| **Entregar** o quadro | codec + intervalo de captura do xrdp | seus olhos |
+
+### O trabalho de 28/07/2026: atacando o desenho
+
+Medido com `glxgears` numa janela 1600x900 dentro da sessão:
 
 | Configuração | FPS |
 |---|---|
 | Original (compositing ligado, 32 bpp, `.vbs` sem perfil) | 197 |
 | Só o compositing do xfwm4 desligado | 225 |
-| **Tudo: sem compositing + 24 bpp + `.rdp` afinado** | **497** |
+| Sem compositing + 24 bpp + `.rdp` afinado | **497** |
 
-**2,5× no total.** Ressalva de método: o 24 bpp e o `.rdp` entraram juntos com
-uma sessão nova, então não dá para separar quanto foi de cada um. As primeiras
-amostras dessa última linha oscilaram entre 294 e 432 antes de estabilizar —
-sessão recém-nascida ainda tem trabalho de fundo. Só o valor de regime vale.
+2,5×. Ressalva de método: o 24 bpp e o `.rdp` entraram juntos com uma sessão
+nova, então não dá para separar quanto foi de cada um.
+
+### O trabalho de 29/07/2026: atacando a entrega — e o paradoxo
+
+Trocado o xrdp 0.9.24 pelo **0.10.6.1 compilado da fonte**, com GFX/H.264. A
+mesma medição depois:
+
+| | glxgears | Teto de entrega | Fluidez percebida |
+|---|---|---|---|
+| xrdp 0.9.24 (NSCodec) | **497 FPS** | 25 fps | pior |
+| xrdp 0.10.6.1 (GFX/H.264) | **331 FPS** | 62 fps | **muito melhor** |
+
+**O benchmark caiu 40% e a experiência melhorou.** Não é contradição: o x264
+consome CPU (medido: `xrdp` sai de 30% em repouso para 73% com a tela em
+movimento), e essa CPU sai do mesmo bolo que o `llvmpipe` usa para desenhar. O
+app desenha menos — mas o que ele desenhava a mais nunca chegava na sua tela.
+
+**A lição, para quem for afinar isto no futuro:** o `glxgears` só media o
+gargalo do *desenho*. Depois que a entrega passou a ser o limite, ele virou
+enganoso. Não otimize por ele sem olhar a tela.
+
+> **Como medir sem se enganar.** O `glxgears` imprime uma amostra a cada 5
+> segundos. Descarte **a primeira** (aquecimento) e **qualquer janela que não
+> tenha exatamente `5.0 seconds`** — quando o `timeout` mata o processo no
+> meio, a última amostra sai truncada e com FPS artificialmente baixo. Incluí-la
+> na média já produziu aqui uma conclusão errada (parecia que um ajuste não
+> tinha surtido efeito, quando tinha dado 11%).
+>
+> ```bash
+> DISPLAY=:10 timeout 32 glxgears -geometry 1600x900+100+100 > g.txt 2>&1
+> grep "frames in" g.txt | awk '$4=="5.0"' | tail -n +2 \
+>   | awk '{s+=$(NF-1);n++} END{printf "%.1f FPS (%d amostras)\n", s/n, n}'
+> ```
+>
+> E olhe a **dispersão**, não só a média: foi ela que revelou o efeito real do
+> `threads` do x264.
 
 ### Por que este caminho é lento
 
@@ -276,50 +318,89 @@ Não há GPU em nenhum ponto do lado Linux. O Xorg desta sessão roda com o
 driver **`xrdpdev`**, que é virtual: desenha em memória e entrega pixels. São
 4480x1080 por quadro, comprimidos por CPU.
 
-### O gargalo real: o codec negociado
-
-Confira o que o seu cliente e o servidor combinaram:
+### O codec: como saber o que está valendo
 
 ```bash
-grep -i codec /var/log/xrdp.log | tail -5
+sudo grep -iE "gfx|h264|codec" /var/log/xrdp.log | tail -10
 ```
 
-Aqui aparece isto, e é o achado mais importante desta seção:
+**Saudável** (0.10 com GFX):
 
 ```
-xrdp_caps_process_codecs: nscodec, codec id 1, properties len 3
+xrdp_mm_egfx_caps_advertise: ... monitorCount 2
+xrdp_mm_egfx_create_surfaces: map surface_id 0 ... width 1920 height 1080
+xrdp_encoder_create: starting h264 codec session gfx
+xrdp_encoder_create: using x264 for software encoder
+xrdp_mm_egfx_caps_advertise: egfx created.
+```
+
+**Degradado** (era assim no 0.9.24):
+
+```
+xrdp_caps_process_codecs: nscodec, codec id 1
 xrdp_caps_process_codecs: unknown codec id 5
 ```
 
-**NSCodec** é o codec legado, o mais fraco disponível. E o `unknown codec id 5`
-é o mstsc oferecendo o pipeline **GFX** (RDP 8+), que o xrdp 0.9.24 não sabe o
-que é. O cliente pede o codec bom, o servidor não entende, e a negociação cai
-para o pior.
+O `unknown codec id 5` era o mstsc oferecendo GFX e o 0.9.24 não sabendo o que
+era. O 0.10 identifica: `Image RemoteFX(2744CCD4-9D8A-4E74-803C-0ECBEEA19C54)`.
 
-O irônico é que este xrdp **foi compilado com RemoteFX** e não o usa:
+### O intervalo de captura — o teto real
 
-```bash
-strings /usr/sbin/xrdp | grep -E "enable-rfxcodec|rfx_encode set to"
+Só existe no 0.10 (`/etc/xrdp/xrdp.ini`):
+
+```ini
+h264_frame_interval=16      # ~62 quadros/s
+rfx_frame_interval=32       # ~31
+normal_frame_interval=40    # 25   <- o caminho do 0.9.24
 ```
 
-Ou seja, parte da lentidão não é limite da arquitetura — é negociação
-malsucedida. A correção seria o **xrdp 0.10**, cujas notas de versão dizem que
-o GFX entrega *"more frame rates and less bandwidth"*, com ganho maior ainda
-"especially if the client is Windows 11's mstsc.exe". Não há PPA utilizável
-(o único que existe publica 0.9.4 para o xenial); seria compilar `xrdp` e
-`xorgxrdp` da fonte, com as versões casadas. Fica registrado como o próximo
-passo, não feito. E não espere GPU: as mesmas notas dizem que
-*"hardware-accelerated encoding are not supported in this version yet"*.
+É por isso que o 0.9.24 não passava de 25 fps na tela por mais que o
+`glxgears` marcasse 497. O 0.9.24 **não tem esse ajuste**: nem no binário, nem
+no `.ini`, nem no manual.
+
+### Armadilha: `max_bpp=24` quebra o GFX
+
+Estivemos com `max_bpp=24` para aliviar o NSCodec. Com o 0.10 isso faz o
+servidor **recusar** o pipeline:
+
+```
+[WARN] client requested gfx protocol with insufficient color depth
+```
+
+...e a sessão cai de volta no NSCodec — justamente o que se queria abandonar.
+**Precisa ser 32 nos dois lados**: `max_bpp` no `xrdp.ini` e `session bpp` no
+`Linux Fullscreen.rdp`. O H.264 comprime muito mais do que os 25% que o 24 bits
+economizava.
 
 ### O que foi aplicado
 
 - `use_compositing=false` — o compositor recompõe regiões grandes a cada
   movimento, e aqui não há GPU para absorver. Custa sombra e transparência.
 - `box_move=true` e `box_resize=true` — arrasta o contorno, não o conteúdo.
-- `max_bpp=24` no `xrdp.ini` — 25% menos bytes por quadro.
+- `max_bpp=32` no `xrdp.ini` — **não baixe**, veja a armadilha acima.
 - `windows/Linux Fullscreen.rdp` — conexão tipo LAN, sem detecção automática
   de banda e sem compressão do cliente. Num loopback essas heurísticas só
   custam CPU, que é justamente o recurso escasso aqui.
+- `gfx.toml` — `threads = 2` por tela (o padrão é 1). São 4 threads numa
+  máquina de 12 núcleos; o manual avisa que threads demais prejudicam a
+  qualidade, e `tune = "zerolatency"` faz o x264 usar threads fatiadas dentro
+  do quadro, que não acrescentam latência.
+
+  **Medido, e não era o que se esperava.** O palpite era que não faria
+  diferença, já que o encoder usava só 73% de *um* núcleo — sobrava CPU. Mas:
+
+  | | `threads = 1` | `threads = 2` |
+  |---|---|---|
+  | glxgears, média | 297 FPS | **331 FPS** |
+  | amplitude entre amostras | 255→328 = **73 FPS** | 327→334 = **7 FPS** |
+
+  O ganho de 11% na média é secundário; o que importa é a **dispersão caindo
+  dez vezes**. O problema nunca foi falta de capacidade total, era
+  irregularidade: com uma thread, codificar um quadro de 2560x1080 toma um
+  bloco longo de CPU, e cada bloco desses tira o `llvmpipe` do ar em rajadas.
+  Com duas, cada codificação termina mais rápido e mais uniforme.
+
+  Para a sensação de fluidez, regularidade vale mais que média.
 
 Os três primeiros vivem no `xfwm-atalhos.sh`, que o `startwm.sh` reaplica 4
 segundos após cada login — então voltam sozinhos a cada sessão.
@@ -329,6 +410,27 @@ Para ter sombra e transparência de volta:
 ```bash
 xfconf-query -c xfwm4 -p /general/use_compositing -s true
 ```
+
+O `gfx.toml` é relido **a cada conexão nova** — para testar um ajuste ali,
+basta fechar o mstsc e reabrir pelo `.vbs`. Não precisa derrubar a sessão.
+
+### Armadilha: `Xwrapper.config` volta sozinho
+
+O Xorg só pode ser iniciado por quem o `/etc/X11/Xwrapper.config` permitir, e
+o padrão do Debian/Ubuntu é `allowed_users=console` — que **não** inclui uma
+sessão xrdp. Com ele, a sessão não sobe.
+
+O problema é que isso não fica resolvido: o arquivo é **regenerado a cada
+atualização do pacote `xserver-xorg-legacy`**, voltando para `console` (o
+próprio cabeçalho do arquivo avisa). Aconteceu aqui em 29/07/2026, disparado
+por um `apt install xserver-xorg-dev` durante a compilação do xorgxrdp.
+
+```bash
+grep allowed_users /etc/X11/Xwrapper.config    # tem que ser "anybody"
+```
+
+O `install.sh` força `anybody`, mas se a sessão parar de subir logo depois de
+um `apt upgrade`, este é o primeiro arquivo a conferir.
 
 ## A GPU: o que dá e o que não dá
 
@@ -453,13 +555,19 @@ Trabalho: o `.vbs` é o que se clica, e o `.rdp` ao lado é o perfil de conexão
 que ele usa (fullscreen multimonitor + os ajustes de fluidez). Sem o `.rdp` o
 `.vbs` ainda conecta, mas cai nas opções padrão do mstsc.
 
-Três scripts **não** são instalados — rodam quando você quiser:
+Quatro scripts **não** são instalados — rodam quando você quiser:
 
 | Script | Para quê |
 |---|---|
 | `xfwm-atalhos.sh` | põe os `Super+setas`, conserta o `Ctrl+Alt+T` e aplica os ajustes de fluidez. Rodar uma vez após instalar — mas o `startwm.sh` já o reaplica a cada login. |
 | `instalar-som.sh` | compila o `pulseaudio-module-xrdp` (veja "Som"). Precisa de `sudo` e leva alguns minutos. |
+| `instalar-xrdp010.sh` | troca o xrdp da distribuição pelo **0.10 compilado**, com GFX/H.264 (veja "Fluidez"). O passo mais arriscado — leia "O caminho de volta" antes. |
 | `diag-super-direita.sh` | descobre se um atalho com a tecla Windows está sendo engolido pelo Windows antes de chegar na sessão. |
+
+> **O `install.sh` sozinho instala o xrdp 0.9.24 do Ubuntu**, não o 0.10. Numa
+> máquina nova, a ordem é `install.sh` → `instalar-som.sh` → `instalar-xrdp010.sh`.
+> O último chama o `install.sh` de novo por dentro, porque o `make install` do
+> xrdp sobrescreve o `xrdp.ini` e o `startwm.sh`.
 
 Há ainda uma alteração do lado Windows, feita pelo passo 7 do `install.sh`:
 `guiApplications=false` em `C:\Users\<você>\.wslconfig` (veja acima). É o único
