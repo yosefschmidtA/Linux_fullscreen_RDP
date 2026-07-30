@@ -708,6 +708,146 @@ pgrep -ax pulseaudio      # tem que estar rodando
 grep audiomode "Linux Fullscreen.rdp"
 ```
 
+### Os estalinhos: era falta de prioridade, não driver
+
+**Medido em 30/07/2026.** Som picado, com estalos que apareciam **quando um vídeo
+estava tocando**. A tentação é trocar de driver; não era driver nenhum.
+
+```
+Max realtime priority     0        <- em /proc/<pulseaudio>/limits
+SCHED_OTHER, nice 0                <- chrt -p e /proc/<pid>/stat
+default-fragments = 4 x 25 ms      <- 100 ms de buffer, o padrão
+```
+
+O `daemon.conf` do PulseAudio pede `realtime-scheduling = yes` e
+`nice-level = -11` por padrão, e **as duas coisas falhavam em silêncio**:
+`RLIMIT_RTPRIO` valia 0, então ele rodava como processo comum, em nice 0, com
+100 ms de folga — disputando CPU com o x264 do xrdp, que a seção "Fluidez" mediu
+subindo a **73%** quando a tela se move.
+
+Aí está o encaixe com o sintoma: **vídeo tocando é exatamente o pior momento.**
+O encoder trabalha mais justo quando há mais áudio a entregar; o PulseAudio
+perde o prazo, e o *underrun* sai como estalo. Não é ruído analógico — não há
+placa de som nesta VM para ter ruído. É buraco no fluxo.
+
+Duas correções, e as duas são necessárias:
+
+| Onde | O quê | Por quê |
+|---|---|---|
+| `/etc/pulse/daemon.conf` | `default-fragments = 4`<br>`default-fragment-size-msec = 50` | 200 ms de buffer em vez de 100 |
+| `/etc/security/limits.d/95-pulseaudio-xrdp.conf` | `@audio - rtprio 9`<br>`@audio - nice -11` | faz o `realtime-scheduling` do PulseAudio parar de falhar calado |
+
+O detalhe do buffer que vale entender: são **fragmentos maiores**, não mais
+fragmentos. O dobro de folga contra atraso de escalonamento pela **metade** dos
+despertares — ganha nos dois eixos ao mesmo tempo, e num ambiente onde CPU é o
+recurso escasso isso importa mais que o número final.
+
+O `limits.d` é aplicado pelo **PAM, no login**, então só vale a partir da
+próxima sessão. Confirme que pegou:
+
+```bash
+grep 'realtime priority' /proc/$(pgrep -x pulseaudio)/limits   # tem que ser 9
+chrt -p $(pgrep -x pulseaudio)
+```
+
+Se ainda estalar com a prioridade valendo, o próximo passo é aceitar mais
+latência (`default-fragment-size-msec = 80`), não trocar de driver — a taxa de
+44100 Hz e o reamostrar de 48 kHz do navegador são limpos e não fazem estalo.
+
+### Microfone
+
+**Já funciona, e não precisou de nada no lado Linux.** O
+`pulseaudio-module-xrdp` instala os **dois** módulos, e o `xrdp-source` já estava
+carregado e como source padrão:
+
+```bash
+pactl list sources short     # xrdp-source tem que aparecer
+```
+
+O que faltava era **uma linha no `.rdp`**: o cliente não estava oferecendo o
+canal de entrada.
+
+```ini
+audiocapturemode:i:1      # era 0 — "não gravar"
+```
+
+Mesmo par de armadilhas do `audiomode`: por mais correto que esteja o lado
+Linux, com `:0` o mstsc não abre o canal e não existe microfone nenhum para o
+Firefox enxergar.
+
+> **Mexer no `.rdp` invalida a assinatura.** Depois de editar, re-assine — é o
+> mesmo caminho que o `jogo-windows` usa a cada partida, e roda de dentro da
+> sessão:
+>
+> ```bash
+> TP=$(tr -d ' \r\n' < /mnt/c/Users/<você>/AppData/Local/linux-fullscreen/thumbprint.txt)
+> cd /tmp && /mnt/c/Windows/System32/rdpsign.exe /sha256 "$TP" \
+>     "C:\Users\<você>\Desktop\Linux Fullscreen.rdp"
+> ```
+
+> **O `.rdp` da Área de Trabalho é UTF-16LE, não ASCII.** O do repositório é
+> texto comum, mas o mstsc reescreve o dele em UTF-16 ao salvar — e aí `sed` e
+> `grep` com padrão ASCII **não casam e não avisam**: o `sed -i` roda, devolve
+> sucesso e não muda nada. Editar aquele arquivo se faz por bytes:
+>
+> ```python
+> b = open(f, "rb").read()
+> b = b.replace("audiocapturemode:i:0".encode("utf-16-le"),
+>               "audiocapturemode:i:1".encode("utf-16-le"))
+> ```
+
+### Webcam: não pelo RDP — mas há um caminho
+
+Duas coisas separadas, e confundi-las leva a procurar configuração que não
+existe.
+
+**1. Pelo RDP, não dá.** O redirecionamento de câmera do Windows é o
+MS-RDPECAM, e **o xrdp não implementa esse canal.** Não é opção desligada; o
+código não está lá. O que o chansrv implementa:
+
+```bash
+strings /usr/sbin/xrdp-chansrv | grep -oE '^(rdpsnd|cliprdr|rdpdr|rail)$' | sort -u
+#   cliprdr   rdpdr   rail   rdpsnd      <- e nada de camera
+```
+
+Por isso `camerastoredirect:s:*` no `.rdp` não produz efeito nenhum aqui,
+diferente do que produziria contra um Windows do outro lado.
+
+**2. Por USB, dá — e o kernel desta WSL já tem tudo.** Verificado em
+30/07/2026, no kernel `6.18.33.2-microsoft-standard-WSL2`:
+
+```bash
+ls /lib/modules/$(uname -r)/kernel/drivers/usb/usbip/   # usbip-core, usbip-host, vhci-hcd
+ls /lib/modules/$(uname -r)/kernel/drivers/media/usb/uvc/   # uvcvideo.ko
+```
+
+Isso é novidade que vale registrar: kernels antigos da WSL **não** traziam
+`uvcvideo`, e a resposta corrente na internet ainda é "precisa compilar kernel
+próprio". Aqui não precisa.
+
+Falta a metade Windows — o `usbipd-win`, que **não está instalado**:
+
+```powershell
+winget install usbipd            # uma vez, PowerShell administrador
+usbipd list                      # ache o BUSID da camera
+usbipd bind   --busid <BUSID>    # administrador, uma vez por dispositivo
+usbipd attach --wsl --busid <BUSID>
+```
+
+Depois, do lado Linux, `/dev/video0` aparece e o Firefox passa a ver a câmera.
+
+**O preço, que decide se vale:** enquanto anexada, a câmera é **exclusiva da
+WSL** — o Windows perde o acesso. E o `attach` se desfaz a cada
+`wsl --shutdown`, então é um comando por sessão de uso.
+
+> **Para Google Meet, a recomendação é o navegador do Windows.** É o mesmo
+> raciocínio da seção "Jogar no Windows cedendo um monitor": a câmera e o
+> microfone pertencem ao Windows, e trazê-los para dentro só para a imagem
+> voltar comprimida pelo x264 paga dois encodes em série. `Ctrl+Alt+Break`
+> devolve o Windows com a sessão Linux intacta por trás. O caminho USB acima
+> existe para quando a chamada **tem** que acontecer dentro do Linux — um
+> `v4l2` que você está programando, por exemplo.
+
 ## Jogar no Windows cedendo um monitor
 
 O jogo continua sendo do Windows — a seção "Jogos: não" não mudou. O que muda é

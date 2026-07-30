@@ -30,13 +30,13 @@ REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo yosef)}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "==> [1/5] Pacotes de build"
+echo "==> [1/6] Pacotes de build"
 export DEBIAN_FRONTEND=noninteractive
 apt-get install -y -qq build-essential autoconf libtool pkg-config \
                        libpulse-dev meson ninja-build git >/dev/null
 
 echo
-echo "==> [2/5] Habilitando deb-src e baixando as fontes do PulseAudio"
+echo "==> [2/6] Habilitando deb-src e baixando as fontes do PulseAudio"
 # O Ubuntu 24.04 usa o formato deb822; o deb-src vem desligado de fabrica.
 SRCLIST=/etc/apt/sources.list.d/ubuntu.sources
 if ! grep -q "^Types: deb deb-src" "$SRCLIST"; then
@@ -54,13 +54,13 @@ PA_SRC="$(find "$WORK" -maxdepth 1 -type d -name 'pulseaudio-*' | head -1)"
 echo "    $PA_SRC"
 
 echo
-echo "==> [3/5] Configurando a arvore do PulseAudio (gera o config.h)"
+echo "==> [3/6] Configurando a arvore do PulseAudio (gera o config.h)"
 # So o 'meson setup' interessa: o modulo precisa dos cabecalhos e do config.h,
 # nao do PulseAudio compilado. O PA 16 usa meson, nao autotools.
 sudo -u "$REAL_USER" sh -c "cd '$PA_SRC' && meson setup build" >/dev/null
 
 echo
-echo "==> [4/5] Compilando o pulseaudio-module-xrdp"
+echo "==> [4/6] Compilando o pulseaudio-module-xrdp"
 sudo -u "$REAL_USER" git clone -q --depth 1 \
     https://github.com/neutrinolabs/pulseaudio-module-xrdp.git "$WORK/mod"
 sudo -u "$REAL_USER" sh -c "cd '$WORK/mod' && ./bootstrap && ./configure PULSE_DIR='$PA_SRC' && make -j\$(nproc)" >/dev/null
@@ -74,7 +74,7 @@ fi
 echo "    modulos em $MODDIR"
 
 echo
-echo "==> [5/5] Tirando o PipeWire do caminho"
+echo "==> [5/6] Tirando o PipeWire do caminho"
 # O Ubuntu 24.04 traz pipewire-pulse, que disputa o mesmo socket do PulseAudio.
 # Os modulos do xrdp sao do PulseAudio e nao carregam no PipeWire, entao aqui
 # quem tem que atender e o PulseAudio. Os units vem habilitados em escopo
@@ -83,6 +83,41 @@ sudo -u "$REAL_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" \
     systemctl --user mask pipewire.socket pipewire-pulse.socket \
                           wireplumber.service pipewire.service \
                           pipewire-pulse.service >/dev/null 2>&1 || true
+
+echo
+echo "==> [6/6] Buffer e prioridade (os estalinhos)"
+# Medido em 30/07/2026: o PulseAudio pedia realtime-scheduling e nice -11 por
+# padrao e as DUAS coisas falhavam caladas - RLIMIT_RTPRIO valia 0. Ele rodava
+# em SCHED_OTHER nice 0, com 100 ms de buffer, disputando CPU com o x264 do
+# xrdp, que sobe a 73% quando a tela se move. Video tocando e o pior momento: o
+# encoder trabalha mais justo quando ha mais audio a entregar, o PulseAudio
+# perde o prazo, e o underrun sai como estalo. Ver README, "Os estalinhos".
+if ! grep -q 'default-fragment-size-msec' /etc/pulse/daemon.conf; then
+    [ -f /etc/pulse/daemon.conf.orig ] \
+        || cp /etc/pulse/daemon.conf /etc/pulse/daemon.conf.orig
+    cat >> /etc/pulse/daemon.conf <<'EOF'
+
+### Ajustes deste projeto - veja README, "Os estalinhos".
+# 200 ms de buffer em vez dos 100 ms padrao, com fragmentos MAIORES em vez de
+# mais fragmentos: o dobro de folga contra atraso de escalonamento pela METADE
+# dos despertares. Ganha nos dois eixos, e aqui CPU e o recurso escasso.
+default-fragments = 4
+default-fragment-size-msec = 50
+EOF
+    echo "    daemon.conf: buffer de 200 ms"
+else
+    echo "    daemon.conf: ja ajustado"
+fi
+
+# Sem isto o realtime-scheduling do PulseAudio continua falhando. O PAM aplica
+# limites no LOGIN, entao so vale a partir da proxima sessao.
+cat > /etc/security/limits.d/95-pulseaudio-xrdp.conf <<'EOF'
+# Ver README, "Os estalinhos: era falta de prioridade, nao driver".
+@audio  -  rtprio  9
+@audio  -  nice    -11
+EOF
+usermod -aG audio "$REAL_USER" 2>/dev/null || true
+echo "    limits.d: rtprio 9 para o grupo audio"
 
 cat <<'FIM'
 

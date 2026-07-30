@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+# Passa o headset USB e a webcam entre o Windows e esta sessao Linux.
+#
+#   transferir-usb audio  status | alternar | linux | windows
+#   transferir-usb camera status | alternar | linux | windows
+#   transferir-usb estado                       # atualiza o cache da barra
+#
+# POR QUE ISTO EXISTE
+#
+# O sink do xrdp nao tem relogio de hardware - ele simula um, e o mstsc consome
+# no cristal real da placa do Windows. A diferenca acumula e periodicamente ha um
+# resync. Medido em 30/07/2026 com um tom de 440 Hz: a latencia do sink faz dente
+# de serra entre ~3 ms e ~48 ms num ciclo de 12-16 s, e cada queda a 3 ms e um
+# estalo. Buffer maior e prioridade de tempo real (veja instalar-som.sh) reduzem
+# a frequencia, mas NAO removem: a causa nao e falta de CPU, e deriva de relogio.
+#
+# Com o headset anexado via USB/IP o audio vira ALSA nativo, com relogio de
+# verdade, e o problema deixa de existir por construcao. O preco e que o
+# dispositivo e EXCLUSIVO: enquanto esta aqui, o Windows nao o tem.
+#
+# PRE-REQUISITO, uma vez por maquina, em PowerShell ADMINISTRADOR:
+#
+#   winget install --id dorssel.usbipd-win
+#   usbipd bind --busid <BUSID>       # um por dispositivo; veja 'usbipd list'
+#
+# O 'bind' nao tira nada do Windows, so marca como compartilhavel. O 'attach' e o
+# 'detach' que este script usa NAO precisam de administrador - foi verificado, e
+# e o que torna o botao da barra possivel (o token do interop da WSL vem
+# filtrado, entao nada elevado roda de dentro da sessao).
+set -u
+
+USBIPD="/mnt/c/Program Files/usbipd-win/usbipd.exe"
+
+# Identificados por VID:PID, nao por BUSID: o busid muda se voce trocar a porta
+# USB, e este projeto nao tem calibracao em lugar nenhum. Ache os seus com
+# 'usbipd list' e sobrescreva em ~/.config/linux-fullscreen/dispositivos.conf.
+ID_AUDIO="046d:0adf"      # G435 Wireless Gaming Headset
+ID_CAMERA="0408:403a"     # ACER HD User Facing
+
+# O lado Windows tambem casa por VID:PID, nao por nome: o Windows NAO chama o
+# headset de "G435" - para ele e "Fone de ouvido do headset (Tecnologia Intel
+# Smart Sound para audio USB)", generico e traduzido. Ver audio-padrao.ps1.
+
+CONF="$HOME/.config/linux-fullscreen/dispositivos.conf"
+[ -r "$CONF" ] && . "$CONF"
+
+PS_EXE="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+PS1_FONTE="$HOME/linux-fullscreen/windows/audio-padrao.ps1"
+MSTSC="/mnt/c/Windows/System32/mstsc.exe"
+TASKKILL="/mnt/c/Windows/System32/taskkill.exe"
+
+# ---------------------------------------------------------------------------
+# Fechar e reabrir o mstsc ao trocar o audio de lado.
+#
+# POR QUE E OBRIGATORIO. O mstsc abre stream de audio nos dispositivos padrao do
+# Windows NO MOMENTO EM QUE CONECTA - um de reproducao (para tocar o audio desta
+# sessao) e um de captura (por causa do audiocapturemode:i:1). Ele nao larga
+# esses streams quando o padrao muda depois. Medido em 30/07/2026: com o headset
+# como padrao do Windows, o mstsc o mantinha preso e o attach falhava com
+# "Device busy (exported)" mesmo depois de trocar o padrao e esperar 12 s. O
+# levantamento de quem tinha a AUDIOSES.DLL carregada apontou o mstsc.
+#
+# Reconectar resolve nas duas direcoes: ao subir de novo, o mstsc abre o
+# dispositivo que for padrao NAQUELE momento.
+#
+# E seguro por causa de uma linha do /etc/xrdp/sesman.ini - "Policy=Default",
+# que casa a sessao existente por usuario e bpp. Fechar o mstsc apenas
+# desconecta; a sessao Linux (e este script, que roda com setsid) continua de
+# pe. Se alguem puser Policy=UBD, reconectar abre um desktop novo em branco e
+# isto passa a destruir trabalho. Ver README, "Por que a sessao sobrevive".
+# ---------------------------------------------------------------------------
+perfil_rdp_windows() {
+    local up
+    up=$( cd /tmp && /mnt/c/Windows/System32/cmd.exe /c 'echo %USERPROFILE%' \
+          2>/dev/null | tr -d '\r\n' )
+    [ -n "$up" ] || return 1
+    printf '%s\\Desktop\\Linux Fullscreen.rdp' "$up"
+}
+
+# TRANSFERIR_SEM_RECONECTAR=1 desliga o vaivem do mstsc. Usado pelo
+# linux-desktop-down: ali a sessao esta acabando, e reabrir o cliente para
+# mata-lo dois segundos depois so atrasaria o desligamento.
+fechar_mstsc() {
+    [ "${TRANSFERIR_SEM_RECONECTAR:-0}" = 1 ] && return 0
+    ( cd /tmp && "$TASKKILL" /IM mstsc.exe /F ) >/dev/null 2>&1
+    sleep 2
+}
+
+abrir_mstsc() {
+    [ "${TRANSFERIR_SEM_RECONECTAR:-0}" = 1 ] && return 0
+    local perfil
+    perfil=$(perfil_rdp_windows) || { msg "aviso: nao achei o perfil .rdp"; return 1; }
+
+    # setsid --fork, e nao o "( cmd & )" de sempre. Medido em 30/07/2026: com
+    # "( setsid mstsc ... & )" o bash ficava preso em do_wait esperando o
+    # processo de interop do mstsc - que so morre quando VOCE fecha a janela.
+    # O script nunca retornava, e o clique na barra deixava um bash pendurado
+    # para sempre. O --fork faz o setsid bifurcar e sair na hora, entao nao
+    # sobra filho para esperar. O </dev/null completa o desligamento.
+    ( cd /tmp && setsid --fork "$MSTSC" "$perfil" </dev/null >/dev/null 2>&1 )
+    sleep 1
+}
+
+# O Windows nao le direito de dentro do \\wsl$, entao o .ps1 e copiado para o
+# LOCALAPPDATA e chamado por caminho nativo. Descobrimos o caminho perguntando ao
+# cmd em vez de chumbar /mnt/c/Users/<nome>: o usuario do Windows nao e
+# necessariamente o mesmo do Linux.
+ps1_windows() {
+    local base_w base_l
+    base_w=$( cd /tmp && /mnt/c/Windows/System32/cmd.exe /c 'echo %LOCALAPPDATA%' \
+              2>/dev/null | tr -d '\r\n' )
+    [ -n "$base_w" ] || return 1
+    base_l=$(wslpath -u "$base_w" 2>/dev/null) || return 1
+
+    mkdir -p "$base_l/linux-fullscreen" 2>/dev/null
+    # copia so se a origem for mais nova, para nao pagar I/O de /mnt/c a cada clique
+    if [ -r "$PS1_FONTE" ] && \
+       [ ! -f "$base_l/linux-fullscreen/audio-padrao.ps1" -o \
+         "$PS1_FONTE" -nt "$base_l/linux-fullscreen/audio-padrao.ps1" ]; then
+        cp "$PS1_FONTE" "$base_l/linux-fullscreen/" 2>/dev/null
+    fi
+    [ -f "$base_l/linux-fullscreen/audio-padrao.ps1" ] || return 1
+    printf '%s\\linux-fullscreen\\audio-padrao.ps1' "$base_w"
+}
+
+# Troca o dispositivo padrao do Windows. Sem isto o attach falha com "Device
+# busy (exported)": o servico de audio do Windows mantem o endpoint do headset
+# aberto enquanto ele for o padrao, e o usbipd nao consegue preemptar.
+audio_windows_padrao() {   # $1 = "evitar" | "restaurar"
+    local ps1 arg
+    ps1=$(ps1_windows) || { msg "aviso: audio-padrao.ps1 indisponivel"; return 1; }
+    case "$1" in
+        evitar)    arg=(-Evitar "$ID_AUDIO") ;;
+        restaurar) arg=(-Restaurar) ;;
+        *) return 1 ;;
+    esac
+    ( cd /tmp && "$PS_EXE" -NoProfile -ExecutionPolicy Bypass -File "$ps1" "${arg[@]}" ) \
+        2>&1 | sed 's/^/    win: /' >&2
+}
+
+CACHE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/transferir-usb.estado"
+
+msg() { echo "$*" >&2; }
+
+id_de() {
+    case "$1" in
+        audio)  echo "$ID_AUDIO" ;;
+        camera) echo "$ID_CAMERA" ;;
+        *)      msg "dispositivo desconhecido: $1 (use audio ou camera)"; exit 2 ;;
+    esac
+}
+
+# "linux" (anexado aqui), "windows" (disponivel la), "nao-compartilhado" (falta o
+# bind) ou "ausente" (desligado da maquina).
+estado_de() {
+    local vidpid="$1"
+    ( cd /tmp && "$USBIPD" state 2>/dev/null ) | python3 -c '
+import json, sys
+alvo = sys.argv[1].lower().replace(":", "&PID_")
+try:
+    devs = json.load(sys.stdin)["Devices"]
+except Exception:
+    print("ausente"); raise SystemExit
+for d in devs:
+    inst = (d.get("InstanceId") or "").upper()
+    if ("VID_" + alvo.upper()) not in inst:
+        continue
+    if d.get("ClientIPAddress"):
+        print("linux")
+    elif d.get("PersistedGuid") or d.get("StubInstanceId"):
+        print("windows")
+    else:
+        print("nao-compartilhado")
+    raise SystemExit
+print("ausente")
+' "$vidpid"
+}
+
+# Depois de anexar, o ALSA precisa do modulo e o PulseAudio precisa ser apontado
+# para a placa nova - nada disso acontece sozinho nesta sessao, que nao tem
+# desktop environment para reagir a dispositivo novo.
+usar_placa_usb() {
+    sudo -n modprobe snd_usb_audio 2>/dev/null || true
+    local i sink source
+    for i in 1 2 3 4 5 6 7 8; do
+        sink=$(pactl list short sinks   2>/dev/null | awk '/alsa_output/{print $2; exit}')
+        [ -n "$sink" ] && break
+        sleep 1
+    done
+    if [ -z "$sink" ]; then
+        msg "aviso: a placa USB nao apareceu no PulseAudio; o audio segue no xrdp"
+        return 1
+    fi
+    pactl set-default-sink "$sink" >/dev/null 2>&1
+    source=$(pactl list short sources 2>/dev/null | awk '/alsa_input/{print $2; exit}')
+    [ -n "$source" ] && pactl set-default-source "$source" >/dev/null 2>&1
+    # leva os fluxos que ja estavam tocando, senao so o proximo app se beneficia
+    pactl list short sink-inputs 2>/dev/null | while read -r id _; do
+        pactl move-sink-input "$id" "$sink" >/dev/null 2>&1
+    done
+    msg "audio agora em $sink"
+}
+
+voltar_para_xrdp() {
+    pactl set-default-sink   xrdp-sink   >/dev/null 2>&1
+    pactl set-default-source xrdp-source >/dev/null 2>&1
+    pactl list short sink-inputs 2>/dev/null | while read -r id _; do
+        pactl move-sink-input "$id" xrdp-sink >/dev/null 2>&1
+    done
+    msg "audio de volta no canal do xrdp"
+}
+
+LOG="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/transferir-usb.log"
+
+# Avisa na tela. Clicado na barra nao ha terminal, entao um erro escrito no
+# stderr vira silencio - e silencio faz o botao parecer quebrado. Foi
+# exatamente o que aconteceu em 30/07/2026: o attach falhava, o usbipd explicava
+# o motivo, e a saida ia toda para /dev/null.
+avisar() {
+    # %b para os \n virarem quebra de linha de verdade: o zenity nao interpreta
+    # escape nenhum e mostraria "\n" literal no meio da frase.
+    local t; t=$(printf '%b' "$1")
+    if [ -n "${DISPLAY:-}" ] && command -v zenity >/dev/null 2>&1; then
+        zenity --warning --no-wrap --title="Transferir USB" --text="$t" \
+               >/dev/null 2>&1 &
+    fi
+    msg "$t"
+}
+
+para_linux() {
+    local dev="$1" vidpid saida i; vidpid=$(id_de "$dev")
+    case "$(estado_de "$vidpid")" in
+        # Ja anexado nao significa em uso: o aparelho pode ter sido anexado por
+        # fora (ou o PulseAudio pode ter voltado ao xrdp-sink sozinho quando a
+        # placa sumiu e reapareceu). usar_placa_usb e idempotente, entao rodar de
+        # novo e o que garante que o audio esta REALMENTE saindo por ela.
+        linux)
+            msg "$dev ja esta anexado"
+            [ "$dev" = audio ] && usar_placa_usb
+            return 0 ;;
+        nao-compartilhado)
+            avisar "$dev ainda nao foi compartilhado.\n\nEm PowerShell ADMINISTRADOR, uma vez:\n    usbipd bind --hardware-id $vidpid"
+            return 1 ;;
+        ausente)
+            avisar "$dev nao esta conectado na maquina."
+            return 1 ;;
+    esac
+
+    # Tira o Windows de cima do headset ANTES de tentar, em duas frentes: o
+    # dispositivo padrao (senao o servico de audio o mantem aberto) e o mstsc
+    # (que segura os streams que abriu ao conectar). Sem as duas, o attach falha
+    # com "Device busy (exported)".
+    local fechei=nao
+    if [ "$dev" = audio ]; then
+        audio_windows_padrao evitar
+        fechar_mstsc
+        fechei=sim
+    fi
+
+    # Tres tentativas: um detentor passageiro do lado Windows (um app que acabou
+    # de fechar) solta em poucos segundos. Se nao soltar, o motivo aparece na
+    # tela em vez de nada acontecer.
+    local ok=nao
+    for i in 1 2 3; do
+        saida=$( ( cd /tmp && "$USBIPD" attach --wsl --hardware-id "$vidpid" ) 2>&1 )
+        printf '%s\n--- tentativa %s ---\n%s\n' "$(date '+%F %T')" "$i" "$saida" >> "$LOG"
+        case "$(estado_de "$vidpid")" in
+            linux) ok=sim; break ;;
+        esac
+        sleep 3
+    done
+
+    # O mstsc volta SEMPRE, deu certo ou nao. Se ficasse fechado numa falha,
+    # voce perderia a tela sem entender por que - e a mensagem de erro seria
+    # desenhada numa sessao que ninguem esta vendo.
+    [ "$fechei" = sim ] && abrir_mstsc
+
+    if [ "$ok" = sim ]; then
+        [ "$dev" = audio ] && usar_placa_usb
+        return 0
+    fi
+
+    if printf '%s' "$saida" | grep -qiE 'used by Windows|Device busy'; then
+        avisar "Nao foi possivel trazer o $dev: o WINDOWS esta usando o aparelho.\n\nNo Windows, tire-o de uso e clique de novo:\n  - Configuracoes > Som: escolha OUTRO dispositivo de saida\n  - feche o que estiver com ele aberto (Discord, navegador, jogo)\n\nDetalhes em $LOG"
+    else
+        avisar "Nao foi possivel trazer o $dev.\n\nDetalhes em $LOG"
+    fi
+    return 1
+}
+
+para_windows() {
+    local dev="$1" vidpid; vidpid=$(id_de "$dev")
+    # a ordem importa: solta o dispositivo no PulseAudio ANTES de desanexar,
+    # senao o sink desaparece debaixo de um fluxo ativo e o app perde o audio
+    [ "$dev" = audio ] && voltar_para_xrdp
+    ( cd /tmp && "$USBIPD" detach --hardware-id "$vidpid" ) >/dev/null 2>&1 \
+        || msg "aviso: detach de $dev nao confirmou"
+
+    # Devolve o headset a condicao de padrao no Windows. A ordem importa: ele
+    # precisa ter reaparecido la (o detach acima) antes de poder ser escolhido,
+    # senao o -Restaurar nao o encontra entre os dispositivos ativos.
+    if [ "$dev" = audio ]; then
+        sleep 2
+        audio_windows_padrao restaurar
+        # Reconecta tambem nesta direcao, e nao e simetria gratuita: o mstsc que
+        # esta rodando abriu o dispositivo que era padrao ANTES (o alto-falante),
+        # entao sem reconectar o audio desta sessao continuaria saindo por ele
+        # com o headset ocioso ao lado. Ao subir de novo ele pega o headset.
+        fechar_mstsc
+        abrir_mstsc
+    fi
+    return 0
+}
+
+# O cache existe para a barra nao ter que chamar o usbipd.exe a cada redesenho:
+# uma chamada de interop leva quase um segundo e travaria o desenho. Fica em
+# XDG_RUNTIME_DIR, entao morre com a sessao - o que e correto, porque um
+# 'wsl --shutdown' devolve tudo ao Windows de qualquer jeito.
+escrever_cache() {
+    printf 'audio=%s\ncamera=%s\n' \
+        "$(estado_de "$ID_AUDIO")" "$(estado_de "$ID_CAMERA")" > "$CACHE"
+}
+
+case "${1:-}" in
+    estado) escrever_cache; cat "$CACHE" ;;
+    audio|camera)
+        dev="$1"
+        case "${2:-status}" in
+            status)  estado_de "$(id_de "$dev")" ;;
+            linux)   para_linux   "$dev"; escrever_cache ;;
+            windows) para_windows "$dev"; escrever_cache ;;
+            alternar)
+                if [ "$(estado_de "$(id_de "$dev")")" = linux ]; then
+                    para_windows "$dev"
+                else
+                    para_linux "$dev"
+                fi
+                escrever_cache ;;
+            *) msg "uso: transferir-usb $dev status|alternar|linux|windows"; exit 2 ;;
+        esac ;;
+    *)
+        msg "uso: transferir-usb {audio|camera} {status|alternar|linux|windows}"
+        msg "     transferir-usb estado"
+        exit 2 ;;
+esac

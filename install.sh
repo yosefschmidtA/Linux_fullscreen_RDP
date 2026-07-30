@@ -48,10 +48,14 @@ apt-get update -qq
 # zenity: dialogo de confirmacao do linux-desktop-down (o "botao de desligar").
 # Sem ele o script cai para xmessage (x11-utils) e, sem os dois, so consegue
 # perguntar num terminal - o que nao serve para um item lancado pelo appfinder.
+# gcc/libx11-dev/libxrandr-dev sao para compilar a barra-tarefas (passo 2).
+# xfonts-base traz as fontes CORE do X: a barra usa -adobe-helvetica-11, bitmap
+# e sem antialiasing, que e o que faz o texto ficar identico ao do dialogo do
+# xrdp em vez de so parecido.
 apt-get install -y --no-install-recommends \
     xrdp xorgxrdp xfwm4 xfce4-settings exo-utils xfce4-appfinder \
     i3 xfce4-terminal dbus-x11 x11-xserver-utils fonts-dejavu-core \
-    zenity x11-utils
+    zenity x11-utils gcc libx11-dev libxrandr-dev xfonts-base
 
 echo
 echo "==> [2/7] Scripts auxiliares, servico do X11-unix e itens do menu"
@@ -59,7 +63,21 @@ install -m 755 "$SRC/fix-x11-unix"       /usr/local/bin/fix-x11-unix
 install -m 755 "$SRC/linux-desktop-up"   /usr/local/bin/linux-desktop-up
 install -m 755 "$SRC/linux-desktop-down" /usr/local/bin/linux-desktop-down
 install -m 755 "$SRC/jogo-windows"       /usr/local/bin/jogo-windows
+install -m 755 "$SRC/transferir-usb"     /usr/local/bin/transferir-usb
 install -m 644 "$SRC/x11-unix-writable.service" /etc/systemd/system/
+
+# A barra de tarefas e o unico componente compilado deste repositorio. E C com
+# Xlib cru, nao um painel de desktop environment: 2,6 MB de RSS contra os 21 MB
+# da primeira versao em Python+Tk, e o visual exige desenhar cada pixel a mao de
+# qualquer jeito - um toolkit seria peso sem uso. O startwm.sh a sobe a cada
+# login. Ver README, "A barra de tarefas".
+if gcc -O2 -Wall -o "$SRC/barra-tarefas" "$SRC/barra-tarefas.c" \
+        -lX11 -lXrandr 2>/dev/null; then
+    install -m 755 "$SRC/barra-tarefas" /usr/local/bin/barra-tarefas
+    echo "    barra-tarefas compilada e instalada"
+else
+    echo "    AVISO: barra-tarefas nao compilou; a sessao sobe sem ela"
+fi
 
 # Os .desktop sao a "interface": sem painel, quem lista aplicativos e o
 # xfce4-appfinder (Alt+F3 ou Super+R). Tudo que virar item de menu nesta

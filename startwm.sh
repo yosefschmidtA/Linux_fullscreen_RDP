@@ -157,6 +157,13 @@ exec dbus-launch --exit-with-session sh -c '
     xfsettingsd &
     xfce4-terminal &
 
+    # Barra de tarefas (relogio + desligar), no visual do dialogo do xrdp.
+    # Compilada de barra-tarefas.c pelo install.sh; se nao estiver instalada, a
+    # sessao segue sem ela. Ela mesma acha o monitor primario pelo XRandR e se
+    # reposiciona quando o layout muda (o jogo-windows encolhe a sessao), entao
+    # nao precisa de sleep aqui nem de coordenada chumbada.
+    [ -x /usr/local/bin/barra-tarefas ] && /usr/local/bin/barra-tarefas &
+
     # Som. Nao ha placa de som nesta VM (aplay -l diz "no soundcards found"):
     # o audio sai por um sink falso do PulseAudio que escreve no canal de audio
     # do xrdp, e o mstsc toca do lado do Windows. Quem faz isso e o

@@ -116,6 +116,48 @@ encerra_sessao() {
     pkill -x xfwm4 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# Devolver o headset e a webcam ao Windows antes de sair.
+#
+# Vale nos DOIS modos, e o motivo e diferente em cada um:
+#
+# - Modo sessao: a VM continua ligada, entao um dispositivo anexado via USB/IP
+#   fica preso na WSL. Voce encerra a sessao grafica e o Windows continua sem
+#   som, sem nada explicando.
+#
+# - Modo VM: o "wsl --shutdown" devolve o dispositivo sozinho, MAS nao desfaz a
+#   troca de dispositivo padrao que o transferir-usb fez no Windows para poder
+#   anexar (veja windows/audio-padrao.ps1). Sem passar por aqui, o Windows
+#   volta com o som no alto-falante do notebook e o headset ocioso - de novo,
+#   sem nada explicando. Este e o caso que engana: parece que o shutdown
+#   resolve tudo, e ele resolve metade.
+#
+# Roda ANTES do pkill de proposito: depois que o xfwm4 morre a sessao cai e nao
+# haveria mais quem chamasse o usbipd. Leva alguns segundos (o Windows precisa
+# reenumerar o USB), por isso a barra de progresso - sem ela o botao Desligar
+# parece travado.
+# ---------------------------------------------------------------------------
+devolve_usb() {
+    command -v transferir-usb >/dev/null 2>&1 || return 0
+
+    local prog=""
+    if [ -n "${DISPLAY:-}" ] && command -v zenity >/dev/null 2>&1; then
+        zenity --progress --pulsate --no-cancel --auto-close --width=340 \
+               --title="$TITULO" \
+               --text="Devolvendo audio e camera ao Windows..." \
+               >/dev/null 2>&1 &
+        prog=$!
+    fi
+
+    TRANSFERIR_SEM_RECONECTAR=1 transferir-usb audio  windows >/dev/null 2>&1
+    TRANSFERIR_SEM_RECONECTAR=1 transferir-usb camera windows >/dev/null 2>&1
+
+    [ -n "$prog" ] && kill "$prog" 2>/dev/null
+    return 0
+}
+
+devolve_usb
+
 if [ "$MODO" = sessao ]; then
     encerra_sessao
     exit 0
