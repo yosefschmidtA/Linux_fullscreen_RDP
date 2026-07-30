@@ -232,9 +232,22 @@ preparar_perfis() {
     local x="${MON_X[$i]}" y="${MON_Y[$i]}" w="${MON_W[$i]}" h="${MON_H[$i]}"
     local l=$(( x + w/4 )) t=$(( y + h/4 )) r=$(( x + 3*w/4 )) b=$(( y + 3*h/4 ))
 
-    grep -viE '^(use multimon|selectedmonitors|winposstr):' "$BASE_U" > "$dir_u/jogo.rdp"
+    # A assinatura do perfil base nao vale para este arquivo (o conteudo muda),
+    # entao ela sai junto — e e refeita logo abaixo, se houver certificado.
+    grep -viE '^(use multimon|selectedmonitors|winposstr|signscope|signature):' \
+        "$BASE_U" > "$dir_u/jogo.rdp"
     printf 'use multimon:i:0\r\nwinposstr:s:0,1,%d,%d,%d,%d\r\n' "$l" "$t" "$r" "$b" \
         >> "$dir_u/jogo.rdp"
+
+    # Sem isto o mstsc mostra o aviso de "fornecedor desconhecido" a cada
+    # partida, porque o perfil e regerado com coordenadas novas. O thumbprint
+    # vem do windows/assinar-rdp.ps1; sem ele, segue sem assinar.
+    local tp="$dir_u/thumbprint.txt"
+    if [ -f "$tp" ]; then
+        ( cd /tmp && /mnt/c/Windows/System32/rdpsign.exe /sha256 \
+            "$(tr -d ' \r\n' < "$tp")" "$JOGO_W" ) >/dev/null 2>&1 \
+            || msg "aviso: nao consegui assinar o perfil do jogo"
+    fi
 }
 
 # --- trocar de perfil ------------------------------------------------------

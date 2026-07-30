@@ -752,6 +752,116 @@ monitor", é **não partir a sessão ao meio**.
 > instante em que você clica na sessão Linux, ela sobe no z-order e engole o
 > jogo junto. É exatamente por isso que dividir os monitores precisa existir.
 
+### As duas telas que aparecem a cada troca — e como calar as duas
+
+Cada partida reconecta o mstsc duas vezes, e sem preparo cada reconexão pede
+duas coisas. **São problemas diferentes, de lados diferentes**, e confundi-los
+leva a conselho errado.
+
+> **Resolvido e verificado em 29/07/2026.** A troca de perfil hoje é silenciosa:
+> nenhuma senha, nenhum aviso. A receita completa são três peças, e as três são
+> necessárias:
+>
+> 1. `cmdkey /generic:TERMSRV/localhost` — mata a tela de login do xrdp;
+> 2. `assinar-rdp.ps1` — assina o `.rdp` (e o `jogo-windows` re-assina o perfil
+>    que gera);
+> 3. a **política `TrustedCertThumbprints`**, que só o mesmo script rodando
+>    **como administrador** grava — é ela que cala o aviso de distribuidor.
+>
+> Confirmado no registro depois de funcionar: a política está aplicada e o
+> contador de `LocalDevices` **não subiu**, prova de que o aviso é suprimido
+> antes de existir, em vez de ser consentido a cada vez.
+
+**1. A tela de login com o logo do xrdp** (`Login to <máquina>`, com o campo
+`Session: Xorg`) **não é do Windows.** Ela é desenhada *dentro* da sessão
+remota, pelo próprio xrdp. O Windows só está exibindo pixels — nunca vê aquele
+formulário, e por isso **não existe "lembrar-me" para ela**. Procurar essa opção
+no mstsc é procurar o que não pode existir.
+
+Ela aparece porque o `.rdp` não manda credencial nenhuma, então o xrdp pergunta.
+A correção é fazer o mstsc enviar usuário e senha na conexão; aí o xrdp
+autentica sozinho e nunca desenha a tela:
+
+```bash
+cd /tmp && /mnt/c/Windows/System32/cmdkey.exe /generic:TERMSRV/localhost /user:$USER /pass
+```
+
+Omitir o valor depois de `/pass` faz o `cmdkey` **perguntar** a senha (a do
+Linux, a mesma daquela tela), sem deixá-la na linha de comando nem no histórico.
+O `username:s:` no `.rdp` completa o par. Conferir com
+`cmdkey /list | grep -i termsrv`.
+
+> **Correção (29/07/2026).** Este README mandava marcar "Lembrar-me" quando o
+> mstsc perguntasse a senha. **O mstsc nunca pergunta** neste setup — sem NLA,
+> ele conecta calado e quem pergunta é o xrdp, lá dentro. O conselho não tinha
+> como funcionar.
+
+**2. O aviso de "fornecedor desconhecido"** é do Windows, e sai porque o `.rdp`
+**não tem assinatura digital** enquanto pede acesso a recursos locais (área de
+transferência, WebAuthn). Sem publicador confiável o mstsc nem oferece a caixa
+"não perguntar novamente". A correção é assinar:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Desktop\assinar-rdp.ps1"
+```
+
+O `windows/assinar-rdp.ps1` cria um certificado autoassinado, instala nos
+armazenamentos `Root` e `TrustedPublisher` **do seu usuário** (não da máquina —
+menos invasivo e dispensa UAC; há `-Maquina` se não bastar) e assina o perfil.
+Ele guarda o thumbprint em `%LOCALAPPDATA%\linux-fullscreen\thumbprint.txt`,
+porque o `jogo-windows` **re-assina o perfil que gera** a cada partida — as
+coordenadas do monitor mudam, e qualquer mudança invalida a assinatura.
+
+**Assinar não cala o aviso — troca ele por um que pode ser calado.** O vermelho
+("Cuidado: conexão remota desconhecida", sem opção nenhuma) vira o amarelo
+("Verificar o distribuidor", com o nome do certificado) e, o que importa,
+com a caixa **"Lembrar minhas opções de conexões remotas deste editor"**.
+
+Marcar essa caixa **funciona, e cola** — mas por *identidade de conexão*, não por
+publicador. A memória vive em `HKCU\Software\Microsoft\Terminal Server
+Client\LocalDevices`, com nome de GUID por identidade. Como neste setup existem
+**dois** perfis (o da Área de Trabalho e o gerado pelo `jogo-windows`), são
+**duas** marcações — uma em cada aviso, na ida e na volta. Depois disso silencia.
+
+Medido em 29/07/2026, e é o que garante que colar: **o `rdpsign` é
+determinístico.** Assinar duas vezes o mesmo conteúdo dá arquivos byte a byte
+idênticos, então o perfil do jogo mantém a mesma identidade entre partidas. O
+que gera identidade nova é **mudar de monitor** (as coordenadas entram no
+arquivo) — ou seja, uma marcação por escolha de monitor, e nada mais.
+
+**O caminho que ficou valendo aqui é o outro**, porque a marcação cobra uma por
+escolha de monitor e isso incomoda ao trocar de ambiente: rodar o
+`assinar-rdp.ps1` **como administrador**, para ele também gravar a política de
+publicador confiável:
+
+```
+HKCU\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services
+    TrustedCertThumbprints = <thumbprint SHA1 do certificado>
+    AllowSignedFiles       = 1
+```
+
+Com o thumbprint nessa lista o mstsc não pergunta mais nada, para qualquer
+perfil assinado por ele. **Exige elevação mesmo sendo `HKCU`**: a ACL de
+`HKCU\Software\Policies` nega escrita ao token comum do usuário. E não se
+consegue de dentro da sessão — o token do interop da WSL vem filtrado, sem o SID
+`S-1-5-32-544` nem como deny-only, mesmo com o usuário no grupo de
+administradores. Sem elevação o script avisa e segue; a assinatura continua
+valendo.
+
+Para desfazer a política:
+
+```powershell
+Remove-ItemProperty "HKCU:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" TrustedCertThumbprints
+```
+
+> **Este é o único passo que não roda de dentro da sessão.** Chamado pelo
+> interop da WSL, o `New-SelfSignedCertificate` falha com
+> `NTE_PROV_TYPE_NOT_DEF`: o processo nasce sem o hive de criptografia do
+> perfil (medido em 29/07/2026 — o COM instancia e o RSA do .NET funciona, mas
+> `Test-Path HKCU:\Software\Microsoft\Cryptography` responde `False`). Não é
+> defeito da máquina. `Ctrl+Alt+Break`, abra o PowerShell do Windows e rode lá,
+> uma vez só.
+
 ### Por que a sessão sobrevive à troca — e o que a quebraria
 
 Trocar de perfil é matar o mstsc e reabrir. Isso só é seguro por causa de uma
@@ -775,11 +885,6 @@ recurso junto.
 
 ### Três coisas que enganam
 
-- **Salve a senha do RDP.** Cada partida troca de perfil duas vezes; sem
-  credencial guardada, são duas senhas por jogo. Marque **"Lembrar-me"** na
-  próxima vez que o mstsc perguntar — os dois perfis apontam para o mesmo
-  `localhost:3390`, então uma credencial serve para ambos. Conferir com
-  `cmdkey /list` (procure `TERMSRV/localhost`).
 - **Os números não batem com as Configurações do Windows.** O `--listar` mostra
   o monitor de 1920x1080 como **1536x864**: são coordenadas *lógicas*, já
   divididas pela escala de 125%. Está certo, e é obrigatório — o `winposstr`
@@ -808,10 +913,17 @@ retoma o multimonitor.
 | `x11-unix-writable.service` | `/etc/systemd/system/` |
 | `i3.config` | `~/.config/i3/config` (só serve se voltar ao i3) |
 
-Do lado Windows, os dois arquivos de `windows/` vão **juntos** para a Área de
-Trabalho: o `.vbs` é o que se clica, e o `.rdp` ao lado é o perfil de conexão
-que ele usa (fullscreen multimonitor + os ajustes de fluidez). Sem o `.rdp` o
-`.vbs` ainda conecta, mas cai nas opções padrão do mstsc.
+Do lado Windows, `Linux Fullscreen.vbs` e `Linux Fullscreen.rdp` (de `windows/`)
+vão **juntos** para a Área de Trabalho: o `.vbs` é o que se clica, e o `.rdp` ao
+lado é o perfil de conexão que ele usa (fullscreen multimonitor + os ajustes de
+fluidez). Sem o `.rdp` o `.vbs` ainda conecta, mas cai nas opções padrão do
+mstsc.
+
+O terceiro arquivo de `windows/`, o `assinar-rdp.ps1`, também vai para lá, mas é
+de execução única: **um PowerShell do Windows como administrador**, uma vez por
+máquina (veja "As duas telas que aparecem a cada troca"). Não roda de dentro da
+sessão. Ele refaz tudo o que precisa do lado Windows — certificado, confiança e
+política —, então nada disso precisa ser salvo antes de formatar.
 
 Quatro scripts **não** são instalados — rodam quando você quiser:
 
