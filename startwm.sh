@@ -175,16 +175,20 @@ exec dbus-launch --exit-with-session sh -c '
         ( sleep 2; /usr/libexec/pulseaudio-module-xrdp/load_pa_modules.sh ) &
     fi
 
-    # CONTORNO, nao correcao. Alguns atalhos (aqui, o <Super>Right) nao sao
-    # capturados quando o xfwm4 os le no arranque: a configuracao fica certa,
-    # a tecla chega ao servidor X - da para provar com o diag-super-direita.sh
-    # - e o xfwm4 nao reage. Definir o mesmo atalho com a sessao ja rodando
-    # funciona sempre. Ou seja, e uma corrida na largada; a suspeita e o
-    # setxkbmap trocando o mapa do teclado no mesmo instante em que o xfwm4
-    # registra os grabs, mas isso nao foi provado.
+    # NECESSARIO, e nao mais um contorno. Ate 29/07/2026 este bloco era marcado
+    # como CONTORNO, com a suspeita de uma "corrida na largada" entre o setxkbmap
+    # e o registro dos grabs pelo xfwm4, e a nota de que seria a primeira linha a
+    # sair quando a causa real aparecesse.
     #
-    # Reaplicar 4 segundos depois resolve na pratica. Se um dia a causa real
-    # aparecer, esta e a primeira linha a sair daqui.
+    # A causa apareceu, e inverteu a conclusao: o xfwm4 guarda UMA tecla por
+    # acao, e o padrao do XFCE ja aponta <Super>KP_Left/KP_Right para as mesmas
+    # acoes que as setas querem (tile_left_key/tile_right_key). Duas teclas na
+    # mesma acao = so uma consegue o grab no X, e ganha a ULTIMA gravada. Era
+    # isso que fazia o <Super>Right nascer morto de forma intermitente, sem
+    # nenhuma corrida envolvida. Ver README, "A regra que faltava".
+    #
+    # Este bloco e o que remove a duplicata e grava as setas por ultimo - ou
+    # seja, e ele que garante o grab. Tirar daqui devolve o bug.
     if [ -r "$HOME/linux-fullscreen/xfwm-atalhos.sh" ]; then
         ( sleep 4; bash "$HOME/linux-fullscreen/xfwm-atalhos.sh" >/dev/null 2>&1 ) &
     fi

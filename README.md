@@ -120,7 +120,6 @@ sessão fullscreen. Para reverter, `guiApplications=true` e `wsl --shutdown`.
 | `Ctrl+Alt+T` | novo terminal |
 | `Alt+F3` ou `Super+R` | xfce4-appfinder (é assim que se abre programa) |
 | `Alt+F4` | fecha a janela |
-| `Alt+F10` | maximiza |
 | `Alt+Tab` | alterna janelas (inclui as minimizadas) |
 | `Super+←` / `Super+→` | meia tela na lateral |
 | `Super+↑` | maximiza (de novo, restaura) |
@@ -128,7 +127,7 @@ sessão fullscreen. Para reverter, `guiApplications=true` e `wsl --shutdown`.
 | `Super+Shift+←` / `Super+Shift+→` | manda a janela para o monitor vizinho |
 | `Super+Shift+↑` / `Super+Shift+↓` | idem, para monitor acima / abaixo |
 | `Super+D` | mostra a área de trabalho |
-| `Super+KP_*` | tiling pelo teclado numérico (padrão do XFCE, mantido) |
+| `Super+KP_8` / `KP_2` / `KP_7` / `KP_9` / `KP_1` / `KP_3` | tiling pelo teclado numérico (padrão do XFCE) |
 | `Alt+F7` / `Alt+F8` | mover / redimensionar pelo teclado |
 | arrastar até a borda | snap, como no Windows |
 | **`Ctrl+Alt+Break`** | (do RDP) sai do fullscreen, volta pro Windows |
@@ -142,6 +141,75 @@ Uma ausência real, verificada na lista de ações do xfwm4:
 
 - **`Super+↓` minimiza direto**, sem restaurar antes como faz o Windows — o
   xfwm4 não tem essa ação composta. Para trazer de volta, `Alt+Tab`.
+
+### A regra que faltava: uma tecla por ação
+
+**Medido em 29/07/2026.** É a causa real do `Super+→` morto que este projeto
+perseguiu por dias como "corrida na largada" — e ela explica de uma vez três
+coisas que pareciam desconexas.
+
+**O xfwm4 guarda um único atalho por ação interna.** Se duas teclas apontam para
+a mesma ação, só uma consegue o *passive grab* no servidor X; a outra fica muda.
+No X um grab de tecla tem **um** dono, e a segunda tentativa leva `BadAccess`.
+
+Quem ganha é a **última a ser gravada** — então o vencedor depende da ordem em
+que as propriedades são lidas, e muda de sessão para sessão. Era exatamente isso
+que imitava uma falha de arranque: configuração correta, tecla chegando ao X,
+xfwm4 sem reagir, e um `Super+←` que funcionava ao lado de um `Super+→` que não.
+Não havia corrida com o `setxkbmap`; havia colisão.
+
+A medição que fecha o caso — o padrão é perfeito:
+
+| Par de teclas | Ações | Resultado |
+|---|---|---|
+| `Super+←` / `Super+KP_4` | **as duas** `tile_left_key` | uma viva, outra muda |
+| `Super+→` / `Super+KP_6` | **as duas** `tile_right_key` | uma viva, outra muda |
+| `Super+↑` / `Super+KP_8` | `maximize_window` vs `tile_up` | **as duas vivas** |
+| `Super+↓` / `Super+KP_2` | `hide_window` vs `tile_down` | **as duas vivas** |
+
+Só colidem os pares que compartilham a ação. E o teste que **falsifica** a
+hipótese, se alguém duvidar: regravar o `<Super>KP_Right` mata o `Super+→` na
+hora, e regravar o `<Super>Right` o traz de volta matando o outro. Previsto e
+confirmado.
+
+**O `xfwm-atalhos.sh` agora remove as duplicatas** (`<Super>KP_Left` e
+`<Super>KP_Right`) antes de gravar as setas, o que torna o resultado
+determinístico em vez de depender de ordem. **É o preço da regra:** essas duas
+teclas do numérico deixaram de encaixar às laterais. As outras seis
+(`KP_8`, `KP_2`, `KP_7`, `KP_9`, `KP_1`, `KP_3`) apontam para ações exclusivas e
+continuam valendo.
+
+Três vítimas antigas da mesma regra, achadas junto — as três já estavam mudas,
+sem que ninguém tivesse notado:
+
+| Tecla muda | Disputava | Contra |
+|---|---|---|
+| `Alt+F10` | `maximize_window_key` | `Super+↑` |
+| `Alt+F9` | `hide_window_key` | `Super+↓` |
+| `Ctrl+Alt+D` | `show_desktop_key` | `Super+D` |
+
+O `Alt+F10` estava anunciado na tabela de atalhos acima como "maximiza" desde que
+ela existe, sem nunca ter funcionado. Saiu.
+
+**A escolha deste projeto é o `Super`** (decidida em 29/07/2026), e as três
+perdedoras foram **removidas** da configuração pelo `xfwm-atalhos.sh` — não para
+mudar comportamento, que já era esse, mas para a configuração parar de anunciar
+tecla que não funciona. Foi assim que o `Alt+F10` enganou por tanto tempo.
+
+Não há como ter os dois lados de nenhum desses pares. Para inverter qualquer um,
+troque o `desbind` pelo `bind` no `xfwm-atalhos.sh` e tire a linha do `Super`.
+
+Para auditar a qualquer momento — não deve sair nada:
+
+```bash
+xfconf-query -c xfce4-keyboard-shortcuts -p /xfwm4/custom -l -v \
+  | awk 'NF==2{print $2}' | sort | uniq -d
+```
+
+E para saber se uma tecla específica tem dono, sem depender de apertá-la, o
+método é tentar registrar o grab em cima: `BadAccess` significa que alguém é
+dono (o atalho está vivo), e sucesso significa que **ninguém** registrou — a
+tecla está morta. Foi assim que este diagnóstico saiu do palpite.
 
 > **Correção (28/07/2026).** Este README afirmava também que *"não existe
 > atalho para mandar janela ao outro monitor; o xfwm4 não tem nenhuma ação de
@@ -1347,11 +1415,23 @@ Para refazer essa medição a qualquer momento:
 bash ~/linux-fullscreen/diag-super-direita.sh
 ```
 
+> **Encerrado em 29/07/2026: não era corrida na largada.** A causa real é que o
+> xfwm4 **guarda uma tecla por ação**, e havia duas apontando para
+> `tile_right_key` (`<Super>Right` e o `<Super>KP_Right` do padrão do XFCE). Só
+> uma consegue o grab, e a vencedora é a última gravada — daí a intermitência.
+> Medido, previsto e confirmado por falsificação; veja **"A regra que faltava:
+> uma tecla por ação"**, na seção "Atalhos". O `xfwm-atalhos.sh` já remove a
+> duplicata, e o sintoma não tem mais como voltar por esse caminho.
+>
+> As duas explicações abaixo ficam registradas porque descrevem mecanismos
+> **reais** — só não eram *esta* falha. O grab órfão do `xfsettingsd` continua
+> valendo se você puser a mesma tecla em `/commands/custom/` e `/xfwm4/custom/`.
+
 **Sobre a "corrida na largada".** A versão anterior deste README suspeitava do
 `setxkbmap` trocando o mapa do teclado enquanto o xfwm4 registrava os grabs.
-Isso continua **não provado**, e agora se sabe que boa parte do sintoma era o
-grab órfão descrito acima — que sobrevive a qualquer reaplicação de atalho e
-por isso imitava perfeitamente uma falha de arranque.
+Isso nunca foi provado, e hoje se sabe que era desnecessário: a colisão de ação
+explica o sintoma inteiro, inclusive a assimetria entre `Super+←` e `Super+→`,
+que nenhuma corrida explicaria bem.
 
 Um agravante real foi removido: o `~/.bashrc` rodava `setxkbmap` **a cada shell
 novo**, não só no arranque. Cada terminal aberto trocava o mapa de teclado da
@@ -1360,22 +1440,23 @@ está comentada — quem aplica o layout é o `startwm.sh`, uma vez por sessão,
 xrdp já carrega `br(abnt2)` a cada conexão (vindo do `keylayout 0x00000416` que
 o mstsc envia).
 
-**Placar de sessões novas** (para decidir quando remover o contorno):
+**Placar de sessões novas:**
 
 | Data | `Super+→` no arranque | Observação |
 |---|---|---|
 | 28/07/2026 | **funcionou** | 1ª sessão após corrigir o grab órfão e o `.bashrc`; nenhuma intervenção manual |
+| 29/07/2026 | **falhou** | e foi essa falha que levou à causa real — a colisão de ação |
 
-O `startwm.sh` ainda reaplica os atalhos 4 segundos depois que a sessão sobe.
-Mantido por ora: com o `.bashrc` corrigido, é possível que não seja mais
-necessário, mas uma sessão só não decide — o bug antigo era **intermitente**, e
-é exatamente assim que um contorno desnecessário se disfarça de indispensável.
-Anote as próximas aqui; com uma sequência de acertos, apague o bloco marcado
-como CONTORNO no `startwm.sh` e confirme que continua nascendo funcionando.
-Se ficar comprovado que o `Super+→` nasce funcionando, aquele bloco é o
-primeiro a sair. O efeito colateral a conhecer é que qualquer atalho que você
-mudar à mão nesses quatro (`Super+setas`) é sobrescrito a cada login — para
-mudar de verdade, edite o `xfwm-atalhos.sh`.
+O `startwm.sh` reaplica os atalhos 4 segundos depois que a sessão sobe. Esse
+bloco era marcado como CONTORNO e como "o primeiro a sair quando a causa real
+aparecer". **A causa apareceu, e a conclusão se inverteu: agora ele deve ficar** —
+não como contorno, mas porque é ele que remove a duplicata do teclado numérico e
+grava as setas **por último**, que é o que garante o grab. Sem ele, o vencedor
+volta a depender da ordem do XML.
+
+O efeito colateral a conhecer é que qualquer atalho que você mudar à mão nesses
+quatro (`Super+setas`) é sobrescrito a cada login — para mudar de verdade, edite
+o `xfwm-atalhos.sh`.
 
 **Só um monitor aparece.** O `/multimon` só vale na hora de conectar —
 monitor plugado depois não entra. Reconecte.

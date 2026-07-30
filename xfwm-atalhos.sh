@@ -33,6 +33,47 @@ bind() {   # bind <atalho> <acao>
     echo "  $1  ->  $2"
 }
 
+desbind() {   # desbind <atalho>   - tira a tecla da acao, liberando o slot
+    xfconf-query -c "$CH" -p "/xfwm4/custom/$1" -r 2>/dev/null \
+        && echo "  $1  ->  (removido)"
+}
+
+# UMA TECLA POR ACAO. Medido em 29/07/2026, e e a causa do <Super>Right morto
+# que este projeto perseguiu como "corrida na largada" durante dias.
+#
+# O xfwm4 guarda UM atalho por acao interna. Se duas teclas apontam para a mesma
+# acao, so uma consegue o passive grab no servidor X - e a outra fica muda. Quem
+# ganha e a ULTIMA a ser gravada, o que faz o vencedor depender da ordem do XML
+# e mudar de sessao para sessao. Era isso que imitava uma falha de arranque.
+#
+# O padrao do XFCE poe tile_left_key/tile_right_key no teclado numerico
+# (<Super>KP_Left / <Super>KP_Right). Como as setas abaixo querem as MESMAS duas
+# acoes, os dois pares colidem, e por isso as duplicatas saem antes.
+#
+# Como conferir (grab de tecla tem um dono; tentar registrar em cima da
+# BadAccess). Sem duplicata, os quatro tem que dar BadAccess:
+#
+#   xfconf-query -c xfce4-keyboard-shortcuts -p /xfwm4/custom -l -v \
+#       | awk 'NF==2{print $2}' | sort | uniq -d   # nao deve sair nada
+#
+# KP_Up e KP_Down NAO colidem e por isso ficam: apontam para tile_up_key e
+# tile_down_key, enquanto as setas de cima e de baixo vao para maximize e
+# hide - acoes diferentes, slots diferentes. Idem KP_Home/End/Next/Page_Up.
+desbind '<Super>KP_Left'
+desbind '<Super>KP_Right'
+
+# Os tres abaixo perdiam a disputa para as teclas Super e por isso JA ESTAVAM
+# mudos - removidos para a configuracao parar de anunciar tecla que nao funciona.
+# A escolha aqui e Super, decidida em 29/07/2026; para inverter qualquer uma,
+# troque o desbind pelo bind correspondente e tire a linha do Super.
+#
+#   <Alt>F10        vs <Super>Up    -> maximize_window_key
+#   <Alt>F9         vs <Super>Down  -> hide_window_key
+#   <Primary><Alt>d vs <Super>d     -> show_desktop_key
+desbind '<Alt>F10'
+desbind '<Alt>F9'
+desbind '<Primary><Alt>d'
+
 echo "== atalhos de janela =="
 # Meia tela nas laterais, como no GNOME e no Windows.
 bind '<Super>Left'  tile_left_key
@@ -176,6 +217,8 @@ echo
 echo "Pronto. Os atalhos valem na hora, sem reiniciar a sessao."
 echo "O VS Code e o Firefox precisam ser FECHADOS e reabertos para a"
 echo "configuracao de GPU valer - reiniciar a sessao nao e necessario."
-echo "Os do teclado numerico (Super+KP_*) continuam funcionando em paralelo."
+echo "Do teclado numerico, KP_Up/KP_Down/KP_Home/KP_End/KP_Next/KP_Page_Up"
+echo "continuam valendo; KP_Left e KP_Right foram REMOVIDOS de proposito -"
+echo "colidiam com Super+Left/Right na mesma acao e uma das duas ficava muda."
 echo "Para ter sombra/transparencia de volta:"
 echo "  xfconf-query -c xfwm4 -p /general/use_compositing -s true"
