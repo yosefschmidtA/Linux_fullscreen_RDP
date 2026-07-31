@@ -514,6 +514,61 @@ velha.
 > é por **posição**: o monitor que contém a origem `(0,0)` — o mesmo critério
 > que o `jogo-windows` usa para numerar monitores.
 
+### As janelas param em cima dela: `_NET_WM_STRUT_PARTIAL` (31/07/2026)
+
+Até aqui a barra **tapava** o que estivesse embaixo: uma janela maximizada ia
+até o fim da tela e perdia os 28px de baixo atrás da barra. O conserto não é
+mexer nas janelas — é fazer o xfwm4 saber que aquela faixa não existe.
+
+**A troca que destravou tudo: deixar de ser `override_redirect`.** Essa flag diz
+ao servidor X "nenhum gerenciador de janelas toca nisto", e era o que dava
+posição exata e ausência de moldura. O preço escondido é que o xfwm4 **não
+enxergava a barra de forma alguma**, e quem calcula o tamanho de uma janela
+maximizada é ele. Janela não gerenciada não tem *strut*: a propriedade fica lá,
+o WM nunca lê, e o efeito some sem nenhum erro.
+
+Então a barra virou uma janela comum, com dois anúncios EWMH postos **antes do
+`XMapWindow`** (o WM lê tudo no instante em que adota a janela):
+
+| Propriedade | O que ela compra |
+|---|---|
+| `_NET_WM_WINDOW_TYPE_DOCK` | sem moldura, sem foco de teclado, sempre acima, fora do `Alt+Tab` — devolve de graça tudo o que o `override_redirect` dava |
+| `_NET_WM_STRUT_PARTIAL` | "reserve 28px na borda de baixo". O xfwm4 subtrai do `_NET_WORKAREA` e a maximização passa a respeitar sozinha |
+
+**O strut é medido da borda da TELA, não do monitor.** Com dois monitores lado a
+lado a tela X é a caixa que envolve os dois, então o valor certo é
+`altura_da_tela - (monitor_y + monitor_altura) + ALTURA`. Dá exatamente `ALTURA`
+quando o monitor da barra encosta no fundo, e compensa a diferença quando ele é
+mais baixo que o vizinho. Como o strut é recalculado dentro de `reposicionar()`,
+ele acompanha o `jogo-windows` encolhendo a sessão.
+
+Medido em 31/07/2026, tela `4480x1080`, barra no monitor da esquerda
+(`rdp1 2560x1080+0+0`):
+
+```
+antes:  _NET_WORKAREA = 0, 0, 4480, 1080
+depois: _NET_WORKAREA = 0, 0, 4480, 1052        <- 28px reservados
+
+maximizar no monitor DA barra:    y=24  h=1028  -> termina em 1052, encosta nela
+maximizar no monitor DE FORA:     y=0   h=1080  -> intacto
+```
+
+O segundo monitor ficar intacto é o efeito dos campos `bottom_start_x`/
+`bottom_end_x`, que limitam o strut ao trecho horizontal onde a barra está. Sem
+eles o monitor da direita perderia 28px por nada.
+
+> Conferido no mesmo dia que a barra **não rouba o foco**: `XGetInputFocus`
+> continua apontando para o navegador depois que ela sobe. O `input = False` do
+> `XSetWMHints` mais o tipo `DOCK` bastam. O `_NET_WM_STATE_FOCUSED` que aparece
+> no `xprop` da barra é resíduo do momento do mapa — o `_NET_ACTIVE_WINDOW` da
+> raiz nunca aponta para ela.
+
+> **Não medido:** o `startwm.sh` sobe a barra **antes** do `xfwm4`, então quem a
+> adota é a varredura de janelas já mapeadas que o xfwm4 faz no arranque, e não
+> o caminho normal de `MapRequest`. O teste acima foi feito com o xfwm4 já
+> rodando. A varredura lê as mesmas propriedades, mas isso só se confirma num
+> login completo.
+
 ## Fluidez
 
 O caminho até a sua tela tem **dois** gargalos independentes, e eles pedem

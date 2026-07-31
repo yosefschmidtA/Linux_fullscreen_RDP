@@ -103,6 +103,7 @@ entre eles são visíveis ao AST.
 | `cycle_hidden=true` no xfwm4 | a barra **não** tem lista de janelas; `Alt+Tab` é o único caminho de volta ao minimizar |
 | uma tecla por ação do xfwm4 | duas teclas na mesma ação = só uma pega o grab, e a vencedora é a última gravada |
 | rótulos da barra em ASCII | a fonte core está em `iso8859-1`; acento sai corrompido no `XDrawString` |
+| barra **não** é `override_redirect` | janela não gerenciada não tem strut: o xfwm4 ignora o `_NET_WM_STRUT_PARTIAL` e as janelas maximizadas voltam a passar por baixo dela, sem erro nenhum |
 | `guiApplications=false` | com o WSLg ligado, apps GTK/Qt fogem para o desktop do Windows |
 | `allowed_users=anybody` | volta para `console` a cada upgrade do `xserver-xorg-legacy` e a sessão para de subir |
 | vídeo **nunca** por USB/IP | o `vhci_hcd` satura em 0,25 MB/s e o navegador pede 18,4 — dá chuvisco. Áudio cabe (0,18), vídeo não |

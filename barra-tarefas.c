@@ -36,6 +36,7 @@
  */
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/Xatom.h>
 #include <X11/extensions/Xrandr.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,6 +85,8 @@ static void desenhar(void);
 static void levantado(int x, int y, int w, int h);
 static void gravado(int x, int y, int w, int h);
 static void primario(int *px, int *py, int *pw, int *ph);
+static void anunciar_dock(void);
+static void aplicar_strut(int bx, int my, int mh);
 static void fechar_popup(void);
 static void escolher_popup(int i);
 static void desenhar_popup(void);
@@ -719,6 +722,112 @@ static void primario(int *px, int *py, int *pw, int *ph)
     XRRFreeMonitors(m);
 }
 
+/* ---- reserva de espaco (EWMH) ------------------------------------------
+ *
+ * O PROBLEMA. Ate 31/07/2026 a barra era override_redirect: uma janela que o
+ * xfwm4 nao gerencia, nao move e nao enxerga. Isso resolvia o posicionamento
+ * exato e a ausencia de moldura, mas tinha o custo de TAPAR o que estivesse
+ * embaixo - uma janela maximizada ia ate o fim da tela e os 28px de baixo dela
+ * ficavam escondidos atras da barra.
+ *
+ * A SOLUCAO. Quem encolhe as janelas maximizadas e o gerenciador de janelas, e
+ * ele so leva em conta janelas que gerencia. Entao a barra deixou de ser
+ * override_redirect e virou uma janela COMUM com dois anuncios EWMH:
+ *
+ *   _NET_WM_WINDOW_TYPE = _NET_WM_WINDOW_TYPE_DOCK
+ *       o xfwm4 nao desenha moldura, nao poe na lista de janelas, nao dá foco
+ *       e mantem acima das janelas normais - ou seja, devolve de graca tudo o
+ *       que o override_redirect dava.
+ *
+ *   _NET_WM_STRUT_PARTIAL
+ *       "reserve N pixels na borda de baixo da tela". O xfwm4 subtrai isso do
+ *       _NET_WORKAREA, e maximizar/tile passam a parar no topo da barra
+ *       sozinhos. Nada mais no codigo precisa saber disto.
+ *
+ * O STRUT E MEDIDO DA BORDA DA TELA INTEIRA, nao do monitor. Com dois monitores
+ * lado a lado a tela X e a caixa que envolve os dois, entao o valor certo e
+ *
+ *     bottom = altura_da_tela - (monitor_y + monitor_altura) + ALTURA
+ *
+ * que dá exatamente ALTURA quando o monitor da barra encosta no fundo da tela,
+ * e compensa a diferenca quando ele e mais baixo que o vizinho. Os campos
+ * start_x/end_x limitam o strut ao trecho horizontal onde a barra esta, e e o
+ * que impede o outro monitor de perder 28px por nada.
+ *
+ * NAO volte a override_redirect sem tirar isto junto: janela nao gerenciada nao
+ * tem strut nenhum, o xfwm4 ignora a propriedade e o efeito some sem erro. */
+static void anunciar_dock(void)
+{
+    Atom tipo, dock, estado[4], cardeal[1];
+    XSizeHints  sh;
+    XWMHints    wmh;
+    XClassHint  ch;
+
+    tipo = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
+    dock = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
+    XChangeProperty(dpy, win, tipo, XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)&dock, 1);
+
+    estado[0] = XInternAtom(dpy, "_NET_WM_STATE_ABOVE", False);
+    estado[1] = XInternAtom(dpy, "_NET_WM_STATE_STICKY", False);
+    estado[2] = XInternAtom(dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
+    estado[3] = XInternAtom(dpy, "_NET_WM_STATE_SKIP_PAGER", False);
+    XChangeProperty(dpy, win, XInternAtom(dpy, "_NET_WM_STATE", False),
+                    XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)estado, 4);
+
+    /* 0xFFFFFFFF = "todos os espacos de trabalho" */
+    cardeal[0] = 0xFFFFFFFF;
+    XChangeProperty(dpy, win, XInternAtom(dpy, "_NET_WM_DESKTOP", False),
+                    XA_CARDINAL, 32, PropModeReplace,
+                    (unsigned char *)cardeal, 1);
+
+    /* Tamanho fixo e posicao escolhida por nos: sem isto o xfwm4 se acha no
+     * direito de reposicionar a janela na primeira aparicao. */
+    memset(&sh, 0, sizeof sh);
+    sh.flags      = USPosition | USSize | PMinSize | PMaxSize;
+    sh.min_width  = sh.max_width  = LARG;
+    sh.min_height = sh.max_height = ALTURA;
+    XSetWMNormalHints(dpy, win, &sh);
+
+    /* input = False: a barra nunca aceita foco de teclado. O tipo DOCK ja
+     * bastaria no xfwm4, mas a dica e barata e vale para qualquer WM. */
+    memset(&wmh, 0, sizeof wmh);
+    wmh.flags = InputHint | StateHint;
+    wmh.input = False;
+    wmh.initial_state = NormalState;
+    XSetWMHints(dpy, win, &wmh);
+
+    ch.res_name = "barra-tarefas"; ch.res_class = "Barra-tarefas";
+    XSetClassHint(dpy, win, &ch);
+    XStoreName(dpy, win, "barra-tarefas");
+}
+
+/* bx = x da barra na tela; my/mh = topo e altura do monitor onde ela esta. */
+static void aplicar_strut(int bx, int my, int mh)
+{
+    long p[12] = {0}, s[4] = {0};
+    int  tela_h = DisplayHeight(dpy, DefaultScreen(dpy));
+    long fundo  = tela_h - (my + mh) + ALTURA;
+
+    if (fundo < 0) fundo = 0;
+
+    s[3] = fundo;                                  /* left, right, top, bottom */
+    p[3] = fundo;
+    p[10] = bx;                                    /* bottom_start_x */
+    p[11] = bx + LARG - 1;                         /* bottom_end_x   */
+
+    XChangeProperty(dpy, win,
+                    XInternAtom(dpy, "_NET_WM_STRUT_PARTIAL", False),
+                    XA_CARDINAL, 32, PropModeReplace,
+                    (unsigned char *)p, 12);
+    /* _NET_WM_STRUT e o antecessor, sem os start/end. Fica para o caso de um WM
+     * que so entenda o formato antigo; quem entende os dois usa o PARTIAL. */
+    XChangeProperty(dpy, win, XInternAtom(dpy, "_NET_WM_STRUT", False),
+                    XA_CARDINAL, 32, PropModeReplace,
+                    (unsigned char *)s, 4);
+}
+
 static void layout(void)
 {
     int i, x = PAD;
@@ -749,6 +858,9 @@ static void reposicionar(void)
 
     XMoveWindow(dpy, win, bx, by);
     XRaiseWindow(dpy, win);
+    aplicar_strut(bx, my, mh);   /* a reserva muda junto: o strut e medido da
+                                  * borda da TELA, e a tela muda de tamanho
+                                  * quando o jogo-windows encolhe a sessao */
 }
 
 int main(void)
@@ -780,14 +892,16 @@ int main(void)
 
     layout();
 
-    at.override_redirect = True;      /* sem moldura do xfwm4, posicao exata */
+    /* SEM override_redirect de proposito - veja "reserva de espaco (EWMH)"
+     * acima. A barra precisa ser gerenciada pelo xfwm4 para que o strut valha;
+     * o tipo DOCK e quem devolve o "sem moldura, sempre acima, sem foco". */
     at.background_pixel  = FACE;
     at.event_mask        = ExposureMask | ButtonPressMask |
                            ButtonReleaseMask | Button1MotionMask;
 
     win = XCreateWindow(dpy, DefaultRootWindow(dpy), 0, 0, LARG, ALTURA, 0,
                         CopyFromParent, InputOutput, CopyFromParent,
-                        CWOverrideRedirect | CWBackPixel | CWEventMask, &at);
+                        CWBackPixel | CWEventMask, &at);
     gc = XCreateGC(dpy, win, 0, NULL);
 
     /* avisos de mudanca de monitor; sem a extensao, so nao reposiciona */
@@ -796,8 +910,13 @@ int main(void)
     else
         rr_base = -1000;
 
+    /* Tudo isto ANTES de mapear: o WM le tipo, hints e strut no instante em que
+     * adota a janela, e o mapa e o que dispara a adocao. A barra sobe antes do
+     * xfwm4 no startwm.sh, entao quem adota e a varredura de janelas ja mapeadas
+     * que ele faz no arranque - que le as mesmas propriedades. */
+    anunciar_dock();
     reposicionar();
-    XMapRaised(dpy, win);
+    XMapWindow(dpy, win);
 
     /* O cache vive no XDG_RUNTIME_DIR e morre com a sessao - o que e correto,
      * porque um 'wsl --shutdown' devolve tudo ao Windows. Mas entao no primeiro
