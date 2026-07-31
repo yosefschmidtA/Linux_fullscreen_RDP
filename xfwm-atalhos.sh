@@ -132,6 +132,29 @@ cmd '<Primary><Alt>t' 'exo-open --launch TerminalEmulator'
 cmd '<Alt>F3'         'xfce4-appfinder'
 cmd '<Super>r'        'xfce4-appfinder -c'
 
+# Print de tela (flameshot). DUAS teclas para a MESMA acao aqui e permitido e
+# proposital - a regra de "uma tecla por acao" vale para as acoes internas do
+# xfwm4, que guardam um unico atalho cada. No namespace /commands cada tecla e
+# uma entrada independente com sua propria string, entao nao ha colisao.
+#
+# Sao duas porque este teclado NAO tem tecla Print, e porque o Win+Shift+S pode
+# ser engolido pelo Windows (a Ferramenta de Captura usa a mesma combinacao) -
+# se o mstsc nao repassar, o Ctrl+Alt+S continua valendo. Descubra qual pega e
+# apague a outra se quiser.
+#
+# 'flameshot gui' abre a selecao de regiao com a barra de anotacao (seta, texto,
+# retangulo, borrao). O v12 nao precisa de daemon nem de icone de bandeja: sobe,
+# captura e sai, o que casa com a premissa de RAM baixa.
+cmd '<Super><Shift>s' 'flameshot gui'
+cmd '<Primary><Alt>s' 'flameshot gui'
+
+# Estas tres ja vinham do padrao do XFCE apontando para o xfce4-screenshooter,
+# que nunca foi instalado - eram atalhos orfaos. Repontadas para o flameshot;
+# so servem em teclado que tenha a tecla, mas nao custam nada deixar corretas.
+cmd 'Print'           'flameshot gui'
+cmd '<Shift>Print'    'flameshot full -p /home/yosef/prints'
+cmd '<Alt>Print'      'flameshot screen -p /home/yosef/prints'
+
 echo
 echo "== helper de terminal do exo =="
 # O Ctrl+Alt+T ja vem mapeado para "exo-open --launch TerminalEmulator", mas

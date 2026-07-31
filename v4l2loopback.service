@@ -1,0 +1,45 @@
+[Unit]
+# Carrega o v4l2loopback, que cria o /dev/video10 usado pela camera-rede.
+#
+# POR QUE UM SERVICO E NAO /etc/modules-load.d (medido em 31/07/2026):
+# a WSL monta um OVERLAY sobre o diretorio de modulos -
+#
+#   none on /usr/lib/modules/<kver> type overlay
+#     lowerdir=/modules  upperdir=/lib/modules/<kver>/rw/upper
+#
+# ...e recria a camada 'upper' a cada boot. Um modulo instalado ali some no
+# proximo arranque, com o kernel intacto - o sintoma e o /dev/video10 nao
+# existir e o modprobe dizer "not found". Por isso o .ko vive fora do overlay,
+# em /usr/local/lib/v4l2loopback/, e entra por insmod com caminho absoluto:
+# o modprobe nao o encontraria, ja que so procura em /lib/modules/$(uname -r).
+Description=v4l2loopback (camera por rede)
+Documentation=file:/home/yosef/linux-fullscreen/README.md
+After=local-fs.target
+ConditionPathExists=/usr/local/lib/v4l2loopback/v4l2loopback.ko
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# videodev PRIMEIRO. O insmod, ao contrario do modprobe, nao resolve
+# dependencia: sem isto o carregamento morre com
+#   v4l2loopback: Unknown symbol v4l2_device_unregister (err -2)
+# Antes passava despercebido porque o uvcvideo (camera por USB/IP) ja puxava o
+# videodev. Com a camera no Windows ninguem mais o carrega.
+ExecStartPre=/sbin/modprobe videodev
+
+# O guard evita falhar quando o modulo ja esta carregado (rodar o install.sh
+# duas vezes, por exemplo). Sem ele o insmod devolve "File exists" e o servico
+# entra em estado failed sem que nada esteja errado.
+ExecStart=/bin/sh -c 'lsmod | grep -q "^v4l2loopback" || exec /sbin/insmod /usr/local/lib/v4l2loopback/v4l2loopback.ko devices=1 video_nr=10 card_label=Camera-Windows exclusive_caps=1'
+
+# Permissao explicita, sem depender do udev. No boot o dispositivo nasceu
+# crw------- root:root e o navegador nao conseguiria abri-lo; dentro de uma
+# sessao ja quente o udev chegava a tempo e punha group=video. Nao vale
+# depender dessa corrida.
+ExecStartPost=/bin/sh -c 'chgrp video /dev/video10 && chmod 0660 /dev/video10'
+
+ExecStop=-/sbin/rmmod v4l2loopback
+
+[Install]
+WantedBy=multi-user.target

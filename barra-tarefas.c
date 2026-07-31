@@ -63,6 +63,7 @@ static XFontStruct *fonte, *mono;
 static unsigned long FACE, HI, SH, INK;
 static int          LARG;
 static time_t       mt_ref;      /* mtime do cache no instante do clique */
+static int          cam_ref;     /* estado da ponte de video no clique */
 
 enum { BOTAO, RELOGIO, BOTAO_USB, VOLUME };
 
@@ -103,11 +104,23 @@ static int  arrastando = -1;   /* item de volume sob arrasto, ou -1 */
  * caminho de volta para janela minimizada continua sendo o Alt+Tab
  * (cycle_hidden=true no xfwm4.xml).
  *
- * Os dois BOTAO_USB passam o headset e a webcam entre o Windows e esta sessao.
- * Sao separados de proposito: bundle-los obrigaria a tudo-ou-nada, e o caso util
- * e justamente audio nativo aqui (mata os estalos do sink do xrdp) com a camera
- * ainda no Windows para o Meet. A largura cabe o rotulo mais longo
- * ("Camera: Linux") para a barra nao mudar de tamanho ao alternar. */
+ * Os dois BOTAO_USB sao separados de proposito: bundle-los obrigaria a
+ * tudo-ou-nada.
+ *
+ * ATENCAO - os dois botoes NAO fazem mais a mesma coisa por baixo (31/07/2026):
+ *
+ *   "Audio"  -> transferir-usb: move mesmo o headset por USB/IP.
+ *   "Camera" -> camera-rede: liga/desliga uma ponte de VIDEO POR REDE, e o
+ *               dispositivo USB nunca sai do Windows.
+ *
+ * O motivo esta medido no README: por USB/IP o navegador pede YUYV 640x480 a
+ * 30 fps (18,4 MB/s) e o vhci_hcd satura em 0,25 MB/s - dava chuvisco. O audio
+ * cabe nesse mesmo teto (0,18 MB/s) e por isso continua no USB/IP.
+ *
+ * O rotulo da camera diz "Rede" e nao "Linux" justamente para nao sugerir que o
+ * dispositivo mudou de lado. Ele nao muda: enquanto a ponte esta ligada, o
+ * ffmpeg.exe segura a camera no Windows e nenhum outro app de la a abre.
+ * A largura cabe o rotulo mais longo ("Camera: Rede"). */
 static Item itens[] = {
     { VOLUME,    "Vol",     VOL_LARG, NULL,       "sink",   0, 0 },
     { VOLUME,    "Mic",     VOL_LARG, NULL,       "source", 0, 0 },
@@ -147,7 +160,8 @@ static char   pop_lado[8];
  * usbipd.exe: uma chamada de interop leva quase um segundo e travaria o
  * desenho. */
 static char est_audio[24]  = "?";
-static char est_camera[24] = "?";
+/* Nao ha est_camera: desde 31/07/2026 a camera nao passa pelo transferir-usb.
+ * O estado dela e a ponte de rede estar viva, lido em camera_ligada(). */
 
 /* Volume, 0-100, e mudo. Aqui, ao contrario do estado USB, NAO ha cache: o
  * pactl responde em 7-9 ms (medido em 31/07/2026) porque fala por socket unix
@@ -219,23 +233,50 @@ static void ler_cache(void)
         if (nl) *nl = '\0';
         if (!strncmp(linha, "audio=", 6))
             snprintf(est_audio, sizeof est_audio, "%.20s", linha + 6);
-        else if (!strncmp(linha, "camera=", 7))
-            snprintf(est_camera, sizeof est_camera, "%.20s", linha + 7);
     }
     fclose(f);
 }
 
+/* A ponte de video esta de pe? Le o pidfile que o camera-rede escreve e
+ * confere se o processo vive. E so um open + kill(0), sem fork: chamar
+ * "camera-rede status" a cada tick custaria um shell por segundo. */
+static int camera_ligada(void)
+{
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    char caminho[256];
+    FILE *f;
+    int pid = 0;
+
+    snprintf(caminho, sizeof caminho, "%s/camera-rede-local.pid",
+             rt && *rt ? rt : "/run/user/1000");
+    f = fopen(caminho, "r");
+    if (!f)
+        return 0;
+    if (fscanf(f, "%d", &pid) != 1)
+        pid = 0;
+    fclose(f);
+    return pid > 0 && kill(pid, 0) == 0;
+}
+
 /* "Audio: Linux" quando esta aqui, "Audio: Win" quando esta no Windows,
- * "Audio: --" quando falta o 'usbipd bind' ou o aparelho esta desligado. */
+ * "Audio: --" quando falta o 'usbipd bind' ou o aparelho esta desligado.
+ *
+ * A camera nao usa esse vocabulario: ela nunca "esta aqui". "Camera: Rede"
+ * significa que a ponte esta transmitindo; "Camera: Win", que esta desligada e
+ * o Windows tem a camera livre. */
 static void rotulo_usb(const Item *it, char *fora, size_t n)
 {
-    const char *e = !strcmp(it->dev, "audio") ? est_audio : est_camera;
     const char *lado;
 
-    if (it->pendente)              lado = "...";
-    else if (!strcmp(e, "linux"))   lado = "Linux";
-    else if (!strcmp(e, "windows")) lado = "Win";
-    else                            lado = "--";
+    if (it->pendente) {
+        lado = "...";
+    } else if (!strcmp(it->dev, "camera")) {
+        lado = camera_ligada() ? "Rede" : "Win";
+    } else {
+        if (!strcmp(est_audio, "linux"))        lado = "Linux";
+        else if (!strcmp(est_audio, "windows")) lado = "Win";
+        else                                    lado = "--";
+    }
 
     snprintf(fora, n, "%s: %s", it->rotulo, lado);
 }
@@ -572,7 +613,7 @@ static void tick(void)
     static int  ciclos = 0;
     char agora[128], hm[8];
     time_t t = time(NULL);
-    int i, algum_pendente = 0;
+    int i, algum_pendente = 0, cam_agora;
 
     /* Revalida o estado de verdade a cada ~30 s. O cache so era reescrito
      * quando NOS mexiamos, e por isso ficava mentindo quando o estado mudava
@@ -603,11 +644,20 @@ static void tick(void)
     /* o transferir-usb reescreve o cache ao terminar; e o nosso sinal de fim */
     if (algum_pendente && cache_mtime() != mt_ref)
         for (i = 0; i < N_ITENS; i++)
+            if (strcmp(itens[i].dev ? itens[i].dev : "", "camera") != 0)
+                itens[i].pendente = 0;
+
+    /* A camera nao passa pelo cache do transferir-usb, entao precisa do proprio
+     * sinal de fim: o estado da ponte ter mudado em relacao ao do clique. */
+    cam_agora = camera_ligada();
+    for (i = 0; i < N_ITENS; i++)
+        if (itens[i].dev && !strcmp(itens[i].dev, "camera") &&
+            itens[i].pendente && cam_agora != cam_ref)
             itens[i].pendente = 0;
 
     strftime(hm, sizeof hm, "%H:%M", localtime(&t));
-    snprintf(agora, sizeof agora, "%s|%s|%s|%d|%d%d|%d%d",
-             hm, est_audio, est_camera, algum_pendente,
+    snprintf(agora, sizeof agora, "%s|%s|%d|%d|%d%d|%d%d",
+             hm, est_audio, cam_agora, algum_pendente,
              vol_sink, mudo_sink, vol_source, mudo_source);
 
     if (strcmp(agora, antes) != 0) {
@@ -838,9 +888,16 @@ int main(void)
                         arrastando = i;
                     } else if (it->tipo == BOTAO_USB) {
                         char cmd[128];
-                        snprintf(cmd, sizeof cmd,
-                                 "transferir-usb %s alternar", it->dev);
-                        mt_ref = cache_mtime();
+                        /* a camera nao e mais transferencia USB: e a ponte de
+                         * rede. Ver o comentario da tabela 'itens'. */
+                        if (!strcmp(it->dev, "camera")) {
+                            snprintf(cmd, sizeof cmd, "camera-rede alternar");
+                            cam_ref = camera_ligada();
+                        } else {
+                            snprintf(cmd, sizeof cmd,
+                                     "transferir-usb %s alternar", it->dev);
+                            mt_ref = cache_mtime();
+                        }
                         it->pendente = 1;
                         solta(cmd);
                         desenhar();          /* mostra o "..." na hora */

@@ -1073,11 +1073,197 @@ Do lado Linux, `/dev/video0` e `/dev/video1` aparecem e o Firefox vê a câmera.
 **O preço, que decide se vale:** enquanto anexada, a câmera é **exclusiva da
 WSL** — o Windows perde o acesso.
 
-> **Pendente (30/07/2026): o Meet reconhece a câmera mas não mostra imagem.** No
-> Firefox dentro da sessão, o Google Meet lista o dispositivo pelo nome certo
-> ("ACER HD User Facing") e não renderiza vídeo. Ainda não investigado; suspeitas
-> a testar são negociação de formato do `uvcvideo` sobre USB/IP e banda do
-> canal. O `/dev/video0` existe e o usuário está no grupo `video`.
+> **Resolvido em 31/07/2026 — e a conclusão foi abandonar o USB/IP para vídeo.**
+> A pendência acima ("o Meet reconhece a câmera mas não mostra imagem") era
+> **banda isócrona**, não negociação de formato. O caminho que funciona é a
+> ponte por rede: veja **"Webcam por rede"**, logo abaixo. Esta seção fica como
+> registro de por que o USB/IP não serve — a medição está lá.
+
+## Webcam por rede (31/07/2026)
+
+O sintoma era "o Meet detecta a câmera e não mostra imagem". A causa não era o
+Meet, nem o formato, nem permissão. Era **banda isócrona no USB/IP**.
+
+### A medição que fechou o diagnóstico
+
+O primeiro dado veio de ler o formato negociado **enquanto o navegador segurava
+o dispositivo** — o `VIDIOC_G_FMT` é só leitura e não precisa tomar a câmera:
+
+```bash
+v4l2-ctl -d /dev/video0 --get-fmt-video
+#   Width/Height : 640/480
+#   Pixel Format : 'YUYV' (YUYV 4:2:2)
+#   Size Image   : 614400
+#   Frames per second: 30.000
+```
+
+614.400 bytes por quadro × 30 = **18,4 MB/s**, sem compressão. O mesmo teste com
+MJPG dava 21.930 bytes por quadro — **0,66 MB/s, 28 vezes menos**. E o teto real
+do canal, medido capturando direto com o `v4l2-ctl`:
+
+| modo | fps | taxa | veredito |
+|---|---|---|---|
+| MJPG 640x360 | 13,2 | 0,25 MB/s | limítrofe |
+| MJPG 640x480 | 10,4 | 0,20 MB/s | ruim |
+| MJPG 1280x720 | **0** | — | sem vídeo |
+| YUYV 640x480 | **0** | — | sem vídeo |
+
+**O canal satura em ~0,25 MB/s.** Não é limite de rede — a rede WSL↔Windows é
+virtual. É o agendamento isócrono degradado, e o `dmesg` diz o porquê, umas
+2.800 vezes por segundo:
+
+```
+usb usb1: Not yet implemented          <- vhci_get_frame_number
+vhci_hcd: urb->status -104             <- ECONNRESET, URBs cancelados
+```
+
+O `vhci_hcd` **não implementa** `get_frame_number`. Não há ajuste, opção de
+módulo ou versão de `usbipd` que corrija isso.
+
+> **O chuvisco não era ruído de imagem, era o diagnóstico.** No
+> `webcamtests.com` a área de preview mostrava estática, não preto. Preto seria
+> "nenhum dado"; estática é **dado parcial** — a minoria de pacotes isócronos
+> que sobrevive, preenchendo um quadro que o `uvcvideo` entrega pela metade.
+
+### Por que forçar MJPG não resolveria
+
+Brave e Firefox escolhem **os dois** `YUYV 640x480@30`. Não é peculiaridade de
+um navegador: é a preferência normal do backend V4L2, que evita o custo de
+decodificar JPEG quando a câmera é local. Sensata no notebook, péssima aqui.
+
+E mesmo forçando MJPG o teto seria 13 fps a 360p. Não vale.
+
+### O desenho que ficou
+
+```
+Windows                                       WSL2
+camera --dshow--> ffmpeg.exe --TCP/NUT--> ffmpeg --> /dev/video10 --> navegador
+```
+
+Três decisões que não são óbvias e custaram tempo:
+
+**1. Quem escuta é o Linux; quem conecta é o Windows, em `127.0.0.1`.** Isso
+funciona porque o `.wslconfig` tem `localhostForwarding=true`. O sentido inverso
+exigiria o IP da WSL — que muda a cada boot — e ainda passaria pelo firewall.
+Verificado: `Test-NetConnection 127.0.0.1 -Port 5004` → `True`.
+
+**2. O contêiner é NUT, não MPEG-TS.** O TS não tem tipo de stream para MJPEG.
+O ffmpeg empacota como dado privado e avisa em letra miúda; o receptor lê
+`Data: bin_data` e morre com `Output file does not contain any stream`. Custou
+uma rodada inteira de depuração achando que era rede.
+
+**3. É liga/desliga, não permanente.** A câmera no Windows é **exclusiva**:
+
+```
+primeira captura:  frame=  18
+segunda captura:   I/O error       frame=   0
+```
+
+Se a ponte ficasse de pé sempre, o Windows perderia a câmera do mesmo jeito que
+perdia com o USB/IP — só que sem botão para trazê-la de volta.
+
+### O resultado
+
+```
+/dev/video10:  1280/720  'YU12'      frames=90   fps=31.6
+```
+
+E há um efeito colateral que resolve o problema pela raiz: o `v4l2loopback` só
+expõe **o que o ffmpeg escreve nele**. Não existe YUYV para o navegador
+escolher. O impasse de "os dois navegadores pedem o formato que não cabe"
+deixou de existir por construção, não por configuração.
+
+### Áudio continua no USB/IP, e não é incoerência
+
+| | câmera | áudio |
+|---|---|---|
+| problema | **banda** — 18,4 MB/s num canal de 0,25 | **relógio** — sink do xrdp oscilando 3–48 ms |
+| USB/IP | não aguenta | aguenta, e dá relógio de hardware (208–217 ms estável) |
+| rede | resolve | reintroduziria o problema |
+
+O headset pede **0,18 MB/s** (48 kHz × 2 canais × 2 bytes) contra o teto medido
+de 0,25 MB/s. **Ele passa por 28% de margem.** É a mesma limitação; só que o
+áudio cabe nela e o vídeo não. Cada dispositivo pelo caminho que a física dele
+pede.
+
+*(A previsão de que uma ponte de áudio por rede traria os estalos de volta é
+inferência a partir do que já foi medido sobre o sink do xrdp, não medição
+nova.)*
+
+### O v4l2loopback e a manutenção que ele cria
+
+O módulo não vem no kernel da WSL e não tem pacote. Compilar exigiu a fonte na
+tag exata (`linux-msft-wsl-6.18.33.2`) e **o build completo do kernel** — o
+`Module.symvers`, que carrega os CRCs de cada símbolo exigidos pelo
+`CONFIG_MODVERSIONS=y`, só nasce da passada global do `modpost`.
+
+> **A armadilha que custou uma hora:** sem o `pahole` instalado, o
+> `CONFIG_DEBUG_INFO_BTF_MODULES` cai silenciosamente da config no
+> `olddefconfig` — e esse símbolo **acrescenta campos ao `struct module`**. O
+> erro resultante não menciona pahole nem BTF:
+>
+> ```
+> .gnu.linkonce.this_module section size must match the kernel's
+> built struct module size at run time
+> ```
+>
+> Confira sempre com `diff` entre `/proc/config.gz` e o `.config` gerado.
+
+Detalhe elegante que explica outra confusão: o `vermagic` do módulo ficava com
+um `+` a mais (`...WSL2+`) e mesmo assim carregava. O kernel faz isto:
+
+```c
+static int same_magic(const char *amagic, const char *bmagic, bool has_crcs)
+{
+    if (has_crcs) {          /* modulo traz CRCs: pula a string de versao */
+        amagic += strcspn(amagic, " ");
+        bmagic += strcspn(bmagic, " ");
+    }
+    return strcmp(amagic, bmagic) == 0;
+}
+```
+
+Com CRCs presentes o nome da versão deixa de ser conferido — os CRCs são a
+verificação de verdade, e são mais rigorosos.
+
+**A manutenção:** quando a WSL trocar de kernel, o módulo para de carregar e a
+câmera some. O DKMS não serve aqui, porque precisa dos headers do kernel novo e
+a WSL não os publica por `apt`. Por isso existe
+[`compilar-v4l2loopback`](compilar-v4l2loopback), que refaz tudo (~15 min com
+`-j10`; a árvore em `~/kernel-src` é reaproveitada).
+
+> **`/lib/modules` é volátil na WSL — descoberto no primeiro reboot,
+> 31/07/2026.** O módulo instalado ali funcionou a sessão inteira e
+> **desapareceu no arranque seguinte**, com o kernel exatamente o mesmo. A causa:
+>
+> ```
+> none on /usr/lib/modules/6.18.33.2-microsoft-standard-WSL2 type overlay
+>   lowerdir=/modules
+>   upperdir=/lib/modules/6.18.33.2-microsoft-standard-WSL2/rw/upper
+> ```
+>
+> A WSL monta um overlay e **recria a camada `upper` a cada boot**. O sintoma
+> engana: `modprobe` diz "not found" sem nada ter mudado, o que manda investigar
+> compilação e versão de kernel — os lugares errados.
+>
+> Por isso o `.ko` vive em `/usr/local/lib/v4l2loopback/` e entra por
+> [`v4l2loopback.service`](v4l2loopback.service), com `insmod` de caminho
+> absoluto. O `modprobe` não serviria: ele só procura em
+> `/lib/modules/$(uname -r)`, que é justamente o diretório volátil.
+
+Duas armadilhas menores que o mesmo reboot revelou, ambas resolvidas no
+`.service`:
+
+**`insmod` não resolve dependência.** O carregamento morria com
+`Unknown symbol v4l2_device_unregister (err -2)`. Falta o `videodev`, que antes
+vinha de graça porque o `uvcvideo` o puxava junto com a câmera por USB/IP — com
+a câmera no Windows, ninguém mais o carrega. Daí o
+`ExecStartPre=/sbin/modprobe videodev`.
+
+**A permissão do `/dev/video10` é uma corrida.** No boot ele nasceu
+`crw------- root:root` e o navegador não conseguiria abri-lo; dentro de uma
+sessão já quente o udev chegava a tempo e punha `group=video`. O `ExecStartPost`
+grava `chgrp video` e `0660` explicitamente, em vez de torcer.
 
 ## Transferir áudio, microfone e câmera (30/07/2026)
 
@@ -1091,6 +1277,19 @@ esta sessão, com um clique:
 `Audio: Linux` significa "está aqui"; `Audio: Win`, "está no Windows";
 `Audio: --`, que falta o `usbipd bind` ou o aparelho está desligado. O `...` é o
 estado pendente, para o clique não parecer inerte.
+
+> **Correção (31/07/2026).** Os dois botões **não fazem mais a mesma coisa por
+> baixo.** O de áudio continua sendo transferência USB, como descrito aqui. O de
+> câmera passou a ligar e desligar a **ponte de rede** (veja "Webcam por rede"),
+> e o dispositivo USB nunca sai do Windows. Por isso o rótulo dele diz
+> **`Camera: Rede`** e não `Camera: Linux`: dizer "Linux" sugeriria que a câmera
+> mudou de lado, e ela não muda — enquanto a ponte está ligada, o `ffmpeg.exe`
+> a segura no Windows e nenhum outro app de lá consegue abri-la.
+>
+> Tudo que esta seção diz sobre a câmera daqui para baixo (o `usbipd bind`, o
+> `transferir-usb camera`, a exclusividade do passthrough) **continua verdade
+> sobre o mecanismo antigo**, que ainda funciona por linha de comando — mas
+> deixou de ser o caminho usado, porque entregava chuvisco.
 
 Quem faz o trabalho é [`transferir-usb`](transferir-usb), que também serve por
 linha de comando:
@@ -2162,6 +2361,70 @@ done
 **Teclado errado.** `setxkbmap -model abnt2 -layout br` está no `startwm.sh`,
 dentro do bloco final que sobe a sessão; ajuste ali se o seu não for ABNT2.
 (Ficava no `i3.config` na versão antiga.)
+
+## O disco não encolhe: limpar por dentro não devolve espaço ao Windows (31/07/2026)
+
+Sintoma: você roda `docker prune`, libera dezenas de GB dentro do Linux, e o
+`ext4.vhdx` no Windows continua do mesmo tamanho. **Isso é por design** — o
+VHDX só cresce. São duas operações separadas, e só a primeira é óbvia.
+
+### Não use `--set-sparse`
+
+A resposta que a internet dá é converter o disco para esparso:
+
+```powershell
+wsl --manage Ubuntu-24.04 --set-sparse true
+#   O suporte a VHD esparso esta atualmente desativado devido a
+#   POSSIVEL CORRUPCAO DE DADOS.
+#   Para forcar: ... --set-sparse true --allow-unsafe
+```
+
+**A Microsoft desativou o recurso.** O `--allow-unsafe` existe para forçar, e
+foi forçado aqui uma vez — sem incidente, mas revertido em seguida. Não vale o
+risco numa máquina com dados de pesquisa.
+
+E não resolveu: o esparso só encolhe **daí em diante**, e mesmo assim depende do
+`fstrim`. Depois de forçado, o arquivo continuava ocupando 207 GB para 173 GB de
+uso real.
+
+### O caminho que funciona
+
+```bash
+sudo fstrim -av          # dentro da WSL: marca os blocos livres
+```
+```powershell
+wsl --shutdown
+wsl --manage Ubuntu-24.04 --set-sparse false    # se estiver esparso
+```
+```
+diskpart
+select vdisk file="C:\Users\<voce>\AppData\Local\Packages\CanonicalGroupLimited.Ubuntu24.04LTS_79rhkp1fndgsc\LocalState\ext4.vhdx"
+attach vdisk readonly
+compact vdisk
+detach vdisk
+```
+
+> **A ordem importa, e é contraintuitiva.** O `diskpart` **recusa** anexar um
+> VHDX esparso: *"Os arquivos de disco rígido virtual devem ser descompactados e
+> descriptografados. Eles não devem ser analisados."* Então é reverter o esparso
+> **primeiro** e compactar depois — mesmo parecendo que reverter vai inflar o
+> arquivo. Não infla muito: preencher os buracos custou 8 GB aqui, não os 215
+> do tamanho lógico.
+
+O `attach readonly` não é decoração: garante que nada escreva enquanto o disco é
+reorganizado.
+
+### O resultado medido
+
+```
+VHDX:      215,1 GB  ->  181,2 GB
+Livre C::   30,8 GB  ->   57,3 GB
+```
+
+E o critério para saber se vale repetir: compare o VHDX com o `df` de dentro.
+Aqui ficou **181,2 contra 173 GB usados** — 8 GB de folga, que são metadados do
+ext4 e granularidade de bloco. Não há mais o que extrair; se a diferença estiver
+nessa ordem, o disco já está compacto e o espaço tem que sair de dentro.
 
 ## O Gerenciador de Tarefas mostra muito mais RAM que o htop
 

@@ -1,0 +1,98 @@
+#!/bin/bash
+# compilar-v4l2loopback - reconstroi o modulo v4l2loopback para o kernel ATUAL.
+#
+#   bash compilar-v4l2loopback
+#
+# QUANDO RODAR: depois de a WSL atualizar o kernel. O sintoma e o botao
+# "Camera" da barra nao funcionar mais e o /dev/video10 nao existir. Confirme
+# com:
+#     modprobe v4l2loopback     # "Invalid module format" ou "not found"
+#
+# POR QUE ISTO PRECISA EXISTIR
+# Modulo de kernel do Linux nao e portatil: nao ha ABI estavel, e o modulo so
+# carrega no kernel exato contra o qual foi compilado. Como a WSL troca de
+# kernel sozinha (ha varios em /lib/modules aqui), o modulo morre junto.
+#
+# O DKMS - que existe justamente para isso - NAO serve na WSL: ele precisa dos
+# headers do kernel novo, e a WSL nao os publica por apt. Dai este script, que
+# baixa a fonte do kernel na tag exata e reconstroi.
+#
+# CUSTO: ~2 GB de download e ~15 min com -j10. A arvore fica em ~/kernel-src e
+# e reaproveitada nas proximas vezes (so o 'git fetch' da tag nova).
+set -eu
+
+KREL=$(uname -r)                       # ex: 6.18.33.2-microsoft-standard-WSL2
+KVER=${KREL%%-*}                       # ex: 6.18.33.2
+TAG="linux-msft-wsl-$KVER"
+KSRC="$HOME/kernel-src"
+VSRC="$HOME/v4l2loopback-src"
+VTAG=v0.15.4
+
+echo "==> kernel atual: $KREL   (tag esperada: $TAG)"
+
+# 1. Dependencias. O pahole (dwarves) NAO e opcional: sem ele o
+#    CONFIG_DEBUG_INFO_BTF cai da config, e esse simbolo ACRESCENTA campos ao
+#    struct module. O modulo entao falha com
+#      ".gnu.linkonce.this_module section size must match the kernel's
+#       built struct module size at run time"
+#    que nao diz nada sobre pahole. Custou uma hora descobrir em 31/07/2026.
+echo "==> [1/4] Dependencias de compilacao"
+sudo apt-get install -y --no-install-recommends \
+    build-essential flex bison bc libelf-dev libssl-dev dwarves \
+    "gcc-$(gcc -dumpversion)-plugin-dev" >/dev/null 2>&1 || \
+    sudo apt-get install -y --no-install-recommends \
+        build-essential flex bison bc libelf-dev libssl-dev dwarves >/dev/null
+
+# 2. Fonte do kernel na tag exata.
+echo "==> [2/4] Fonte do kernel ($TAG)"
+if [ -d "$KSRC/.git" ]; then
+    git -C "$KSRC" fetch --depth 1 origin tag "$TAG" 2>&1 | tail -1
+    git -C "$KSRC" checkout -q "$TAG"
+else
+    git clone --depth 1 --branch "$TAG" --single-branch \
+        https://github.com/microsoft/WSL2-Linux-Kernel.git "$KSRC"
+fi
+
+# 3. Config identica a do kernel em execucao, e build completo.
+#    O build completo e necessario pelo Module.symvers: ele so nasce da passada
+#    global do modpost, que precisa ver vmlinux E todos os modulos. Sem ele o
+#    modulo ate carrega, mas sem verificacao de CRC e marcando o kernel como
+#    tainted.
+#    O .scmversion vazio evita o "+" que o setlocalversion acrescenta quando a
+#    arvore git nao esta exatamente numa tag.
+echo "==> [3/4] Compilando o kernel (demora; -j$(nproc))"
+cd "$KSRC"
+touch .scmversion
+zcat /proc/config.gz > .config
+make olddefconfig >/dev/null
+make -j"$(nproc)" > "$HOME/kernel-build.log" 2>&1
+echo "    Module.symvers: $(wc -l < Module.symvers) simbolos"
+
+# 4. O modulo.
+echo "==> [4/4] Compilando e instalando o v4l2loopback"
+if [ -d "$VSRC/.git" ]; then
+    git -C "$VSRC" fetch --depth 1 origin tag "$VTAG" 2>&1 | tail -1
+    git -C "$VSRC" checkout -q "$VTAG"
+else
+    git clone --depth 1 --branch "$VTAG" \
+        https://github.com/umlaeute/v4l2loopback.git "$VSRC"
+fi
+cd "$VSRC"
+make clean >/dev/null 2>&1 || true
+make KERNELRELEASE="$KREL" KERNEL_DIR="$KSRC"
+
+# NAO instalar em /lib/modules. A WSL monta um overlay sobre
+# /usr/lib/modules/<kver> e recria a camada de escrita a cada boot: o modulo
+# some no proximo arranque, com o kernel intacto - e o sintoma (modprobe
+# "not found" sem nada ter mudado) manda a pessoa investigar o lado errado.
+# Medido em 31/07/2026. Por isso vive fora do overlay e sobe por servico.
+sudo install -D -m 644 v4l2loopback.ko \
+    /usr/local/lib/v4l2loopback/v4l2loopback.ko
+sudo install -m 755 utils/v4l2loopback-ctl /usr/local/bin/ 2>/dev/null || true
+sudo systemctl restart v4l2loopback.service
+
+echo
+echo "Pronto. Confira:"
+echo "    systemctl is-active v4l2loopback.service"
+echo "    v4l2-ctl --list-devices | grep -A1 Camera-Windows"
+echo "    camera-rede ligar"

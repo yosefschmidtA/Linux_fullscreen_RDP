@@ -28,6 +28,9 @@ só a seção necessária. Ler tudo custa ~35 mil tokens e quase nunca é precis
 | `startwm.sh` | → `/etc/xrdp/startwm.sh`. Sobe a sessão inteira; limpa vars do WSLg |
 | `barra-tarefas.c` | **único componente compilado**. C + Xlib cru, 2,6 MB de RSS |
 | `transferir-usb` | passa headset/webcam entre Windows e Linux (usbipd) |
+| `camera-rede` | **a webcam de verdade**: ponte de vídeo por rede, sem tirar do Windows |
+| `compilar-v4l2loopback` | refaz o módulo quando a WSL troca de kernel (senão a câmera some) |
+| `v4l2loopback.service` | carrega o módulo no boot; **não** use `/lib/modules`, a WSL apaga |
 | `audio-dispositivos` | lista/escolhe saída e entrada, juntando Linux e Windows |
 | `jogo-windows` | encolhe a sessão para um monitor e cede outro ao jogo |
 | `linux-desktop-down` | "botão de desligar": encerra sessão ou a VM |
@@ -102,6 +105,7 @@ entre eles são visíveis ao AST.
 | rótulos da barra em ASCII | a fonte core está em `iso8859-1`; acento sai corrompido no `XDrawString` |
 | `guiApplications=false` | com o WSLg ligado, apps GTK/Qt fogem para o desktop do Windows |
 | `allowed_users=anybody` | volta para `console` a cada upgrade do `xserver-xorg-legacy` e a sessão para de subir |
+| vídeo **nunca** por USB/IP | o `vhci_hcd` satura em 0,25 MB/s e o navegador pede 18,4 — dá chuvisco. Áudio cabe (0,18), vídeo não |
 
 ## Armadilhas do ambiente (custaram horas)
 

@@ -1,0 +1,149 @@
+#!/bin/bash
+# camera-rede - traz a webcam do Windows para a sessao Linux POR REDE, sem
+# tirar o dispositivo do Windows via USB/IP.
+#
+#   camera-rede ligar | desligar | alternar | status
+#
+# POR QUE ISTO EXISTE (medido em 31/07/2026, ver README):
+# O caminho antigo era o usbipd: anexar a webcam a WSL e deixar o uvcvideo
+# falar com ela. Enumerava, mostrava o nome certo, e entregava CHUVISCO. Causa:
+# navegador pede YUYV 640x480 a 30 fps = 18,4 MB/s de transferencia ISOCRONA, e
+# o vhci_hcd (o lado Linux do USB/IP) satura em 0,25 MB/s. Nao ha ajuste: o
+# vhci_hcd sequer implementa get_frame_number ("Not yet implemented" no dmesg,
+# ~2800 vezes por segundo). Nem forcando MJPG passava de 13 fps a 360p.
+#
+# Aqui o video atravessa a rede virtual da WSL, que nao tem esse limite, e o
+# dispositivo continua sendo do Windows.
+#
+#   Windows                                  WSL2
+#   camera --dshow--> ffmpeg.exe --TCP--> ffmpeg --> /dev/video10 --> navegador
+#
+# O SENTIDO DA CONEXAO NAO E ARBITRARIO. Quem escuta e o Linux; quem conecta e
+# o Windows, em 127.0.0.1. Isso funciona porque o .wslconfig tem
+# localhostForwarding=true, que encaminha o localhost do Windows para dentro da
+# WSL. O caminho inverso exigiria o IP da WSL - que muda a cada boot - e ainda
+# passaria pelo firewall do Windows.
+#
+# POR QUE E LIGA/DESLIGA E NAO PERMANENTE: medido em 31/07/2026, a camera no
+# Windows e EXCLUSIVA. Com o ffmpeg segurando, uma segunda captura leva
+# "I/O error". Se a ponte ficasse de pe sempre, o Windows perderia a camera do
+# mesmo jeito que perdia com o USB/IP - so que sem botao para trazer de volta.
+set -u
+
+PORTA=5004
+DEV=/dev/video10
+DISPOSITIVO_WIN="ACER HD User Facing"
+LARGURA=1280
+ALTURA=720
+FPS=30
+PIDFILE_LOCAL=/run/user/$(id -u)/camera-rede-local.pid
+LOG=/run/user/$(id -u)/camera-rede.log
+
+TASKKILL="/mnt/c/Windows/System32/taskkill.exe"
+CMD_EXE="/mnt/c/Windows/System32/cmd.exe"
+
+msg() { echo "camera-rede: $*" >&2; }
+
+# O ffmpeg do Windows vem do winget e NAO esta no PATH do interop - o winget so
+# mexe no PATH de sessoes novas do Windows. Descobrir o caminho a cada vez custa
+# uma chamada de interop (~1s), entao fica em cache.
+CACHE_FF=/run/user/$(id -u)/camera-rede-ffmpeg-win.path
+ffmpeg_windows() {
+    if [ -s "$CACHE_FF" ] && [ -x "$(cat "$CACHE_FF")" ]; then
+        cat "$CACHE_FF"; return 0
+    fi
+    local la
+    la=$( cd /tmp && "$CMD_EXE" /c 'echo %LOCALAPPDATA%' 2>/dev/null \
+          | tr -d '\r\n' | sed 's|C:|/mnt/c|; s|\\|/|g' )
+    [ -n "$la" ] || return 1
+    local ff
+    ff=$(find "$la/Microsoft/WinGet/Packages" -iname 'ffmpeg.exe' 2>/dev/null | head -1)
+    [ -n "$ff" ] || return 1
+    echo "$ff" > "$CACHE_FF"
+    echo "$ff"
+}
+
+modulo_ok() {
+    [ -e "$DEV" ] && return 0
+    msg "o $DEV nao existe - o v4l2loopback nao esta carregado."
+    msg "carregue com: sudo modprobe v4l2loopback"
+    return 1
+}
+
+local_vivo() {
+    [ -s "$PIDFILE_LOCAL" ] || return 1
+    kill -0 "$(cat "$PIDFILE_LOCAL")" 2>/dev/null
+}
+
+# pgrep -c conta zumbi; filtrar defunct antes de concluir que ha instancia viva
+windows_vivo() {
+    ( cd /tmp && "$CMD_EXE" /c 'tasklist /FI "IMAGENAME eq ffmpeg.exe" /NH' 2>/dev/null ) \
+        | grep -aqi 'ffmpeg.exe'
+}
+
+ligar() {
+    modulo_ok || return 1
+    if local_vivo; then msg "ja esta ligada."; return 0; fi
+
+    # 1) o receptor SOBE PRIMEIRO. Se o Windows conectar antes do listen, ele
+    #    leva connection refused e desiste - nao ha retry no ffmpeg.
+    # O conteiner e NUT, nao MPEG-TS. Medido em 31/07/2026: o TS nao tem tipo de
+    # stream para MJPEG, entao o ffmpeg empacota como "private data" e o
+    # receptor le "Data: bin_data" em vez de video, morrendo com "Output file
+    # does not contain any stream". O NUT carrega MJPEG nativamente.
+    # MJPEG e nao H.264 de proposito: e intra-only, so custa ~3,3 Mbit/s nesta
+    # rede virtual, e evita o atraso de um encoder com buffer de quadros.
+    setsid --fork ffmpeg -hide_banner -loglevel warning \
+        -fflags nobuffer -flags low_delay \
+        -f nut -listen 1 -i "tcp://0.0.0.0:$PORTA" \
+        -pix_fmt yuv420p -f v4l2 "$DEV" \
+        </dev/null >"$LOG" 2>&1
+    sleep 1
+    pgrep -f "tcp://0.0.0.0:$PORTA" | grep -v defunct | head -1 > "$PIDFILE_LOCAL"
+
+    if ! local_vivo; then
+        msg "o receptor local nao subiu. veja $LOG"
+        return 1
+    fi
+
+    # 2) o emissor no Windows. setsid --fork e obrigatorio: com ( cmd & ) o
+    #    proxy de interop segura o descritor de saida e QUEM ESTIVER LENDO trava
+    #    ate o processo do Windows morrer.
+    local ff
+    ff=$(ffmpeg_windows) || { msg "ffmpeg.exe nao encontrado no Windows."; desligar; return 1; }
+
+    ( cd /tmp && setsid --fork "$ff" -hide_banner -loglevel error \
+        -f dshow -video_size "${LARGURA}x${ALTURA}" -framerate "$FPS" \
+        -pixel_format nv12 -i video="$DISPOSITIVO_WIN" \
+        -c:v mjpeg -q:v 6 -f nut -flush_packets 1 \
+        "tcp://127.0.0.1:$PORTA" </dev/null >/dev/null 2>&1 )
+
+    sleep 2
+    if local_vivo; then
+        msg "ligada. a camera aparece como $DEV."
+    else
+        msg "a ponte caiu logo apos subir. veja $LOG"
+        return 1
+    fi
+}
+
+desligar() {
+    if local_vivo; then kill "$(cat "$PIDFILE_LOCAL")" 2>/dev/null; fi
+    rm -f "$PIDFILE_LOCAL"
+    pkill -f "tcp://0.0.0.0:$PORTA" 2>/dev/null
+    # devolve a camera ao Windows fechando o emissor de la
+    ( cd /tmp && "$TASKKILL" /IM ffmpeg.exe /F ) >/dev/null 2>&1
+    msg "desligada. a camera voltou a ficar livre para o Windows."
+}
+
+status() {
+    if local_vivo; then echo "ligada"; else echo "desligada"; fi
+}
+
+case "${1:-}" in
+    ligar)    ligar ;;
+    desligar) desligar ;;
+    alternar) if local_vivo; then desligar; else ligar; fi ;;
+    status)   status ;;
+    *)        msg "uso: camera-rede {ligar|desligar|alternar|status}"; exit 2 ;;
+esac

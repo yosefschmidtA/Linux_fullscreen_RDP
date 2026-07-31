@@ -65,7 +65,32 @@ install -m 755 "$SRC/linux-desktop-down" /usr/local/bin/linux-desktop-down
 install -m 755 "$SRC/jogo-windows"       /usr/local/bin/jogo-windows
 install -m 755 "$SRC/transferir-usb"     /usr/local/bin/transferir-usb
 install -m 755 "$SRC/audio-dispositivos" /usr/local/bin/audio-dispositivos
+install -m 755 "$SRC/camera-rede"        /usr/local/bin/camera-rede
 install -m 644 "$SRC/x11-unix-writable.service" /etc/systemd/system/
+
+# A ponte de video precisa do v4l2loopback, que NAO vem no kernel da WSL e nao
+# tem pacote: e compilado por fora (ver README, "Webcam por rede").
+#
+# O .ko fica em /usr/local/lib/v4l2loopback/ e NAO em /lib/modules. Medido em
+# 31/07/2026: a WSL monta um overlay sobre /usr/lib/modules/<kver> e recria a
+# camada de escrita a cada boot, entao modulo instalado la some no proximo
+# arranque - com o kernel intacto, o que torna o sintoma confuso. Por isso o
+# carregamento e por servico, com insmod de caminho absoluto (o modprobe nao
+# acharia, ja que so olha em /lib/modules/$(uname -r)).
+rm -f /etc/modules-load.d/v4l2loopback.conf /etc/modprobe.d/v4l2loopback.conf
+install -m 644 "$SRC/v4l2loopback.service" /etc/systemd/system/
+if [ -f "$REAL_HOME/v4l2loopback-src/v4l2loopback.ko" ]; then
+    install -D -m 644 "$REAL_HOME/v4l2loopback-src/v4l2loopback.ko" \
+        /usr/local/lib/v4l2loopback/v4l2loopback.ko
+    systemctl enable --quiet v4l2loopback.service
+    echo "    v4l2loopback instalado; sobe pelo servico no boot"
+elif [ -f /usr/local/lib/v4l2loopback/v4l2loopback.ko ]; then
+    systemctl enable --quiet v4l2loopback.service
+    echo "    v4l2loopback ja instalado; servico habilitado"
+else
+    echo "    AVISO: v4l2loopback nao compilado; a camera por rede nao vai funcionar"
+    echo "           rode: bash $SRC/compilar-v4l2loopback"
+fi
 
 # A barra de tarefas e o unico componente compilado deste repositorio. E C com
 # Xlib cru, nao um painel de desktop environment: 2,6 MB de RSS contra os 21 MB
