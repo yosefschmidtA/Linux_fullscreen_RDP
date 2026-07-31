@@ -64,6 +64,7 @@ install -m 755 "$SRC/linux-desktop-up"   /usr/local/bin/linux-desktop-up
 install -m 755 "$SRC/linux-desktop-down" /usr/local/bin/linux-desktop-down
 install -m 755 "$SRC/jogo-windows"       /usr/local/bin/jogo-windows
 install -m 755 "$SRC/transferir-usb"     /usr/local/bin/transferir-usb
+install -m 755 "$SRC/audio-dispositivos" /usr/local/bin/audio-dispositivos
 install -m 644 "$SRC/x11-unix-writable.service" /etc/systemd/system/
 
 # A barra de tarefas e o unico componente compilado deste repositorio. E C com

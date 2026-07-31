@@ -42,7 +42,18 @@ ID_CAMERA="0408:403a"     # ACER HD User Facing
 # Smart Sound para audio USB)", generico e traduzido. Ver audio-padrao.ps1.
 
 CONF="$HOME/.config/linux-fullscreen/dispositivos.conf"
-[ -r "$CONF" ] && . "$CONF"
+DETECTADO="$HOME/.config/linux-fullscreen/audio-detectado.conf"
+
+# Precedencia, do mais fraco ao mais forte - o ultimo a ser lido vence:
+#   1. os valores acima          - so um chute inicial
+#   2. audio-detectado.conf      - o que a deteccao achou da ultima vez
+#   3. dispositivos.conf         - escolha explicita sua, sempre ganha
+[ -r "$DETECTADO" ] && . "$DETECTADO"
+FIXO_PELO_USUARIO=nao
+if [ -r "$CONF" ]; then
+    . "$CONF"
+    grep -q '^[[:space:]]*ID_AUDIO=' "$CONF" && FIXO_PELO_USUARIO=sim
+fi
 
 PS_EXE="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 PS1_FONTE="$HOME/linux-fullscreen/windows/audio-padrao.ps1"
@@ -148,6 +159,74 @@ id_de() {
         camera) echo "$ID_CAMERA" ;;
         *)      msg "dispositivo desconhecido: $1 (use audio ou camera)"; exit 2 ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# Qual headset e o desta maquina.
+#
+# Casa e trabalho tem headsets diferentes, e um VID:PID chumbado quebraria num
+# dos dois. Isto resolve sozinho, e a regra e "esta presente?":
+#
+#   - se o ID atual aparece no usbipd (de qualquer lado), esta certo, nao mexe;
+#   - senao, pergunta ao Windows quais audios USB existem;
+#   - um so    -> adota e grava, sem incomodar ninguem;
+#   - varios   -> pergunta UMA vez (zenity) e grava a escolha;
+#   - nenhum   -> mantem o que estava e segue (o aparelho pode estar desligado).
+#
+# Nao ha assinatura de ambiente como no jogo-windows: aqui a presenca do
+# aparelho ja e o discriminador, e se corrige sozinha ao trocar de mesa.
+# ---------------------------------------------------------------------------
+gravar_detectado() {
+    mkdir -p "$(dirname "$DETECTADO")" 2>/dev/null
+    printf '# Escrito pelo transferir-usb. Para fixar a mao, use dispositivos.conf.\nID_AUDIO="%s"\n' \
+        "$1" > "$DETECTADO"
+    ID_AUDIO="$1"
+}
+
+audios_usb_do_windows() {   # "VID:PID<TAB>Nome" por linha
+    local ps1; ps1=$(ps1_windows) || return 1
+    # -a no grep e obrigatorio: o PowerShell devolve os acentos na codificacao
+    # do console do Windows (CP-850/1252), nao em UTF-8, e o grep declara
+    # "binary file matches" e engole TODAS as linhas. O tr depois joga fora os
+    # bytes invalidos, que so afetam o nome exibido - o VID:PID e ASCII.
+    ( cd /tmp && "$PS_EXE" -NoProfile -ExecutionPolicy Bypass -File "$ps1" -ListarUsb ) \
+        2>/dev/null | tr -d '\r' | tr -cd '[:print:]\t\n' \
+        | grep -aE '^[0-9a-f]{4}:[0-9a-f]{4}'
+}
+
+resolver_audio() {
+    [ "$FIXO_PELO_USUARIO" = sim ] && return 0
+
+    # Ja esta certo? (presente de qualquer lado)
+    case "$(estado_de "$ID_AUDIO")" in
+        linux|windows|nao-compartilhado) return 0 ;;
+    esac
+
+    local lista n escolha
+    lista=$(audios_usb_do_windows) || return 0
+    [ -n "$lista" ] || { msg "nenhum audio USB encontrado; mantendo $ID_AUDIO"; return 0; }
+
+    n=$(printf '%s\n' "$lista" | wc -l)
+    if [ "$n" = 1 ]; then
+        escolha=$(printf '%s' "$lista" | cut -f1)
+        msg "headset novo detectado: $escolha ($(printf '%s' "$lista" | cut -f2-))"
+        gravar_detectado "$escolha"
+        return 0
+    fi
+
+    if [ -n "${DISPLAY:-}" ] && command -v zenity >/dev/null 2>&1; then
+        escolha=$(printf '%s\n' "$lista" \
+            | awk -F'\t' '{print $1"\n"$2}' \
+            | zenity --list --title="Transferir USB" \
+                     --text="Qual e o seu headset nesta maquina?" \
+                     --column=ID --column=Dispositivo \
+                     --width=460 --height=240 2>/dev/null)
+        [ -n "$escolha" ] && { gravar_detectado "$escolha"; return 0; }
+    fi
+
+    escolha=$(printf '%s\n' "$lista" | head -1 | cut -f1)
+    msg "varios audios USB; assumindo o primeiro ($escolha)"
+    gravar_detectado "$escolha"
 }
 
 # "linux" (anexado aqui), "windows" (disponivel la), "nao-compartilhado" (falta o
@@ -322,9 +401,16 @@ escrever_cache() {
 }
 
 case "${1:-}" in
-    estado) escrever_cache; cat "$CACHE" ;;
+    estado) resolver_audio; escrever_cache; cat "$CACHE" ;;
+    detectar)
+        # forca a redeteccao, ignorando o que foi gravado antes
+        rm -f "$DETECTADO"
+        ID_AUDIO="00:00"          # garante que resolver_audio nao ache "presente"
+        resolver_audio
+        echo "ID_AUDIO=$ID_AUDIO" ;;
     audio|camera)
         dev="$1"
+        [ "$dev" = audio ] && resolver_audio
         case "${2:-status}" in
             status)  estado_de "$(id_de "$dev")" ;;
             linux)   para_linux   "$dev"; escrever_cache ;;

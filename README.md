@@ -1,16 +1,23 @@
 # Linux fullscreen sobre WSL2 (xrdp + xfwm4)
 
 Sessão Linux ocupando todos os monitores, cobrindo o Windows. Tela limpa: sem
-barra de tarefas, sem relógio, sem ícones de área de trabalho — e sem desktop
-environment.
+ícones de área de trabalho e **sem desktop environment**.
 
 As janelas se comportam como no GNOME ou no Windows: barra de título com os
 botões de fechar/minimizar/maximizar, arrastar com o mouse, snap ao encostar na
 borda, `Alt+Tab`, `Super+setas` para meia tela.
 
 Isso vem do **xfwm4**, o gerenciador de janelas do XFCE, rodando sozinho — sem
-`xfce4-session`, sem `xfdesktop`, sem painel. Só ele, o `xfsettingsd` (que
-executa os atalhos de comando) e um terminal.
+`xfce4-session`, sem `xfdesktop`, sem painel do XFCE. Só ele, o `xfsettingsd`
+(que executa os atalhos de comando), um terminal e uma barra própria de 2,6 MB.
+
+> **Correção da premissa (30/07/2026).** Estas linhas diziam *"sem barra de
+> tarefas, sem relógio"*, e isso era descrição de projeto, não só de tela: a
+> ausência de painel era a premissa. Hoje existe uma **barra própria** com
+> relógio, desligar e os botões de transferir áudio/câmera — 2,6 MB de RSS, em C
+> com Xlib cru, sem toolkit. O que **não** mudou é o que a premissa protegia: não
+> há desktop environment, não há painel do XFCE, e a RAM continua baixa. Veja "A
+> barra de tarefas".
 
 > **Nota histórica.** Este projeto começou com o **i3** e um ambiente só-terminal
 > em *tiling*. O i3 foi trocado porque ele não desenha botão de janela nenhum —
@@ -250,6 +257,10 @@ clicada de volta. Isso só é seguro por causa de um ajuste em `xfwm4.xml`:
 negro.** Nesse caso, ou devolva o painel (`xfce4-panel &` no `startwm.sh`), ou
 remova o atalho de minimizar.
 
+> **A barra de tarefas não muda isto.** Ela existe desde 30/07/2026, mas **não
+> tem lista de janelas** — de propósito. Então o `cycle_hidden` continua sendo a
+> única rede de segurança do minimizar, com o mesmo peso de antes.
+
 ## Desligar (e a interface)
 
 Fechar a janela do mstsc **não encerra nada** — nem a sessão, nem a VM. Sem um
@@ -258,9 +269,14 @@ botão, desligar era fechar o RDP e depois ir ao PowerShell rodar
 
 | Como chamar | O que faz |
 |---|---|
+| botão **Desligar** na barra | o mesmo que o `Alt+F3` → "Desligar", a um clique |
 | `Alt+F3` → "Desligar" | encerra a sessão **e** desliga a VM (devolve a RAM ao Windows) |
 | `Alt+F3` → "Sair da sessão" | encerra só a sessão gráfica; a VM continua, e o atalho do Windows reabre em segundos |
 | `linux-desktop-down -y` | o mesmo, sem perguntar (para script) |
+
+Os dois modos **devolvem o headset e a webcam ao Windows** antes de encerrar —
+veja "Sair da sessão devolve tudo", que explica por que isso é necessário até no
+modo VM, onde o `wsl --shutdown` parece resolver sozinho e resolve metade.
 
 É o par do `linux-desktop-up`, que o atalho do Windows já chamava para **subir**
 tudo. Os dois modos pedem confirmação, porque ambos matam aplicativos sem
@@ -304,15 +320,199 @@ deixá-lo parado no `$HOME` entre sessões não preserva nada útil).
 
 ### Onde crescer a interface
 
-Sem painel, quem lista aplicativos é o `xfce4-appfinder` (`Alt+F3` ou
-`Super+R`). Então **um botão novo é um `.desktop` novo** em `desktop/`, que o
-`install.sh` copia para `/usr/share/applications/`. Não é preciso subir um
-desktop environment para ter menu — é o que permite manter a premissa de RAM
-baixa deste projeto.
+Quem lista aplicativos é o `xfce4-appfinder` (`Alt+F3` ou `Super+R`). Então
+**um item novo de menu é um `.desktop` novo** em `desktop/`, que o `install.sh`
+copia para `/usr/share/applications/`. Não é preciso subir um desktop environment
+para ter menu — é o que permite manter a premissa de RAM baixa deste projeto.
+
+Desde 30/07/2026 há um segundo lugar onde crescer: a **barra de tarefas**, para o
+que precisa estar sempre visível ou a um clique. Acrescentar um botão ali é uma
+linha na tabela `itens[]` do `barra-tarefas.c`. A regra prática que separa os
+dois: se é "abrir um programa", vai no `.desktop`; se é "ver ou alternar um
+estado", vai na barra.
 
 Para os diálogos, a sessão tem `zenity` (GTK, bonitinho) e `xmessage` (feio,
 mas quase sem dependência). O `linux-desktop-down` usa o primeiro que achar e
 cai para o terminal se não houver tela — vale como modelo para os próximos.
+
+## A barra de tarefas (30/07/2026)
+
+Há uma barra flutuante na base do monitor primário, no visual do diálogo de
+login do xrdp:
+
+```
+  ┌────────────────────────────────────────────────────────┐
+  │  Audio: Linux  │  Camera: Win  │ 01:53 │   Desligar    │
+  └────────────────────────────────────────────────────────┘
+```
+
+126–318 px de largura, 28 px de altura — ela se dimensiona pelo conteúdo, não
+ocupa a tela toda. **Não tem lista de janelas**, de propósito: o caminho de
+volta para uma janela minimizada continua sendo o `Alt+Tab`, por causa do
+`cycle_hidden` (veja "Minimizar sem barra de tarefas").
+
+O código é [`barra-tarefas.c`](barra-tarefas.c), o **único componente compilado**
+deste repositório. O `install.sh` o compila e instala em `/usr/local/bin`; o
+`startwm.sh` o sobe a cada login. Se a compilação falhar, o instalador avisa e a
+sessão sobe sem ela.
+
+### Por que Xlib cru, e não um toolkit
+
+A primeira versão era Python + Tk e pesava **21.440 kB de RSS**. A atual pesa
+**2.740 kB** — 7,8× menos, num binário de 21 KB.
+
+Mas o número não foi o argumento decisivo. O visual exige desenhar cada pixel à
+mão (o `relief raised` do Tk calcula os tons sozinho e não bate com o que foi
+amostrado), então **aquela versão já usava um Canvas e ignorava os widgets**.
+Estávamos pagando um toolkit inteiro para não usar widget nenhum dele. Em Xlib
+as mesmas três primitivas — linha, retângulo, texto — vêm direto do servidor X.
+
+### A paleta e o bisel, amostrados
+
+Tudo veio do `Untitled.png` pixel a pixel, não de gosto. São **cinco cores e
+nenhum meio-tom**, e a barra de título do diálogo é o *mesmo teal do fundo*, não
+um azul separado:
+
+| Cor | Onde |
+|---|---|
+| `#009CB5` | fundo da sessão, barra de título |
+| `#DEDEDE` | face dos botões |
+| `#FFFFFF` | bisel claro, fundo de campo |
+| `#808080` | sombra interna |
+| `#000000` | texto, borda externa |
+
+O bisel Motif é **assimétrico**, e é esse detalhe que separa "arcaico" de só
+"cinza":
+
+| Borda | Pixels, de fora para dentro |
+|---|---|
+| topo, esquerda | `#FFFFFF` ×1 |
+| baixo, direita | `#000000` ×1, depois `#808080` ×1 |
+
+Repare que o cinza é `#DEDEDE`, mais claro que o `#C0C0C0` do Windows 95 — não é
+aquele visual, é Motif/CDE.
+
+**A fonte é core do X** (`-adobe-helvetica-medium-r-normal--11`), bitmap, não
+TrueType. O próprio diálogo do xrdp é desenhado com fonte core, então o texto
+fica *idêntico* e não apenas parecido — sem antialiasing nenhum. É por isso que
+o `install.sh` instala `xfonts-base`: sem as fontes core a barra não sobe.
+
+Consequência a lembrar: os rótulos têm que ser **ASCII**. A fonte está em
+`iso8859-1` e o `.c` em UTF-8, então um rótulo acentuado sai corrompido no
+`XDrawString`.
+
+### Volume e escolha de dispositivo (31/07/2026)
+
+Os dois primeiros controles da barra são `Vol` e `Mic`. Cada um tem **três
+zonas**:
+
+```
+   ┌────┬──────────────┬──┐
+   │Vol │  ▓▓▓▓█       │ ▾│
+   └────┴──────────────┴──┘
+     │          │        └── abre a lista de dispositivos
+     │          └─────────── arrasta ou clica para ajustar
+     └────────────────────── alterna o mudo (afundado = mudo)
+```
+
+**Sem cache, ao contrário do estado USB.** O `pactl` responde em 7–9 ms porque
+fala por socket unix local — o que é caro é o interop do Windows, não um
+processo local. Então a barra pergunta a cada tick e reflete mudanças feitas por
+fora. Durante um arrasto ela **não** relê: o `pactl` ainda pode estar
+respondendo o valor antigo e o cursor pularia para trás.
+
+Sempre `@DEFAULT_SINK@` / `@DEFAULT_SOURCE@`, nunca um nome fixo. Assim o mesmo
+controle serve para o headset USB nativo e para o `xrdp-sink`, e continua certo
+depois de um clique em "Audio: Win".
+
+#### A lista de dispositivos é unificada — e precisa ser
+
+O Linux só tem **dois** dispositivos de cada lado: o `xrdp-sink` e, quando o
+headset está anexado, a placa dele. Um menu feito só com o `pactl` mostraria
+`xrdp-sink`, que não significa nada — e esconderia que atrás dele estão a caixa
+do notebook e o monitor, que são do Windows.
+
+Por isso o [`audio-dispositivos`](audio-dispositivos) junta os dois mundos:
+
+```
+> G435 Wireless Gaming Headset (aqui, USB)          ← placa nativa, sem estalo
+  Alto-falantes (Realtek(R) Audio) (pelo Windows)   ← canal RDP
+  LG HDR WFHD (NVIDIA) (pelo Windows)
+```
+
+Escolher um "pelo Windows" faz **duas** coisas: aponta o PulseAudio para o
+`xrdp-sink` **e** troca o dispositivo padrão do Windows. É o único caminho até a
+**caixa do notebook**, que não é USB (é Intel HDA/Realtek soldada na placa) e por
+isso nunca pode ser anexada aqui. O `usbipd` só passa USB.
+
+O `>` marca o que está em uso — marcador de texto, não cor: a paleta tem cinco
+cores e nenhuma sobra para "estado".
+
+Para saber qual é o padrão **atual do Windows** foi preciso o
+`IMMDeviceEnumerator`; o `IPolicyConfig` só escreve, não lê. Mesma regra de
+vtable dos outros: no `IMMDevice` o `GetId` é o **terceiro** método, e os dois
+antes existem só para ocupar o slot.
+
+> **Armadilha: as primitivas de desenho não podem ter a janela chumbada.**
+> `levantado`, `gravado`, `linha` e `texto` pintavam sempre na janela da barra.
+> Com o menu aberto, a moldura e o realce iam para a **barra**, nas coordenadas
+> do menu — como o menu abre acima dela, aparecia um retângulo fantasma algumas
+> linhas abaixo do ponteiro, e o realce de verdade nunca saía. Hoje existe um
+> `static Drawable alvo` que quem desenha ajusta antes.
+>
+> O sintoma enganava: o clique **funcionava** (ele sempre usou coordenadas),
+> só o retorno visual estava errado. Ao medir — ponteiro no centro exato de uma
+> linha — **nenhuma** linha acendia, o que descartou "está um pixel fora" e
+> apontou para o desenho estar indo para outro lugar.
+
+> **Duas armadilhas de menu com ponteiro capturado.** Com
+> `XGrabPointer(..., owner_events = False, ...)`:
+>
+> - **um clique fora também chega com `window == pop`**, só que com `x/y` fora do
+>   retângulo. Testar a janela não distingue dentro de fora; tem que ser por
+>   coordenada.
+> - **a linha tem que vir das coordenadas do clique**, não da linha "sob o
+>   mouse". Esta última só é preenchida por `MotionNotify`, e um clique direto
+>   não gera movimento — o menu fechava sem escolher nada.
+
+### Como acrescentar um item
+
+Escreva a função de ação e ponha **uma linha** na tabela `itens[]`:
+
+```c
+static Item itens[] = {
+    { BOTAO_USB, "Audio",    92, NULL,          "audio",  0, 0 },
+    { BOTAO_USB, "Camera",   92, NULL,          "camera", 0, 0 },
+    { RELOGIO,   NULL,       52, NULL,          NULL,     0, 0 },
+    { BOTAO,     "Desligar", 66, acao_desligar, NULL,     0, 0 },
+};
+```
+
+A largura da barra é calculada a partir dela; nada mais precisa mudar.
+
+### Ela se reposiciona sozinha — e por que isso é obrigatório
+
+A barra escuta `RRScreenChangeNotify` e se move quando o layout de monitores
+muda. Sem isso, o `jogo-windows` (que encolhe a sessão para um monitor) a
+deixaria fora da tela até o próximo login.
+
+No tratamento do evento, o `XRRUpdateConfiguration` **não é enfeite**: sem ele o
+Xlib continua com a tela antiga em cache e o reposicionamento usa geometria
+velha.
+
+> **Armadilha: o xrdp não marca monitor primário.** Medido em 30/07/2026 — numa
+> sessão o `xrandr --listmonitors` mostrava `+*rdp1`, e na seguinte, após "Sair
+> da sessão" e reconectar, **nenhum dos dois tinha a marca**:
+>
+> ```
+> 0: +rdp0 1920/344x1080/194+2560+0      <- sem o '*'
+> 1: +rdp1 2560/798x1080/334+0+0
+> ```
+>
+> Como a ordem em que o xrdp cria as saídas também não é estável, cair no
+> "índice 0" punha a barra no monitor errado de forma imprevisível. O desempate
+> é por **posição**: o monitor que contém a origem `(0,0)` — o mesmo critério
+> que o `jogo-windows` usa para numerar monitores.
 
 ## Fluidez
 
@@ -750,9 +950,36 @@ grep 'realtime priority' /proc/$(pgrep -x pulseaudio)/limits   # tem que ser 9
 chrt -p $(pgrep -x pulseaudio)
 ```
 
-Se ainda estalar com a prioridade valendo, o próximo passo é aceitar mais
-latência (`default-fragment-size-msec = 80`), não trocar de driver — a taxa de
-44100 Hz e o reamostrar de 48 kHz do navegador são limpos e não fazem estalo.
+> **Isto reduz, mas não elimina — e a causa completa é outra.** Medido em
+> 30/07/2026, algumas horas depois: o som ficava bom e **voltava a estalar depois
+> de uns 20 segundos**. Tocando um tom de 440 Hz e amostrando a latência do sink:
+>
+> ```
+> t=2s  20ms    t=14s   3ms  ←    t=26s   6ms
+> t=6s  29ms    t=18s  18ms       t=30s  19ms
+> t=10s 48ms    t=22s  31ms       t=34s  35ms
+> ```
+>
+> **Dente de serra**, entre ~3 ms e ~48 ms, ciclo de 12–16 s — e nunca chegando
+> aos 200 ms configurados. Cada queda a 3 ms é um estalo, e o primeiro ciclo se
+> fecha em ~20 s: exatamente o sintoma.
+>
+> A causa é **deriva de relógio**. O sink do xrdp não tem relógio de hardware,
+> ele simula um; o mstsc consome no cristal real da placa do Windows. A diferença
+> acumula, o buffer infla e periodicamente há um resync. Buffer e prioridade
+> tratam *jitter de CPU*, que é problema real mas não este — por isso melhoram e
+> não resolvem.
+>
+> **A eliminação é estrutural: áudio USB nativo.** Veja "Transferir áudio,
+> microfone e câmera". Com o headset anexado por USB/IP a latência fica em
+> **208–217 ms** (amplitude de 9 ms contra 45 ms), em 48 kHz nativo, sem
+> reamostrar. Mantenha os ajustes desta seção de qualquer forma: eles valem
+> sempre que o áudio estiver no caminho do RDP.
+
+Se ainda estalar com a prioridade valendo **e** o áudio no caminho do RDP, o
+próximo passo é aceitar mais latência (`default-fragment-size-msec = 80`), não
+trocar de driver — a taxa de 44100 Hz e o reamostrar de 48 kHz do navegador são
+limpos e não fazem estalo.
 
 ### Microfone
 
@@ -796,6 +1023,20 @@ Firefox enxergar.
 >               "audiocapturemode:i:1".encode("utf-16-le"))
 > ```
 
+**Dois microfones, e o do RDP é o pior dos dois.** Depois que a passagem USB
+existiu (veja "Transferir áudio, microfone e câmera"), há dois caminhos: o canal
+do RDP, que compartilha o microfone padrão do Windows, e o headset anexado
+nativamente, que traz o microfone dele junto. O nativo é melhor — sem
+compressão, sem o canal.
+
+O canal do RDP continua valendo porque cobre o caso em que o headset está no
+Windows e você quer falar aqui. Mas ele **tem um custo escondido**: é justamente
+o `audiocapturemode:i:1` que faz o mstsc abrir um stream de captura no
+dispositivo padrão do Windows, e esse stream é um dos dois detentores que travam
+o `attach`. As duas funcionalidades disputam o mesmo aparelho físico. Está
+resolvido (o `transferir-usb` reconecta o mstsc), mas é a explicação de por que
+mexer numa mexe na outra.
+
 ### Webcam: não pelo RDP — mas há um caminho
 
 Duas coisas separadas, e confundi-las leva a procurar configuração que não
@@ -825,28 +1066,290 @@ Isso é novidade que vale registrar: kernels antigos da WSL **não** traziam
 `uvcvideo`, e a resposta corrente na internet ainda é "precisa compilar kernel
 próprio". Aqui não precisa.
 
-Falta a metade Windows — o `usbipd-win`, que **não está instalado**:
-
-```powershell
-winget install usbipd            # uma vez, PowerShell administrador
-usbipd list                      # ache o BUSID da camera
-usbipd bind   --busid <BUSID>    # administrador, uma vez por dispositivo
-usbipd attach --wsl --busid <BUSID>
-```
-
-Depois, do lado Linux, `/dev/video0` aparece e o Firefox passa a ver a câmera.
+A metade Windows é o `usbipd-win`. **Feito em 30/07/2026** — veja "Transferir
+áudio, microfone e câmera", que é a seção que descreve como isso virou um botão.
+Do lado Linux, `/dev/video0` e `/dev/video1` aparecem e o Firefox vê a câmera.
 
 **O preço, que decide se vale:** enquanto anexada, a câmera é **exclusiva da
-WSL** — o Windows perde o acesso. E o `attach` se desfaz a cada
-`wsl --shutdown`, então é um comando por sessão de uso.
+WSL** — o Windows perde o acesso.
 
-> **Para Google Meet, a recomendação é o navegador do Windows.** É o mesmo
-> raciocínio da seção "Jogar no Windows cedendo um monitor": a câmera e o
-> microfone pertencem ao Windows, e trazê-los para dentro só para a imagem
-> voltar comprimida pelo x264 paga dois encodes em série. `Ctrl+Alt+Break`
-> devolve o Windows com a sessão Linux intacta por trás. O caminho USB acima
-> existe para quando a chamada **tem** que acontecer dentro do Linux — um
-> `v4l2` que você está programando, por exemplo.
+> **Pendente (30/07/2026): o Meet reconhece a câmera mas não mostra imagem.** No
+> Firefox dentro da sessão, o Google Meet lista o dispositivo pelo nome certo
+> ("ACER HD User Facing") e não renderiza vídeo. Ainda não investigado; suspeitas
+> a testar são negociação de formato do `uvcvideo` sobre USB/IP e banda do
+> canal. O `/dev/video0` existe e o usuário está no grupo `video`.
+
+## Transferir áudio, microfone e câmera (30/07/2026)
+
+Dois botões na barra passam o **headset USB** e a **webcam** entre o Windows e
+esta sessão, com um clique:
+
+```
+  │ Audio: Linux │   │ Camera: Win │
+```
+
+`Audio: Linux` significa "está aqui"; `Audio: Win`, "está no Windows";
+`Audio: --`, que falta o `usbipd bind` ou o aparelho está desligado. O `...` é o
+estado pendente, para o clique não parecer inerte.
+
+Quem faz o trabalho é [`transferir-usb`](transferir-usb), que também serve por
+linha de comando:
+
+```bash
+transferir-usb audio  linux      # traz o headset para cá
+transferir-usb camera windows    # devolve a webcam
+transferir-usb audio  status     # linux | windows | nao-compartilhado | ausente
+```
+
+**Por que existe:** é a eliminação estrutural dos estalos (veja "Os
+estalinhos"). Com o headset anexado, o áudio vira ALSA nativo com relógio de
+hardware de verdade — latência de **208–217 ms** estável, contra o dente de serra
+de 3–48 ms do sink do xrdp. E o microfone vem junto, sem depender do canal RDP.
+
+**O preço, que é a razão de haver dois botões e não um:** o dispositivo é
+**exclusivo**. Enquanto está aqui, o Windows não o tem. Por isso áudio e câmera
+são separados — bundlá-los obrigaria a tudo-ou-nada, e o caso útil é justamente
+áudio nativo aqui *com a câmera ainda no Windows* para o Meet.
+
+### Casa e trabalho: ele acha o headset sozinho (31/07/2026)
+
+O headset do trabalho é outro, com outro VID:PID. Chumbar um só quebraria em um
+dos dois ambientes, então a resolução é automática e a regra é
+**"está presente?"**:
+
+| Situação | O que acontece |
+|---|---|
+| o ID gravado está presente (qualquer lado) | não mexe em nada, custo zero |
+| não está, e há **um** áudio USB no Windows | adota e grava, sem perguntar |
+| não está, e há **vários** | pergunta uma vez (zenity) e grava |
+| não está, e não há nenhum | mantém o que estava — pode estar só desligado |
+
+A precedência, do mais fraco ao mais forte — o último lido vence:
+
+```
+valores no proprio script  ->  audio-detectado.conf  ->  dispositivos.conf
+   (chute inicial)              (automatico)             (sua escolha, ganha)
+```
+
+**Não há assinatura de ambiente** como o `jogo-windows` faz com monitores, e foi
+decisão deliberada: aqui a *presença* do aparelho já é o discriminador, e se
+corrige sozinha ao trocar de mesa — sem precisar reconhecer "que ambiente é
+este".
+
+A detecção pergunta ao Windows quais endpoints de áudio estão atrás de um USB
+(`audio-padrao.ps1 -ListarUsb`), porque um headset recém-ligado aparece primeiro
+lá. Forçar a redetecção:
+
+```bash
+transferir-usb detectar
+```
+
+> **Armadilha: `grep` engole a saída do PowerShell.** Ele devolve os acentos na
+> codificação do console do Windows (CP-850/1252), não em UTF-8. O `grep` vê
+> bytes inválidos, declara `binary file matches` e **descarta todas as linhas** —
+> a detecção falhava dizendo "nenhum áudio USB encontrado". É preciso
+> `grep -a` mais um `tr -cd '[:print:]\t\n'`. O VID:PID é ASCII, então só o nome
+> exibido perde os acentos.
+
+### Pré-requisito, uma vez por máquina
+
+Em **PowerShell administrador**:
+
+```powershell
+winget install --id dorssel.usbipd-win
+```
+
+Feche e reabra o PowerShell (o `usbipd` só entra no `PATH` numa sessão nova),
+descubra os BUSID e compartilhe:
+
+```powershell
+usbipd list
+usbipd bind --busid 1-3      # o headset, no exemplo desta máquina
+usbipd bind --busid 1-6      # a webcam
+```
+
+O `bind` **não tira nada do Windows** — só marca como compartilhável, e é
+persistente. O `attach` e o `detach` que o botão usa **não** precisam de
+administrador; foi isso que tornou o botão possível, já que o token do interop
+da WSL vem filtrado e nada elevado roda de dentro da sessão.
+
+> Os comandos acima são um **modelo**: `<BUSID>` é para substituir pelo número
+> real. O PowerShell reserva o `<` e devolve *"Operador '<' reservado para uso
+> futuro"* se você colar literalmente. Rode uma linha por vez.
+
+Os dispositivos são identificados por **VID:PID**, não por BUSID — o busid muda
+se você trocar a porta USB, e este projeto não tem calibração em lugar nenhum.
+Sobrescreva em `~/.config/linux-fullscreen/dispositivos.conf`:
+
+```bash
+ID_AUDIO="046d:0adf"      # G435 Wireless Gaming Headset
+ID_CAMERA="0408:403a"     # ACER HD User Facing
+```
+
+### O que trava o `attach`, e as duas coisas que resolvem
+
+O sintoma é sempre este, e a mensagem do `usbipd` engana ao culpar "software":
+
+```
+WSL usbip: error: Attach Request for 1-3 failed - Device busy (exported)
+usbipd: warning: The device appears to be used by Windows
+```
+
+**Não há `--force` no `attach`** (só no `bind`, e ele significa *"the host cannot
+use the device"* — permanente, o que quebraria o vaivém). Então o Windows tem
+que soltar o aparelho de verdade. São **dois** detentores, e é preciso tratar os
+dois:
+
+**1. O serviço de áudio, enquanto o headset for o dispositivo padrão.** Resolvido
+pelo [`windows/audio-padrao.ps1`](windows/audio-padrao.ps1), que troca o padrão
+do Windows por script. **Não instala nada e não precisa de administrador**: o
+Windows não tem comando nativo para isso, e as receitas correntes mandam
+instalar `nircmd`, `SoundVolumeView` ou o módulo `AudioDeviceCmdlets` — todas
+chamam por baixo a mesma interface COM não documentada, a `IPolicyConfig`, que dá
+para instanciar direto.
+
+**2. O `mstsc`.** Este é o que custou mais para achar. Ele abre stream de áudio
+nos dispositivos padrão do Windows **no momento em que conecta** — um de
+reprodução (para tocar o áudio desta sessão) e um de captura (por causa do
+`audiocapturemode:i:1`) — e **não os larga quando o padrão muda depois**. Trocar
+o padrão e esperar 12 s não resolvia. Quem apontou o culpado:
+
+```powershell
+Get-Process | Where-Object { $_.Modules.ModuleName -contains "AUDIOSES.DLL" }
+#   brave  brave  explorer  ipf_helper  mstsc  RtkAudUService64  ...
+```
+
+A correção é **fechar e reabrir o mstsc** na troca, o que o `transferir-usb` faz
+sozinho: ao subir de novo ele abre o dispositivo que for padrão *naquele
+momento*. Custa uns 3–4 s de tela piscando; o ciclo completo leva ~6 s.
+
+Reconecta nas **duas** direções, e a de volta não é simetria gratuita: o mstsc em
+execução tinha aberto o alto-falante, então sem reconectar o áudio da sessão
+continuaria saindo por ele com o headset ocioso ao lado.
+
+> **Isso só é seguro por causa do `Policy=Default`** no `/etc/xrdp/sesman.ini` —
+> veja "Por que a sessão sobrevive à troca". Fechar o mstsc apenas desconecta. Se
+> alguém puser `Policy=UBD`, este botão passa a destruir trabalho.
+
+**Trava de segurança:** se o `attach` falhar, o mstsc reabre de qualquer forma.
+Sem isso você perderia a tela numa falha — e a mensagem de erro seria desenhada
+numa sessão que ninguém está vendo.
+
+### Três armadilhas do lado Windows
+
+**O Windows não chama o headset de "G435".** Para ele é *"Fone de ouvido do
+headset (Tecnologia Intel Smart Sound para áudio USB)"* — genérico e traduzido. O
+nome "G435" só existe no descritor USB que o `usbipd` mostra. Casar por nome
+falhou nas duas pontas: o `-Evitar` não excluía nada (acertava por sorte, pegando
+o primeiro da lista) e o `-Restaurar` não achava nada. O vínculo correto está na
+propriedade **39** do endpoint, no registro:
+
+```
+{b3f8fa53-0004-438e-9003-51a46e139bfc},39 = {1}.USB\VID_046D&PID_0ADF&MI_01\...
+```
+
+É o mesmo VID:PID que o `usbipd` usa, então as duas metades falam a mesma língua
+— e não quebra num Windows de outro idioma.
+
+**O `DeviceState` do registro é bitfield, não enum.** Valem `4`, `8`,
+`0x20000004`, `0x22000004`… O filtro tem que ser `-band 1` (o bit ACTIVE);
+comparar com `-eq 1` devolve lista vazia e o script sai calado.
+
+**O PowerShell não converte objeto COM para interface.**
+`[IPolicyConfig] (New-Object PolicyConfigClient)` falha com *"Não é possível
+converter o valor PolicyConfigClient no tipo IPolicyConfig"* — ele não faz
+`QueryInterface` em classe `ComImport`. A conversão tem que ficar **dentro do
+C#**, onde é um `QueryInterface` de verdade. E na declaração da interface a
+**ordem dos métodos é o que importa**: são slots de vtable, não nomes. Os nove
+primeiros existem só para empurrar o `SetDefaultEndpoint` para o slot 10.
+
+### Duas armadilhas do lado Linux
+
+**`setsid --fork`, não `( cmd & )`.** Lançar o mstsc com
+`( setsid "$MSTSC" "$perfil" & )` fazia a chamada do `transferir-usb` nunca
+retornar. Medido em 31/07/2026, com um `PING.EXE` de 20 s no lugar do mstsc:
+
+| | com a saída lida por um pipe | sem pipe |
+|---|---|---|
+| `( setsid cmd & )` | **21 s** | 1 s |
+| `setsid --fork cmd </dev/null` | 1 s | 1 s |
+
+**Não é o bash esperando um filho** — sem pipe o script retorna na hora. O que
+prende é o **descritor de saída**: o proxy de interop do WSL fica com a saída
+*original* do script, apesar do `>/dev/null 2>&1`. Dá para ver nos descritores
+dele enquanto roda:
+
+```bash
+ls -l /proc/<pid-do-proxy>/fd
+#  fd1 -> .../a-saida-de-fora     <- e nao /dev/null, como pedimos
+```
+
+Então quem trava é **quem estiver lendo** a saída — um pipe, uma substituição de
+comando, ou o processo que chamou o script. Como o proxy só morre quando você
+fecha a janela do Windows, a espera é indefinida.
+
+> **Correção (31/07/2026).** A primeira versão desta nota dizia que "o bash
+> ficava preso em `do_wait` esperando o processo de interop". O `do_wait` foi
+> observado de verdade, mas a medição acima mostra que a causa é o descritor
+> herdado, não a espera por um filho. Conselho diferente: não adianta trocar
+> como o processo é bifurcado se a saída continuar sendo herdada.
+
+> **O mesmo padrão está no `jogo-windows`** (`abrir_mstsc`, linha 254). Lá não
+> incomoda **porque ninguém lê a saída dele**: é chamado pelo appfinder ou por um
+> terminal interativo. Passa a incomodar no dia em que alguém o chamar de um
+> script com `$( )` ou com pipe — aí trava até a janela do jogo fechar.
+
+**O cache da barra precisa ser revalidado.** A barra **não** chama o
+`usbipd.exe` a cada redesenho — uma chamada de interop leva quase um segundo e
+travaria o desenho. Ela lê um cache em `$XDG_RUNTIME_DIR/transferir-usb.estado`.
+Mas esse cache só era reescrito quando *nós* agíamos, e por isso mentia quando o
+estado mudava por fora: visto dizendo `camera=windows` enquanto o `usbipd` a
+mostrava como `Attached`. A barra agora pede um refresh a cada ~30 s, solto.
+
+O cache vive no `XDG_RUNTIME_DIR`, então morre com a sessão — o que é correto,
+porque um `wsl --shutdown` devolve tudo ao Windows de qualquer jeito. O padrão
+volta a ser "Windows dono", que é o seguro para quando você abre um jogo.
+
+### Sair da sessão devolve tudo
+
+O `linux-desktop-down` chama o `transferir-usb` antes de encerrar, **nos dois
+modos**, e o motivo é diferente em cada um:
+
+| Modo | Por que precisa |
+|---|---|
+| "Sair da sessão" | a VM continua ligada, então o aparelho fica **preso na WSL** |
+| "Desligar" (VM) | o `wsl --shutdown` devolve o dispositivo sozinho, **mas não desfaz a troca de dispositivo padrão** no Windows |
+
+O segundo é o que engana: parece que o `wsl --shutdown` resolve tudo, e resolve
+metade — sem passar por aqui, o Windows volta com o som no alto-falante e o
+headset ocioso.
+
+Roda **antes** dos `pkill`, de propósito: depois que o xfwm4 morre a sessão cai e
+não haveria mais quem chamasse o `usbipd`. Leva alguns segundos (o Windows
+precisa reenumerar o USB), por isso a barra de progresso do zenity. Ali o vaivém
+do mstsc é desligado com `TRANSFERIR_SEM_RECONECTAR=1` — a sessão está acabando,
+e reabrir o cliente para matá-lo dois segundos depois só atrasaria.
+
+### Diagnóstico
+
+```bash
+transferir-usb estado                              # reescreve o cache e mostra
+cat /run/user/1000/transferir-usb.log              # a saida crua do usbipd
+cd /tmp && '/mnt/c/Program Files/usbipd-win/usbipd.exe' list
+```
+
+Estados do `usbipd list`: `Not shared` (falta o `bind`), `Shared` (no Windows,
+pronto), `Attached` (aqui). Do lado Linux, `aplay -l` e `ls /dev/video*`.
+
+E para ver o que o Windows está oferecendo de áudio:
+
+```bash
+cd /tmp && powershell.exe -ExecutionPolicy Bypass \
+  -File "$LOCALAPPDATA\linux-fullscreen\audio-padrao.ps1" -Listar
+```
+
+O `.ps1` se copia sozinho para o `%LOCALAPPDATA%` quando está mais novo que a
+cópia de lá — editar no repositório basta, não há passo de instalação no Windows.
 
 ## Jogar no Windows cedendo um monitor
 
@@ -1117,15 +1620,27 @@ retoma o multimonitor.
 | `linux-desktop-up` | `/usr/local/bin/linux-desktop-up` |
 | `linux-desktop-down` | `/usr/local/bin/linux-desktop-down` |
 | `jogo-windows` | `/usr/local/bin/jogo-windows` |
+| `transferir-usb` | `/usr/local/bin/transferir-usb` |
+| `audio-dispositivos` | `/usr/local/bin/audio-dispositivos` |
+| `barra-tarefas.c` | **compilado** para `/usr/local/bin/barra-tarefas` |
 | `desktop/*.desktop` | `/usr/share/applications/` (itens do appfinder) |
 | `x11-unix-writable.service` | `/etc/systemd/system/` |
 | `i3.config` | `~/.config/i3/config` (só serve se voltar ao i3) |
+
+A `barra-tarefas` é o **único item compilado**: o `install.sh` roda
+`gcc -O2 -Wall -o barra-tarefas barra-tarefas.c -lX11 -lXrandr` no passo 2 (por
+isso `gcc`, `libx11-dev`, `libxrandr-dev` e `xfonts-base` na lista de pacotes).
+O binário está no `.gitignore` — o que se versiona é o `.c`.
 
 Do lado Windows, `Linux Fullscreen.vbs` e `Linux Fullscreen.rdp` (de `windows/`)
 vão **juntos** para a Área de Trabalho: o `.vbs` é o que se clica, e o `.rdp` ao
 lado é o perfil de conexão que ele usa (fullscreen multimonitor + os ajustes de
 fluidez). Sem o `.rdp` o `.vbs` ainda conecta, mas cai nas opções padrão do
 mstsc.
+
+O `windows/audio-padrao.ps1` **não** vai para a Área de Trabalho: o
+`transferir-usb` o copia sozinho para `%LOCALAPPDATA%\linux-fullscreen\` sempre
+que a cópia do repositório for mais nova. Editar aqui basta.
 
 O terceiro arquivo de `windows/`, o `assinar-rdp.ps1`, também vai para lá, mas é
 de execução única: **um PowerShell do Windows como administrador**, uma vez por
@@ -1894,6 +2409,73 @@ Lembre também que a WSL sobe vários serviços sem sentido numa VM — `bluetoo
 `cups`, `ModemManager`, `nvidia-suspend`, `tlp`, `thermald`, `cloud-init`.
 Somam pouco (~100 MB), mas atrasam o boot; `systemctl disable` neles é seguro.
 
+## O grafo do projeto (graphify, 31/07/2026)
+
+O código tem um grafo de conhecimento gerado pelo
+[graphify](https://github.com/Graphify-Labs/graphify), em `graphify-out/` — que
+está no `.gitignore`, porque é **derivado**, como o binário da barra. Regenerar
+custa um comando e zero tokens.
+
+```bash
+pip3 install --user graphifyy      # o pacote tem dois "y"; o comando tem um so
+graphify install --platform claude # registra a skill /graphify
+graphify . --code-only             # constroi
+graphify update .                  # apos mexer no codigo
+```
+
+Hoje: **121 nós, 205 arestas, 15 comunidades**, extraídos por AST local
+(tree-sitter), sem chamada de API nenhuma.
+
+### `--code-only` não é opcional
+
+Sem ele, o graphify classifica o `README.md` como conteúdo semântico e o manda
+para um LLM. Na primeira tentativa aqui ele detectou uma `GEMINI_API_KEY` no
+ambiente e tentou justamente isso — só não gastou porque faltava um pacote.
+
+É gasto sem retorno: **o valor deste README é a prosa curada**, as medições e as
+correções datadas. Um resumo automático dela não acrescenta nada e custa tokens
+toda vez.
+
+### Para que ele serve, e para que não
+
+Serve bem para navegar código que você não lembra:
+
+```bash
+graphify explain "aplicar_volume()"   # onde esta, quem chama, o que chama
+graphify query "como o volume e aplicado"
+firefox graphify-out/graph.html       # o mapa visual, comunidades nomeadas
+```
+
+**Não serve** para entender como os componentes conversam. O próprio relatório
+diz *"all connections are within the same source files"*, e um
+`graphify path "transferir-usb script" "audio-dispositivos script"` responde
+**"No path found"** — mesmo que o primeiro execute o segundo. A razão é
+estrutural: aqui os componentes se chamam **por nome de comando**, e AST não
+resolve isso. O grafo enxerga 15 ilhas, uma por arquivo.
+
+Por isso a cadeia real está desenhada à mão no `CLAUDE.md`. E por isso, com 15
+arquivos, o `grep` continua achando qualquer coisa mais rápido — o grafo passa a
+compensar quando houver muitos arquivos numa linguagem só.
+
+### Nomear as comunidades não custa API
+
+Elas nascem como "Community 0", "Community 1"… O passo que dá nome a elas é
+feito pelo **assistente**, lendo `graphify-out/.graphify_analysis.json` — não por
+uma API. Os nomes ficam em `graphify-out/.graphify_labels.json` e sobrevivem a um
+`graphify update`. A flag `--no-label` pula esse passo.
+
+### Duas armadilhas de instalação
+
+- **`command not found` não é falta de conda.** O binário vai para
+  `~/.local/bin`, que precisa estar no `PATH` — há uma linha para isso no
+  `~/.bashrc`, e ela só vale em shell **novo** (`source ~/.bashrc` resolve no
+  atual). O shebang aponta para o Python do miniconda por caminho absoluto,
+  então `conda activate` é desnecessário.
+- **O shebang amarra ao Python do miniconda.** Se um dia o miniconda sair ou
+  mudar de versão, o comando quebra com `bad interpreter`. A correção é
+  `pip3 install --user --force-reinstall graphifyy`, ou instalar com `uv`, que
+  isola num ambiente próprio.
+
 ## Antes de formatar a máquina
 
 O único diretório que precisa sobreviver é **este** (`~/linux-fullscreen`) —
@@ -1915,11 +2497,22 @@ o comportamento do `Alt+Tab` à mão, copie `~/.config/xfce4/` junto.
 O mesmo vale para o som: o `instalar-som.sh` refaz tudo — inclusive as máscaras
 do PipeWire em `~/.config/systemd/user/`, que também não estão aqui.
 
-E há `~/.config/linux-fullscreen/`, do `jogo-windows`. Só metade importa: o
-`monitores.conf` é descartável (ele repergunta uma vez por ambiente e refaz),
-mas o **`jogos.conf` é curado à mão** e não tem como ser reconstruído — copie
-esse. É o único arquivo deste projeto que guarda uma escolha sua e não vive no
-repositório.
+E há `~/.config/linux-fullscreen/`. Só parte importa: o `monitores.conf` é
+descartável (o `jogo-windows` repergunta uma vez por ambiente e refaz), e o
+`dispositivos.conf` só existe se você tiver sobrescrito os VID:PID do
+`transferir-usb` — sem ele valem os padrões do script. Mas o **`jogos.conf` é
+curado à mão** e não tem como ser reconstruído — copie esse. É o único arquivo
+deste projeto que guarda uma escolha sua e não vive no repositório.
+
+Do lado Windows, o `usbipd bind` é persistente e **se perde na formatação**:
+numa máquina nova é preciso reinstalar o `usbipd-win` e refazer os `bind` (veja
+"Transferir áudio, microfone e câmera"). O `audio-evitado.txt` em
+`%LOCALAPPDATA%\linux-fullscreen\` é descartável — o script o reescreve.
+
+O `graphify` também se perde: é `pip3 install --user graphifyy` mais
+`graphify install --platform claude` de novo (veja "O grafo do projeto"). O
+`graphify-out/` **não** precisa ser salvo — reconstruir custa um comando e zero
+tokens.
 
 Lembre que a WSL inteira some ao formatar: `~`, pacotes apt, snaps, tudo.
 `wsl --export Ubuntu-24.04 D:\ubuntu.tar` salva a distro completa, se preferir

@@ -64,7 +64,7 @@ static unsigned long FACE, HI, SH, INK;
 static int          LARG;
 static time_t       mt_ref;      /* mtime do cache no instante do clique */
 
-enum { BOTAO, RELOGIO, BOTAO_USB };
+enum { BOTAO, RELOGIO, BOTAO_USB, VOLUME };
 
 typedef struct {
     int         tipo;
@@ -78,6 +78,26 @@ typedef struct {
 
 static void acao_desligar(void);
 static void tick(void);
+static void aplicar_volume(Item *it, int mx);
+static void desenhar(void);
+static void levantado(int x, int y, int w, int h);
+static void gravado(int x, int y, int w, int h);
+static void primario(int *px, int *py, int *pw, int *ph);
+static void fechar_popup(void);
+static void escolher_popup(int i);
+static void desenhar_popup(void);
+static void abrir_popup(Item *it);
+static int  arrastando = -1;   /* item de volume sob arrasto, ou -1 */
+
+/* Partes clicaveis de um controle de volume, da esquerda para a direita:
+ *   [rotulo]  alterna o mudo
+ *   [calha]   ajusta o nivel
+ *   [seta]    abre o menu de dispositivos
+ */
+#define VOL_LARG   116
+#define VOL_ROTULO  26
+#define VOL_SETA    12
+#define VOL_CALHA  (VOL_LARG - VOL_ROTULO - GAP - VOL_SETA - 2)
 
 /* A barra, da esquerda para a direita. Sem lista de janelas de proposito - o
  * caminho de volta para janela minimizada continua sendo o Alt+Tab
@@ -89,11 +109,38 @@ static void tick(void);
  * ainda no Windows para o Meet. A largura cabe o rotulo mais longo
  * ("Camera: Linux") para a barra nao mudar de tamanho ao alternar. */
 static Item itens[] = {
+    { VOLUME,    "Vol",     VOL_LARG, NULL,       "sink",   0, 0 },
+    { VOLUME,    "Mic",     VOL_LARG, NULL,       "source", 0, 0 },
     { BOTAO_USB, "Audio",    92, NULL,          "audio",  0, 0 },
     { BOTAO_USB, "Camera",   92, NULL,          "camera", 0, 0 },
     { RELOGIO,   NULL,       52, NULL,          NULL,     0, 0 },
     { BOTAO,     "Desligar", 66, acao_desligar, NULL,     0, 0 },
 };
+
+/* ---- menu de dispositivos ------------------------------------------------
+ * O Linux so tem dois dispositivos de cada lado (xrdp e, quando anexada, a
+ * placa USB). Um menu feito so com o pactl mostraria "xrdp-sink", que nao
+ * significa nada, e esconderia a caixa do notebook e o monitor - que sao do
+ * Windows e so existem atras do canal RDP. Por isso a lista vem do
+ * audio-dispositivos, que junta os dois mundos.
+ */
+#define MAX_DEV 16
+#define POP_LINHA 18
+
+/* Onde as primitivas de desenho pintam. Existe porque levantado/gravado/linha/
+ * texto tinham a janela da BARRA chumbada: a moldura e o realce do menu eram
+ * pintados sobre a barra, nas coordenadas do menu - aparecia um retangulo
+ * fantasma algumas linhas abaixo do ponteiro, e o realce de verdade nunca
+ * saia. Quem desenha ajusta este alvo antes. */
+static Drawable alvo;
+
+static Window pop = 0;              /* 0 = fechado */
+static int    pop_n, pop_sob = -1;  /* itens; linha sob o mouse */
+static int    pop_w, pop_h;
+static char   pop_id[MAX_DEV][192];
+static char   pop_rot[MAX_DEV][120];
+static int    pop_atual[MAX_DEV];
+static char   pop_lado[8];
 #define N_ITENS ((int) (sizeof itens / sizeof itens[0]))
 
 /* Estado lido do cache que o transferir-usb escreve. A barra NAO chama o
@@ -101,6 +148,60 @@ static Item itens[] = {
  * desenho. */
 static char est_audio[24]  = "?";
 static char est_camera[24] = "?";
+
+/* Volume, 0-100, e mudo. Aqui, ao contrario do estado USB, NAO ha cache: o
+ * pactl responde em 7-9 ms (medido em 31/07/2026) porque fala por socket unix
+ * local, entao da para perguntar a cada tick sem travar o desenho. E o interop
+ * do Windows que e caro, nao um processo local.
+ *
+ * Sempre @DEFAULT_SINK@ / @DEFAULT_SOURCE@, nunca um nome fixo: assim o mesmo
+ * controle serve para o headset USB nativo e para o xrdp-sink, e continua certo
+ * depois de um clique em "Audio: Win". */
+static int vol_sink = -1, vol_source = -1;
+static int mudo_sink = 0, mudo_source = 0;
+
+/* Le a primeira porcentagem da saida do pactl. Retorna -1 se nao houver. */
+static int pactl_num(const char *cmd)
+{
+    FILE *f = popen(cmd, "r");
+    char buf[512], *p;
+    int v = -1;
+
+    if (!f)
+        return -1;
+    if (fgets(buf, sizeof buf, f)) {
+        p = strchr(buf, '%');
+        if (p) {
+            while (p > buf && (p[-1] == ' ' || (p[-1] >= '0' && p[-1] <= '9')))
+                p--;
+            v = atoi(p);
+        }
+    }
+    pclose(f);
+    return v;
+}
+
+static int pactl_mudo(const char *cmd)
+{
+    FILE *f = popen(cmd, "r");
+    char buf[128];
+    int m = 0;
+
+    if (!f)
+        return 0;
+    if (fgets(buf, sizeof buf, f))
+        m = strstr(buf, "yes") != NULL;
+    pclose(f);
+    return m;
+}
+
+static void ler_volumes(void)
+{
+    vol_sink   = pactl_num("pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null");
+    vol_source = pactl_num("pactl get-source-volume @DEFAULT_SOURCE@ 2>/dev/null");
+    mudo_sink   = pactl_mudo("pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null");
+    mudo_source = pactl_mudo("pactl get-source-mute @DEFAULT_SOURCE@ 2>/dev/null");
+}
 
 static void ler_cache(void)
 {
@@ -169,6 +270,167 @@ static void acao_desligar(void)
     solta("linux-desktop-down");
 }
 
+/* Clique ou arrasto num controle de volume. No rotulo alterna o mudo; na calha
+ * ajusta o nivel.
+ *
+ * O valor local e atualizado na hora e o pactl e chamado solto: assim o cursor
+ * acompanha o mouse sem esperar processo nenhum. O tick corrige depois se algo
+ * mudou o volume por fora. */
+static void aplicar_volume(Item *it, int mx)
+{
+    int e_sink = !strcmp(it->dev, "sink");
+    int calha_x = it->x + VOL_ROTULO + GAP;
+    int util = VOL_CALHA - 8;
+    char cmd[160];
+    int v;
+
+    if (mx >= it->x + it->larg - VOL_SETA) {  /* seta: menu de dispositivos */
+        abrir_popup(it);
+        return;
+    }
+
+    if (mx < it->x + VOL_ROTULO) {          /* rotulo: alterna o mudo */
+        int novo = e_sink ? !mudo_sink : !mudo_source;
+        if (e_sink) mudo_sink = novo; else mudo_source = novo;
+        snprintf(cmd, sizeof cmd, "pactl set-%s-mute @DEFAULT_%s@ %d",
+                 e_sink ? "sink" : "source", e_sink ? "SINK" : "SOURCE", novo);
+        solta(cmd);
+        desenhar();
+        return;
+    }
+
+    v = ((mx - calha_x - 4) * 100 + util / 2) / (util > 0 ? util : 1);
+    if (v < 0)   v = 0;
+    if (v > 100) v = 100;
+
+    if (e_sink) vol_sink = v; else vol_source = v;
+    snprintf(cmd, sizeof cmd, "pactl set-%s-volume @DEFAULT_%s@ %d%%",
+             e_sink ? "sink" : "source", e_sink ? "SINK" : "SOURCE", v);
+    solta(cmd);
+    desenhar();
+}
+
+/* ---- o menu de dispositivos --------------------------------------------- */
+
+static void desenhar_popup(void)
+{
+    int i;
+
+    if (!pop)
+        return;
+    alvo = pop;
+    levantado(0, 0, pop_w, pop_h);
+
+    for (i = 0; i < pop_n; i++) {
+        int y = 2 + i * POP_LINHA;
+        int w = XTextWidth(fonte, pop_rot[i], strlen(pop_rot[i]));
+
+        if (i == pop_sob)
+            gravado(2, y, pop_w - 4, POP_LINHA);
+
+        /* O que esta em uso leva um marcador de texto, nao cor nova: a paleta
+         * tem cinco cores e nenhuma sobra para "estado". */
+        XSetFont(dpy, gc, fonte->fid);
+        XSetForeground(dpy, gc, INK);
+        XDrawString(dpy, alvo, gc, 8, y + POP_LINHA / 2 + 4,
+                    pop_atual[i] ? ">" : " ", 1);
+        XDrawString(dpy, alvo, gc, 20, y + POP_LINHA / 2 + 4,
+                    pop_rot[i], strlen(pop_rot[i]));
+        (void) w;
+    }
+    XFlush(dpy);
+}
+
+static void fechar_popup(void)
+{
+    if (!pop)
+        return;
+    XUngrabPointer(dpy, CurrentTime);
+    XDestroyWindow(dpy, pop);
+    pop = 0;
+    pop_sob = -1;
+}
+
+static void abrir_popup(Item *it)
+{
+    char cmd[160], linha[512];
+    XSetWindowAttributes at;
+    FILE *f;
+    int larg = 120, bx, by, mx, my, mw, mh;
+
+    fechar_popup();
+    snprintf(pop_lado, sizeof pop_lado, "%s",
+             !strcmp(it->dev, "sink") ? "saida" : "entrada");
+    snprintf(cmd, sizeof cmd, "audio-dispositivos listar %s 2>/dev/null", pop_lado);
+
+    pop_n = 0;
+    f = popen(cmd, "r");
+    if (!f)
+        return;
+    while (pop_n < MAX_DEV && fgets(linha, sizeof linha, f)) {
+        char *t1 = strchr(linha, '\t'), *t2;
+        int w;
+
+        if (!t1) continue;
+        *t1 = '\0';
+        t2 = strchr(t1 + 1, '\t');
+        if (!t2) continue;
+        *t2 = '\0';
+        { char *nl = strchr(t2 + 1, '\n'); if (nl) *nl = '\0'; }
+
+        snprintf(pop_id[pop_n],  sizeof pop_id[0],  "%.190s", linha);
+        snprintf(pop_rot[pop_n], sizeof pop_rot[0], "%.118s", t2 + 1);
+        pop_atual[pop_n] = atoi(t1 + 1);
+
+        w = XTextWidth(fonte, pop_rot[pop_n], strlen(pop_rot[pop_n])) + 32;
+        if (w > larg) larg = w;
+        pop_n++;
+    }
+    pclose(f);
+    if (pop_n == 0)
+        return;
+
+    pop_w = larg;
+    pop_h = pop_n * POP_LINHA + 4;
+
+    /* Abre ACIMA da barra: ela vive na base da tela, entao para baixo nao ha
+     * espaco. E prende no monitor para o menu nao vazar pela lateral. */
+    primario(&mx, &my, &mw, &mh);
+    bx = itens[0].x;                       /* posicao da barra na tela */
+    bx = (LARG >= mw) ? mx : mx + (mw - LARG) / 2;
+    bx += it->x;
+    if (bx + pop_w > mx + mw) bx = mx + mw - pop_w;
+    if (bx < mx) bx = mx;
+    by = my + mh - ALTURA - pop_h;
+
+    at.override_redirect = True;
+    at.background_pixel  = FACE;
+    at.event_mask        = ExposureMask | ButtonPressMask | PointerMotionMask;
+    pop = XCreateWindow(dpy, DefaultRootWindow(dpy), bx, by, pop_w, pop_h, 0,
+                        CopyFromParent, InputOutput, CopyFromParent,
+                        CWOverrideRedirect | CWBackPixel | CWEventMask, &at);
+    XMapRaised(dpy, pop);
+
+    /* owner_events False: assim TODO clique vem para ca, inclusive fora do
+     * menu - e e assim que ele fecha ao clicar em qualquer outro lugar. */
+    XGrabPointer(dpy, pop, False,
+                 ButtonPressMask | PointerMotionMask | ButtonReleaseMask,
+                 GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+    desenhar_popup();
+}
+
+static void escolher_popup(int i)
+{
+    char cmd[256];
+
+    if (i >= 0 && i < pop_n) {
+        snprintf(cmd, sizeof cmd, "audio-dispositivos usar %s '%s'",
+                 pop_lado, pop_id[i]);
+        solta(cmd);
+    }
+    fechar_popup();
+}
+
 /* mtime do cache: e assim que sabemos que o transferir-usb terminou, sem
  * precisar esperar por ele (o attach leva segundos e travaria a barra) */
 static time_t cache_mtime(void)
@@ -187,7 +449,7 @@ static time_t cache_mtime(void)
 static void linha(int x0, int y0, int x1, int y1, unsigned long c)
 {
     XSetForeground(dpy, gc, c);
-    XDrawLine(dpy, win, gc, x0, y0, x1, y1);
+    XDrawLine(dpy, alvo, gc, x0, y0, x1, y1);
 }
 
 static void levantado(int x, int y, int w, int h)
@@ -195,7 +457,7 @@ static void levantado(int x, int y, int w, int h)
     int x1 = x + w - 1, y1 = y + h - 1;
 
     XSetForeground(dpy, gc, FACE);
-    XFillRectangle(dpy, win, gc, x, y, w, h);
+    XFillRectangle(dpy, alvo, gc, x, y, w, h);
     linha(x, y, x1, y, HI);                      /* topo */
     linha(x, y, x, y1, HI);                      /* esquerda */
     linha(x, y1, x1, y1, INK);                   /* baixo, externo */
@@ -209,7 +471,7 @@ static void gravado(int x, int y, int w, int h)
     int x1 = x + w - 1, y1 = y + h - 1;
 
     XSetForeground(dpy, gc, HI);
-    XFillRectangle(dpy, win, gc, x, y, w, h);
+    XFillRectangle(dpy, alvo, gc, x, y, w, h);
     linha(x, y, x1, y, SH);
     linha(x, y, x, y1, SH);
     linha(x + 1, y + 1, x1 - 1, y + 1, INK);
@@ -224,12 +486,13 @@ static void texto(int cx, int cy, const char *s, XFontStruct *f)
 
     XSetFont(dpy, gc, f->fid);
     XSetForeground(dpy, gc, INK);
-    XDrawString(dpy, win, gc, cx - w / 2,
+    XDrawString(dpy, alvo, gc, cx - w / 2,
                 cy + (f->ascent - f->descent) / 2, s, strlen(s));
 }
 
 static void desenhar(void)
 {
+    alvo = win;
     char hm[8];
     time_t agora = time(NULL);
     struct tm *t = localtime(&agora);
@@ -252,6 +515,47 @@ static void desenhar(void)
             rotulo_usb(it, r, sizeof r);
             levantado(it->x, PAD, it->larg, ALTURA - 2 * PAD);
             texto(cx, ALTURA / 2, r, fonte);
+        } else if (it->tipo == VOLUME) {
+            int e_sink = !strcmp(it->dev, "sink");
+            int v     = e_sink ? vol_sink  : vol_source;
+            int mudo  = e_sink ? mudo_sink : mudo_source;
+            int cx_r  = it->x + VOL_ROTULO;          /* fim do rotulo */
+            int calha_x = cx_r + GAP;
+            int calha_y = ALTURA / 2 - 5;
+            int util, pos;
+
+            /* O rotulo e o botao de mudo: afundado = mudo. Nao inventa cor
+             * nova para o estado - usa o bisel, como o resto da barra. */
+            if (mudo)
+                gravado(it->x, PAD, VOL_ROTULO, ALTURA - 2 * PAD);
+            else
+                levantado(it->x, PAD, VOL_ROTULO, ALTURA - 2 * PAD);
+            texto(it->x + VOL_ROTULO / 2, ALTURA / 2, it->rotulo, fonte);
+
+            /* calha gravada */
+            gravado(calha_x, calha_y, VOL_CALHA, 10);
+
+            if (v < 0)
+                continue;                 /* sem PulseAudio: calha vazia */
+
+            /* cursor levantado, transbordando a calha como num Motif */
+            util = VOL_CALHA - 8;
+            pos  = calha_x + 1 + (util * v) / 100;
+            levantado(pos, calha_y - 3, 7, 16);
+
+            /* seta do menu de dispositivos, no canto direito */
+            {
+                int sx = it->x + it->larg - VOL_SETA;
+                int cxs = sx + VOL_SETA / 2, cys = ALTURA / 2;
+                XPoint tri[3];
+
+                levantado(sx, PAD, VOL_SETA, ALTURA - 2 * PAD);
+                tri[0].x = cxs - 3; tri[0].y = cys - 1;
+                tri[1].x = cxs + 3; tri[1].y = cys - 1;
+                tri[2].x = cxs;     tri[2].y = cys + 3;
+                XSetForeground(dpy, gc, INK);
+                XFillPolygon(dpy, alvo, gc, tri, 3, Convex, CoordModeOrigin);
+            }
         } else {
             levantado(it->x, PAD, it->larg, ALTURA - 2 * PAD);
             texto(cx, ALTURA / 2, it->rotulo, fonte);
@@ -286,6 +590,12 @@ static void tick(void)
 
     ler_cache();
 
+    /* Nao perguntamos o volume no meio de um arrasto: o valor local e o que o
+     * mouse esta ditando, e o pactl ainda pode estar respondendo o antigo -
+     * o cursor pularia para tras. */
+    if (arrastando < 0)
+        ler_volumes();
+
     for (i = 0; i < N_ITENS; i++)
         if (itens[i].pendente)
             algum_pendente = 1;
@@ -296,8 +606,9 @@ static void tick(void)
             itens[i].pendente = 0;
 
     strftime(hm, sizeof hm, "%H:%M", localtime(&t));
-    snprintf(agora, sizeof agora, "%s|%s|%s|%d",
-             hm, est_audio, est_camera, algum_pendente);
+    snprintf(agora, sizeof agora, "%s|%s|%s|%d|%d%d|%d%d",
+             hm, est_audio, est_camera, algum_pendente,
+             vol_sink, mudo_sink, vol_source, mudo_source);
 
     if (strcmp(agora, antes) != 0) {
         desenhar();
@@ -421,7 +732,8 @@ int main(void)
 
     at.override_redirect = True;      /* sem moldura do xfwm4, posicao exata */
     at.background_pixel  = FACE;
-    at.event_mask        = ExposureMask | ButtonPressMask;
+    at.event_mask        = ExposureMask | ButtonPressMask |
+                           ButtonReleaseMask | Button1MotionMask;
 
     win = XCreateWindow(dpy, DefaultRootWindow(dpy), 0, 0, LARG, ALTURA, 0,
                         CopyFromParent, InputOutput, CopyFromParent,
@@ -453,6 +765,49 @@ int main(void)
             XEvent ev;
             XNextEvent(dpy, &ev);
 
+            /* Com o menu aberto o ponteiro esta capturado (owner_events
+             * False), entao TODO evento de mouse chega aqui - inclusive os de
+             * fora do menu, e e assim que ele fecha ao clicar em outro lugar. */
+            if (pop) {
+                if (ev.type == Expose && ev.xany.window == pop) {
+                    desenhar_popup();
+                    continue;
+                }
+                if (ev.type == MotionNotify) {
+                    int novo = -1;
+                    if (ev.xmotion.x >= 0 && ev.xmotion.x < pop_w &&
+                        ev.xmotion.y >= 2 &&
+                        ev.xmotion.y < 2 + pop_n * POP_LINHA)
+                        novo = (ev.xmotion.y - 2) / POP_LINHA;
+                    if (novo < 0 || novo >= pop_n) novo = -1;
+                    if (novo != pop_sob) { pop_sob = novo; desenhar_popup(); }
+                    continue;
+                }
+                if (ev.type == ButtonPress) {
+                    /* A linha vem das COORDENADAS do clique, nao de pop_sob:
+                     * pop_sob so e preenchido por MotionNotify, e um clique
+                     * direto (sem passar por cima antes) nao gera movimento -
+                     * o menu fechava sem escolher nada.
+                     *
+                     * E o teste e por coordenada, nao por janela: com o
+                     * ponteiro capturado em owner_events False, um clique FORA
+                     * tambem chega com window == pop, so que com x/y fora do
+                     * retangulo. */
+                    int lin = -1;
+                    if (ev.xbutton.x >= 0 && ev.xbutton.x < pop_w &&
+                        ev.xbutton.y >= 2 && ev.xbutton.y < 2 + pop_n * POP_LINHA)
+                        lin = (ev.xbutton.y - 2) / POP_LINHA;
+
+                    if (lin >= 0 && lin < pop_n)
+                        escolher_popup(lin);
+                    else
+                        fechar_popup();
+                    continue;
+                }
+                if (ev.type == ButtonRelease)
+                    continue;
+            }
+
             if (ev.type == rr_base + RRScreenChangeNotify) {
                 /* obrigatorio: sem isto o Xlib segue com a tela antiga em cache
                  * e o reposicionamento usa geometria velha */
@@ -461,6 +816,14 @@ int main(void)
                 desenhar();
             } else if (ev.type == Expose) {
                 desenhar();
+            } else if (ev.type == MotionNotify && arrastando >= 0) {
+                /* Comprime o rastro: o X entrega dezenas de MotionNotify por
+                 * segundo, e cada um viraria um pactl. Fica so o ultimo. */
+                while (XCheckTypedWindowEvent(dpy, win, MotionNotify, &ev))
+                    ;
+                aplicar_volume(&itens[arrastando], ev.xmotion.x);
+            } else if (ev.type == ButtonRelease) {
+                arrastando = -1;
             } else if (ev.type == ButtonPress) {
                 int i;
                 for (i = 0; i < N_ITENS; i++) {
@@ -470,7 +833,10 @@ int main(void)
                         ev.xbutton.x >= it->x + it->larg)
                         continue;
 
-                    if (it->tipo == BOTAO_USB) {
+                    if (it->tipo == VOLUME) {
+                        aplicar_volume(it, ev.xbutton.x);
+                        arrastando = i;
+                    } else if (it->tipo == BOTAO_USB) {
                         char cmd[128];
                         snprintf(cmd, sizeof cmd,
                                  "transferir-usb %s alternar", it->dev);

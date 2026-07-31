@@ -25,9 +25,11 @@
 [CmdletBinding()]
 param(
     [switch] $Listar,
+    [switch] $ListarUsb,
     [string] $Evitar,
     [switch] $Restaurar,
-    [string] $Definir
+    [string] $Definir,
+    [string] $DefinirId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,6 +67,33 @@ public interface IPolicyConfig
 [ComImport, Guid("870af99c-171d-4f9e-af0d-e63df40c2bc9")]
 public class PolicyConfigClient { }
 
+// Para LER qual e o padrao atual. O IPolicyConfig so escreve; quem responde
+// "quem e o padrao agora" e o IMMDeviceEnumerator. Sem isto nao da para marcar
+// o item ativo no menu de dispositivos da barra.
+//
+// Mesma regra da vtable: a ordem dos metodos e que importa. No IMMDevice o
+// GetId e o TERCEIRO - os dois antes existem so para ocupar o slot.
+[ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"),
+ InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDevice
+{
+    [PreserveSig] int Activate(ref Guid iid, int ctx, IntPtr p, out IntPtr obj);
+    [PreserveSig] int OpenPropertyStore(int acesso, out IntPtr loja);
+    [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+    [PreserveSig] int GetState(out int estado);
+}
+
+[ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"),
+ InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDeviceEnumerator
+{
+    [PreserveSig] int EnumAudioEndpoints(int fluxo, int mascara, out IntPtr col);
+    [PreserveSig] int GetDefaultAudioEndpoint(int fluxo, int papel, out IMMDevice dev);
+}
+
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+public class MMDeviceEnumerator { }
+
 // A conversao para a interface fica AQUI, no C#, e nao no PowerShell.
 // "[IPolicyConfig] (New-Object PolicyConfigClient)" falha com
 // "Nao e possivel converter o valor PolicyConfigClient no tipo IPolicyConfig":
@@ -72,6 +101,23 @@ public class PolicyConfigClient { }
 // QueryInterface de verdade e funciona.
 public static class AudioPadrao
 {
+    // fluxo: 0 = render (saida), 1 = capture (entrada). papel 1 = eMultimedia.
+    public static string Atual(int fluxo)
+    {
+        try
+        {
+            IMMDeviceEnumerator en = (IMMDeviceEnumerator)(new MMDeviceEnumerator());
+            IMMDevice dev;
+            if (en.GetDefaultAudioEndpoint(fluxo, 1, out dev) != 0 || dev == null)
+                return "";
+            string id;
+            if (dev.GetId(out id) != 0)
+                return "";
+            return id;
+        }
+        catch { return ""; }
+    }
+
     public static void Definir(string id)
     {
         IPolicyConfig pc = (IPolicyConfig)(new PolicyConfigClient());
@@ -163,8 +209,50 @@ function Set-Padrao {
 
 # --- acoes ----------------------------------------------------------------
 if ($Listar) {
-    Get-Dispositivos -Tipo Render  | ForEach-Object { "SAIDA   $($_.Nome)  [$($_.Id)]" }
-    Get-Dispositivos -Tipo Capture | ForEach-Object { "ENTRADA $($_.Nome)  [$($_.Id)]" }
+    $padRender  = [AudioPadrao]::Atual(0)
+    $padCapture = [AudioPadrao]::Atual(1)
+    # "SAIDA|1|<id>|<nome>"  - o 1 marca o padrao atual. Formato com barras para
+    # o lado Linux poder cortar sem depender de espacos no nome.
+    Get-Dispositivos -Tipo Render | ForEach-Object {
+        "SAIDA|{0}|{1}|{2}" -f $(if ($_.Id -eq $padRender) {1} else {0}), $_.Id, $_.Nome
+    }
+    Get-Dispositivos -Tipo Capture | ForEach-Object {
+        "ENTRADA|{0}|{1}|{2}" -f $(if ($_.Id -eq $padCapture) {1} else {0}), $_.Id, $_.Nome
+    }
+    exit 0
+}
+
+# Só os dispositivos de audio que estao atras de um USB, um por VID:PID.
+#
+# E assim que o transferir-usb descobre sozinho QUAL headset esta nesta maquina:
+# casa e trabalho tem headsets diferentes, e chumbar um VID:PID quebraria num
+# deles. Um headset recem-ligado aparece primeiro no WINDOWS, que e exatamente
+# o lado que esta varredura enxerga.
+#
+# Saida: "VID:PID<TAB>Nome", uma linha por aparelho.
+if ($ListarUsb) {
+    $vistos = @{}
+    foreach ($t in 'Render', 'Capture') {
+        foreach ($d in Get-Dispositivos -Tipo $t) {
+            if ($d.Hw -match 'VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') {
+                $id = ($Matches[1] + ':' + $Matches[2]).ToLower()
+                if (-not $vistos.ContainsKey($id)) {
+                    $vistos[$id] = $true
+                    "$id`t$($d.Nome)"
+                }
+            }
+        }
+    }
+    exit 0
+}
+
+# Pelo ID exato, e nao por pedaco de nome: o menu da barra ja sabe o ID, e ha
+# duas "Alto-falantes (Realtek(R) Audio)" nesta maquina - por nome seria ambiguo.
+if ($DefinirId) {
+    $d = @(Get-Dispositivos -Tipo Render) + @(Get-Dispositivos -Tipo Capture) |
+         Where-Object { $_.Id -eq $DefinirId } | Select-Object -First 1
+    if (-not $d) { Write-Output "id nao encontrado: $DefinirId"; exit 1 }
+    Set-Padrao -Id $d.Id -Nome $d.Nome
     exit 0
 }
 

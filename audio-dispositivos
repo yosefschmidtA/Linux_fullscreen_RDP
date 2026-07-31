@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# Lista e escolhe o dispositivo de audio, juntando os dois mundos.
+#
+#   audio-dispositivos listar saida|entrada
+#   audio-dispositivos usar   saida|entrada <id>
+#
+# POR QUE NAO BASTA O pactl
+#
+# O Linux so tem DOIS dispositivos de cada lado: o xrdp-sink e, quando o headset
+# esta anexado por USB, a placa dele. Um menu feito so com o pactl mostraria
+# "xrdp-sink", que nao significa nada para quem esta usando - e esconderia que
+# atras dele existem a caixa do notebook e o monitor, que sao do Windows.
+#
+# Entao a lista e unificada:
+#
+#   linux:<sink>   toca aqui, direto na placa USB   (sem estalo)
+#   win:<endpoint> toca no Windows, pelo canal RDP  (com estalo - ver README)
+#
+# Escolher um "win:" faz duas coisas: aponta o PulseAudio para o xrdp-sink E
+# troca o dispositivo padrao do Windows. E o unico jeito de chegar na caixa do
+# notebook, que nao e USB e por isso nunca pode ser anexada aqui.
+set -u
+
+PS_EXE="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+PS1_FONTE="$HOME/linux-fullscreen/windows/audio-padrao.ps1"
+
+msg() { echo "$*" >&2; }
+
+ps1_windows() {
+    local base_w base_l
+    base_w=$( cd /tmp && /mnt/c/Windows/System32/cmd.exe /c 'echo %LOCALAPPDATA%' \
+              2>/dev/null | tr -d '\r\n' )
+    [ -n "$base_w" ] || return 1
+    base_l=$(wslpath -u "$base_w" 2>/dev/null) || return 1
+    mkdir -p "$base_l/linux-fullscreen" 2>/dev/null
+    if [ -r "$PS1_FONTE" ] && \
+       [ ! -f "$base_l/linux-fullscreen/audio-padrao.ps1" -o \
+         "$PS1_FONTE" -nt "$base_l/linux-fullscreen/audio-padrao.ps1" ]; then
+        cp "$PS1_FONTE" "$base_l/linux-fullscreen/" 2>/dev/null
+    fi
+    printf '%s\\linux-fullscreen\\audio-padrao.ps1' "$base_w"
+}
+
+# -a e tr sao obrigatorios: o PowerShell devolve acento na codificacao do
+# console do Windows, o grep declara "binary file matches" e engole tudo.
+windows_lista() {
+    local ps1; ps1=$(ps1_windows) || return 1
+    ( cd /tmp && "$PS_EXE" -NoProfile -ExecutionPolicy Bypass -File "$ps1" -Listar ) \
+        2>/dev/null | tr -d '\r' | tr -cd '[:print:]\n' | grep -aE '^(SAIDA|ENTRADA)\|'
+}
+
+# ---- listar --------------------------------------------------------------
+# Saida: "<id>\t<marca>\t<rotulo>", marca 1 = em uso agora.
+listar() {
+    local lado="$1" tipo_pa tipo_win padrao_pa
+    if [ "$lado" = saida ]; then
+        tipo_pa=sinks;   tipo_win=SAIDA;   padrao_pa=$(pactl get-default-sink 2>/dev/null)
+    else
+        tipo_pa=sources; tipo_win=ENTRADA; padrao_pa=$(pactl get-default-source 2>/dev/null)
+    fi
+
+    # 1) o que existe no Linux (so as placas de verdade; o xrdp aparece pelos
+    #    dispositivos do Windows, com nome que se entende)
+    pactl list short "$tipo_pa" 2>/dev/null | awk '{print $2}' \
+      | grep -v '\.monitor$' | grep -v '^xrdp-' | while read -r nome; do
+        local desc marca
+        desc=$(pactl list "$tipo_pa" 2>/dev/null \
+               | awk -v n="$nome" '$1=="Name:" && $2==n {achou=1} achou && $1=="Description:" {sub(/^[^:]*: /,""); print; exit}')
+        [ -n "$desc" ] || desc="$nome"
+        marca=0; [ "$nome" = "$padrao_pa" ] && marca=1
+        printf 'linux:%s\t%s\t%s (aqui, USB)\n' "$nome" "$marca" "$desc"
+    done
+
+    # 2) o que existe do lado Windows, alcancado pelo canal RDP
+    local no_xrdp=0
+    case "$padrao_pa" in xrdp-*) no_xrdp=1 ;; esac
+    windows_lista | while IFS='|' read -r t atual id rotulo; do
+        [ "$t" = "$tipo_win" ] || continue
+        local marca=0
+        [ "$no_xrdp" = 1 ] && [ "$atual" = 1 ] && marca=1
+        printf 'win:%s\t%s\t%s (pelo Windows)\n' "$id" "$marca" "$rotulo"
+    done
+}
+
+# ---- usar ----------------------------------------------------------------
+usar() {
+    local lado="$1" id="$2" alvo ps1
+    case "$id" in
+        linux:*)
+            alvo="${id#linux:}"
+            if [ "$lado" = saida ]; then
+                pactl set-default-sink "$alvo" >/dev/null 2>&1
+                pactl list short sink-inputs 2>/dev/null | while read -r i _; do
+                    pactl move-sink-input "$i" "$alvo" >/dev/null 2>&1
+                done
+            else
+                pactl set-default-source "$alvo" >/dev/null 2>&1
+                pactl list short source-outputs 2>/dev/null | while read -r i _; do
+                    pactl move-source-output "$i" "$alvo" >/dev/null 2>&1
+                done
+            fi
+            msg "agora em $alvo" ;;
+        win:*)
+            alvo="${id#win:}"
+            # 1) o som precisa voltar ao canal do RDP...
+            if [ "$lado" = saida ]; then
+                pactl set-default-sink xrdp-sink >/dev/null 2>&1
+                pactl list short sink-inputs 2>/dev/null | while read -r i _; do
+                    pactl move-sink-input "$i" xrdp-sink >/dev/null 2>&1
+                done
+            else
+                pactl set-default-source xrdp-source >/dev/null 2>&1
+                pactl list short source-outputs 2>/dev/null | while read -r i _; do
+                    pactl move-source-output "$i" xrdp-source >/dev/null 2>&1
+                done
+            fi
+            # 2) ...e o Windows precisa tocar no aparelho escolhido
+            ps1=$(ps1_windows) || { msg "audio-padrao.ps1 indisponivel"; return 1; }
+            ( cd /tmp && "$PS_EXE" -NoProfile -ExecutionPolicy Bypass -File "$ps1" \
+                -DefinirId "$alvo" ) 2>&1 | tr -d '\r' | sed 's/^/    win: /' >&2
+            msg "agora pelo Windows" ;;
+        *) msg "id desconhecido: $id"; return 2 ;;
+    esac
+}
+
+case "${1:-}" in
+    listar) listar "${2:-saida}" ;;
+    usar)   usar "${2:-saida}" "${3:-}" ;;
+    *) msg "uso: audio-dispositivos listar|usar saida|entrada [id]"; exit 2 ;;
+esac
