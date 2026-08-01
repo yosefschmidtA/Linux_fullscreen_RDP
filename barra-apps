@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+#
+# barra-apps — os atalhos de aplicativo da barra de tarefas.
+#
+#   barra-apps listar          o que esta fixado, para a barra desenhar
+#   barra-apps escolher        abre a lista dos apps instalados e alterna
+#   barra-apps executar <id>   lanca o app
+#   barra-apps remover <id>    tira da barra (o botao direito no icone)
+#   barra-apps icone <id>      (re)gera so o icone, util para depurar
+#
+# COMO A BARRA E ESTE SCRIPT SE DIVIDEM. A barra nao sabe o que e um aplicativo:
+# ela pede a lista, desenha os icones e devolve o id que voce clicou. Todo o
+# conhecimento de .desktop, de tema de icones e de linha de comando vive aqui.
+# E a mesma divisao do audio-dispositivos e do jogo-windows.
+#
+# POR QUE .desktop, E NAO UMA LISTA DE COMANDOS. O .desktop ja traz o nome
+# bonito, o comando certo (com o caminho absoluto do binario) e o nome do icone.
+# Fixar um app e guardar UM caminho de .desktop; se o pacote for atualizado e o
+# binario mudar de lugar, o atalho continua certo sozinho.
+#
+# O ICONE E CONVERTIDO AQUI, NA HORA DE FIXAR — nao pela barra, e nao a cada
+# desenho. A barra e Xlib cru, sem libpng e sem nenhuma biblioteca de imagem, e
+# a intencao e que continue assim (veja "Por que Xlib cru" no README). Entao o
+# icone vira um arquivo de PIXELS CRUS, 20x20 RGB de 8 bits = 1200 bytes exatos,
+# que a barra le com um fread e joga num XImage. Zero decodificacao no C.
+#
+# A transparencia tambem morre aqui: o -flatten achata o alfa sobre o #DEDEDE,
+# que e a cor da face da barra. Assim a barra nao precisa saber o que e alfa —
+# e como o fundo dela e chapado, o resultado e igual ao de compor de verdade.
+
+set -u
+
+CFG="$HOME/.config/linux-fullscreen"
+LISTA="$CFG/apps.conf"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/linux-fullscreen/apps"
+
+LADO=20            # o icone e quadrado; a barra tem 28px de altura
+BRUTO=$(( LADO * LADO * 3 ))
+
+DIRS_APP=(
+    "$HOME/.local/share/applications"
+    /usr/share/applications
+    /usr/local/share/applications
+    /var/lib/flatpak/exports/share/applications
+    /var/lib/snapd/desktop/applications
+)
+
+msg() { printf '%s\n' "$*" >&2; }
+
+# --- ler um .desktop -------------------------------------------------------
+# So o grupo [Desktop Entry]: um .desktop tem "acoes" ([Desktop Action nova]),
+# cada uma com seu proprio Name= e Exec=. Sem parar no primeiro grupo, o
+# brave-browser.desktop devolveria "New Window" em vez de "Brave Web Browser" —
+# a acao vem depois e ganharia.
+campo() {   # $1 = arquivo  $2 = chave
+    awk -F= -v chave="$2" '
+        /^\[/ { dentro = ($0 == "[Desktop Entry]"); next }
+        dentro && $1 == chave { sub(/^[^=]*=/, ""); print; exit }
+    ' "$1"
+}
+
+nome_do_app() {   # $1 = .desktop ; nome pt-BR se houver, senao o Name
+    local n
+    n=$(awk -F= '
+        /^\[/ { dentro = ($0 == "[Desktop Entry]"); next }
+        dentro && ($1 == "Name[pt_BR]" || $1 == "Name[pt]") {
+            sub(/^[^=]*=/, ""); print; exit }
+    ' "$1")
+    [ -n "$n" ] || n=$(campo "$1" Name)
+    [ -n "$n" ] || n=$(basename "$1" .desktop)
+    printf '%s\n' "$n"
+}
+
+# O Exec do .desktop carrega "codigos de campo" (%U %f %F %i %c %k), que sao
+# lugares onde o lancador poria arquivos arrastados. Nao ha nada para pôr aqui,
+# e deixa-los faz o app receber um argumento literal "%U".
+exec_do_app() {   # $1 = .desktop
+    local e; e=$(campo "$1" Exec)
+    printf '%s\n' "$e" | sed -E 's/%[UufFickvmDNdn]//g; s/  +/ /g; s/ +$//'
+}
+
+# --- achar o arquivo do icone ----------------------------------------------
+# Icon= pode ser um caminho absoluto ou um NOME de tema. Procuramos do tamanho
+# mais util para baixo e para cima: 32 e o melhor ponto de partida para reduzir
+# a 20 sem virar borrao, e 16 subiria borrado.
+TAMS=(32x32 48x48 24x24 22x22 64x64 16x16 128x128 256x256 scalable)
+
+arquivo_do_icone() {   # $1 = nome ou caminho do Icon=
+    local ic="$1" d t e
+
+    case "$ic" in
+        /*) [ -f "$ic" ] && { printf '%s\n' "$ic"; return 0; }; return 1 ;;
+    esac
+
+    for d in "$HOME/.local/share/icons" /usr/share/icons /usr/share/pixmaps; do
+        [ -d "$d" ] || continue
+        for t in "${TAMS[@]}"; do
+            for e in png svg xpm; do
+                # hicolor primeiro, depois qualquer tema instalado
+                local p
+                for p in "$d/hicolor/$t/apps/$ic.$e" "$d"/*/"$t/apps/$ic.$e"; do
+                    [ -f "$p" ] && { printf '%s\n' "$p"; return 0; }
+                done
+            done
+        done
+        for e in png svg xpm; do
+            [ -f "$d/$ic.$e" ] && { printf '%s\n' "$d/$ic.$e"; return 0; }
+        done
+    done
+    return 1
+}
+
+# Gera os 1200 bytes crus. Sai 1 se nao deu — a barra entao cai no rotulo de
+# texto, que e sempre um plano B valido.
+gerar_icone() {   # $1 = .desktop  $2 = destino .rgb
+    local ic org
+    ic=$(campo "$1" Icon) || return 1
+    [ -n "$ic" ] || return 1
+    org=$(arquivo_do_icone "$ic") || return 1
+
+    mkdir -p "$(dirname "$2")"
+    # -flatten sobre a cor da face da barra; -resize com "!" para forcar o
+    # quadrado exato (icone nao-quadrado sairia com bytes a menos e a barra
+    # rejeitaria o arquivo).
+    convert "$org" -background '#DEDEDE' -alpha remove -alpha off \
+            -resize "${LADO}x${LADO}!" -depth 8 "rgb:$2" 2>/dev/null || return 1
+    [ "$(stat -c %s "$2" 2>/dev/null)" = "$BRUTO" ] || { rm -f "$2"; return 1; }
+}
+
+id_de() { basename "$1" .desktop; }
+
+# --- os fixados ------------------------------------------------------------
+fixados() {   # imprime os caminhos .desktop, na ordem do arquivo
+    [ -f "$LISTA" ] || return 0
+    grep -vE '^\s*(#|$)' "$LISTA" | while IFS= read -r p; do
+        [ -f "$p" ] && printf '%s\n' "$p"
+    done
+}
+
+# Formato para a barra:  <caminho .desktop>\t<nome>\t<arquivo .rgb ou vazio>
+cmd_listar() {
+    local p rgb
+    while IFS= read -r p; do
+        rgb="$CACHE/$(id_de "$p").rgb"
+        [ -s "$rgb" ] || gerar_icone "$p" "$rgb" || rgb=""
+        printf '%s\t%s\t%s\n' "$p" "$(nome_do_app "$p")" "$rgb"
+    done < <(fixados)
+}
+
+cmd_remover() {   # $1 = caminho do .desktop
+    [ -f "$LISTA" ] || return 0
+    grep -vxF "$1" "$LISTA" > "$LISTA.novo" && mv "$LISTA.novo" "$LISTA"
+    # O .rgb fica: reencaixar o mesmo app depois nao precisa reconverter, e sao
+    # 1200 bytes. Quem limpa e o proprio cache do sistema, se um dia limpar.
+}
+
+cmd_executar() {   # $1 = caminho do .desktop
+    local linha term
+    [ -f "$1" ] || { msg "nao existe: $1"; return 1; }
+    linha=$(exec_do_app "$1")
+    [ -n "$linha" ] || { msg "sem Exec= em $1"; return 1; }
+
+    term=$(campo "$1" Terminal)
+    if [ "${term,,}" = "true" ]; then
+        setsid xfce4-terminal -e "$linha" >/dev/null 2>&1 &
+    else
+        # eval: o Exec= e uma linha de comando com aspas proprias (caminhos com
+        # espaco), e e assim que a especificacao manda interpreta-la.
+        setsid sh -c "$linha" >/dev/null 2>&1 &
+    fi
+}
+
+# --- escolher --------------------------------------------------------------
+# Todos os apps instalados, sem os que se marcam como NoDisplay (entradas de
+# servico, handlers de mime, tudo o que nenhum menu mostra).
+todos_os_apps() {
+    local d f
+    for d in "${DIRS_APP[@]}"; do
+        [ -d "$d" ] || continue
+        for f in "$d"/*.desktop; do
+            [ -f "$f" ] || continue
+            [ "$(campo "$f" Type)" = "Application" ] || continue
+            [ "$(campo "$f" NoDisplay)" = "true" ] && continue
+            [ -n "$(campo "$f" Exec)" ] || continue
+            printf '%s\t%s\n' "$(nome_do_app "$f")" "$f"
+        done
+    done | sort -f -t$'\t' -k1,1
+}
+
+cmd_escolher() {
+    local -a rotulos caminhos
+    local nome cam marca esc i
+
+    mkdir -p "$CFG"; touch "$LISTA"
+
+    while IFS=$'\t' read -r nome cam; do
+        marca="   "
+        grep -qxF "$cam" "$LISTA" 2>/dev/null && marca="[*]"
+        rotulos+=("$marca $nome")
+        caminhos+=("$cam")
+    done < <(todos_os_apps)
+
+    [ "${#rotulos[@]}" -gt 0 ] || { msg "nenhum .desktop encontrado"; return 1; }
+
+    if ! command -v zenity >/dev/null; then
+        msg "zenity nao instalado; edite $LISTA a mao (um .desktop por linha)"
+        return 1
+    fi
+
+    esc=$(zenity --list --title="Apps da barra" \
+        --text="Clique num app para colocar ou tirar da barra.
+Os que ja estao la aparecem com [*]." \
+        --column="Aplicativo" --width=460 --height=560 \
+        "${rotulos[@]}" 2>/dev/null) || return 0
+    [ -n "${esc:-}" ] || return 0
+
+    for i in "${!rotulos[@]}"; do
+        [ "${rotulos[$i]}" = "$esc" ] || continue
+        cam="${caminhos[$i]}"
+        if grep -qxF "$cam" "$LISTA" 2>/dev/null; then
+            grep -vxF "$cam" "$LISTA" > "$LISTA.novo" && mv "$LISTA.novo" "$LISTA"
+        else
+            printf '%s\n' "$cam" >> "$LISTA"
+            gerar_icone "$cam" "$CACHE/$(id_de "$cam").rgb" ||
+                msg "aviso: sem icone para $cam; a barra usara o nome"
+        fi
+        return 0
+    done
+    return 0
+}
+
+# ===========================================================================
+case "${1:-listar}" in
+    listar)   cmd_listar ;;
+    escolher) cmd_escolher ;;
+    executar) shift; cmd_executar "${1:-}" ;;
+    remover)  shift; cmd_remover "${1:-}" ;;
+    nome)     shift; nome_do_app "${1:-}" ;;
+    icone)    shift; gerar_icone "${1:-}" "$CACHE/$(id_de "${1:-}").rgb" &&
+                  msg "ok: $CACHE/$(id_de "${1:-}").rgb" ;;
+    *) msg "uso: barra-apps [listar|escolher|executar <desktop>|icone <desktop>]"
+       exit 1 ;;
+esac

@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+#
+# trabalho — a "area de trabalho" da sessao: gerenciador de arquivos e Claude
+# Code lado a lado, num tmux, por um clique na barra.
+#
+#   trabalho            abre a area de trabalho (ou reconecta a que ja existe)
+#   trabalho claude     so o Claude Code, num terminal
+#   trabalho arquivos   so o ranger, num terminal
+#   trabalho onde       mostra o binario do claude que foi encontrado
+#   trabalho instalar   cria os .desktop e o icone (uma vez por maquina)
+#
+# POR QUE ISTO EXISTE. O VS Code custava 845 MB de PSS (medido em 01/08/2026,
+# 11 processos) para servir de arvore de arquivos — o resto do trabalho ja era
+# feito no terminal. As duas pecas que sobram custam 29 MB:
+#
+#   VS Code ......... 845 MB
+#   ranger + tmux .... 29 MB
+#   thunar (GUI) ..... 23 MB
+#
+# Nao ha editor proprio aqui e nao vai haver: escrever um seria reconstruir
+# justamente a parte que nao se usa. Para editar, nvim e vim ja estao no disco.
+#
+# POR QUE tmux, E NAO SO DOIS TERMINAIS LADO A LADO. Pelo mesmo motivo que a
+# sessao RDP sobrevive a fechar o mstsc: fechar a janela nao pode custar o
+# trabalho. O tmux guarda o ranger e o claude vivos, e reabrir reconecta no
+# ponto exato. Dois terminais soltos morreriam com a janela.
+
+set -u
+
+SESSAO=trabalho
+DIR="${TRABALHO_DIR:-$HOME/linux-fullscreen}"
+APPS="$HOME/.local/share/applications"
+ICONES="$HOME/.local/share/icons/hicolor/256x256/apps"
+TERM_EMU=xfce4-terminal
+
+msg() { printf '%s\n' "$*" >&2; }
+
+# --- achar o Claude Code ---------------------------------------------------
+#
+# ATENCAO: NESTA MAQUINA O CLI NAO ESTA INSTALADO SOZINHO. O binario vem dentro
+# da extensao do VS Code:
+#
+#   ~/.vscode/extensions/anthropic.claude-code-<versao>-linux-x64/resources/
+#       native-binary/claude
+#
+# Ele roda perfeitamente fora do VS Code (medido: `claude --version` responde
+# 2.1.220), mas o caminho carrega a VERSAO — a cada atualizacao da extensao ele
+# muda. Por isso aqui se procura e se pega o maior por ordem de versao, em vez
+# de chumbar. E por isso, tambem, que desinstalar o VS Code levaria o Claude
+# junto: para se livrar mesmo dele, instale antes o CLI pelo instalador oficial;
+# ai o `command -v claude` acha e este bloco nem roda.
+onde_claude() {
+    local c
+    c=$(command -v claude 2>/dev/null) && { printf '%s\n' "$c"; return 0; }
+    c=$(ls -d "$HOME"/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/claude \
+              "$HOME"/.vscode-server/extensions/anthropic.claude-code-*/resources/native-binary/claude \
+           2>/dev/null | sort -V | tail -1)
+    [ -n "$c" ] && [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+    return 1
+}
+
+logo_claude() {
+    local p
+    p=$(ls -d "$HOME"/.vscode/extensions/anthropic.claude-code-*/resources/claude-logo.png \
+              "$HOME"/.vscode-server/extensions/anthropic.claude-code-*/resources/claude-logo.png \
+          2>/dev/null | sort -V | tail -1)
+    [ -n "$p" ] && printf '%s\n' "$p"
+}
+
+# --- abrir ------------------------------------------------------------------
+# ORDEM IMPORTA, e o xfce4-terminal nao reclama quando esta errada: as opcoes de
+# JANELA (--maximize, --hide-menubar) tem de vir antes das de ABA (--title,
+# --command). Medido em 01/08/2026: com --maximize depois do --title a janela
+# abria no tamanho padrao, 815x458, sem nenhum aviso; com ele antes, 1920x1056.
+terminal() {   # $1 = titulo  $2 = comando  $3... = opcoes de janela
+    local titulo="$1" comando="$2"; shift 2
+    setsid "$TERM_EMU" "$@" --hide-menubar --title="$titulo" \
+        --command="bash -lc $(printf '%q' "$comando")" >/dev/null 2>&1 &
+}
+
+cmd_claude() {
+    local c; c=$(onde_claude) || { msg "nao achei o Claude Code"; return 1; }
+    terminal "Claude Code" "cd $(printf '%q' "$DIR") && exec $(printf '%q' "$c")"
+}
+
+cmd_arquivos() { terminal "Arquivos" "cd $(printf '%q' "$DIR") && exec ranger"; }
+
+# A area de trabalho: ranger a esquerda, Claude a direita.
+#
+# Os paineis nascem com um SHELL e o comando e enviado depois, em vez de
+# `tmux split-window ranger`. A diferenca aparece quando voce sai do ranger ou
+# do claude: com o comando como processo do painel, o painel morre junto e a
+# divisao se desfaz; com o shell por baixo, voce cai num prompt e o layout fica
+# de pe.
+cmd_abrir() {
+    local c
+    if ! tmux has-session -t "$SESSAO" 2>/dev/null; then
+        c=$(onde_claude) || { msg "nao achei o Claude Code"; return 1; }
+        tmux new-session -d -s "$SESSAO" -c "$DIR"
+        tmux send-keys  -t "$SESSAO" 'ranger' C-m
+        tmux split-window -h -t "$SESSAO" -c "$DIR"
+        tmux send-keys  -t "$SESSAO" "$(printf '%q' "$c")" C-m
+
+        # A divisao e por COLUNAS, nao por porcentagem. Medido em 01/08/2026:
+        # com `split-window -l 62%` numa sessao criada em 200 colunas, ligar um
+        # terminal de 80 nao reparte proporcionalmente - o tmux encolhe tirando
+        # de um lado so, e o ranger ficou com 15 colunas contra 64 do claude. O
+        # main-vertical com main-pane-width e absoluto: o ranger fica com 34
+        # colunas e o claude com todo o resto, seja qual for o tamanho da tela.
+        #
+        # SAO DOIS HOOKS, e o segundo e o que importa. So com client-attached a
+        # largura saia errada de novo (89/100 numa janela de 190 colunas): esse
+        # hook dispara no instante em que o cliente conecta, quando a janela
+        # ainda esta no tamanho padrao, e o --maximize vem LOGO DEPOIS e reparte
+        # tudo proporcionalmente outra vez.
+        #
+        # O hook de resize tem de ser window-resized, e nao client-resized:
+        # medido em 01/08/2026, com client-resized o painel voltava a escorregar
+        # (7 e 192 colunas depois de um resize). Com window-resized o ranger fica
+        # em 34 colunas em qualquer largura - testado com a janela em 120, 260 e
+        # 180 colunas, sempre 34.
+        tmux set-option -w -t "$SESSAO" main-pane-width 34
+        tmux set-hook   -t "$SESSAO" client-attached 'select-layout main-vertical'
+        tmux set-hook   -t "$SESSAO" window-resized  'select-layout main-vertical'
+        tmux select-pane -t "$SESSAO".0
+    fi
+    terminal "Trabalho" "exec tmux attach -t $SESSAO" --maximize
+}
+
+# --- instalar os atalhos ----------------------------------------------------
+# Cria .desktop de usuario para o Claude e para a area de trabalho. Sao eles que
+# fazem o barra-apps enxergar os dois no menu "[+]" — a barra nao tem caso
+# especial para nada disto, sao apps como qualquer outro.
+cmd_instalar() {
+    local c logo icone_claude="utilities-terminal"
+
+    c=$(onde_claude) || msg "aviso: Claude Code nao encontrado; o atalho vai ficar quebrado"
+    mkdir -p "$APPS" "$ICONES"
+
+    # O logo oficial vem junto da extensao do VS Code, e o caminho dela carrega a
+    # versao. Copiar para o tema de icones do usuario tira essa dependencia: o
+    # atalho continua com icone depois de a extensao atualizar ou sumir.
+    logo=$(logo_claude)
+    if [ -n "$logo" ]; then
+        cp -f "$logo" "$ICONES/claude-code.png" && icone_claude="claude-code"
+    fi
+
+    cat > "$APPS/claude-code.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Claude Code
+Comment=Claude Code num terminal, na pasta do projeto
+Exec=trabalho claude
+Icon=$icone_claude
+Terminal=false
+Categories=Development;
+EOF
+
+    cat > "$APPS/trabalho.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Trabalho
+Comment=Arquivos e Claude Code lado a lado, num tmux que sobrevive a fechar
+Exec=trabalho
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;
+EOF
+
+    msg "criados:"
+    msg "  $APPS/claude-code.desktop  (icone: $icone_claude)"
+    msg "  $APPS/trabalho.desktop"
+    msg "Agora clique no [+] da barra e escolha 'Claude Code' e 'Trabalho'."
+}
+
+# ===========================================================================
+case "${1:-abrir}" in
+    abrir)    cmd_abrir ;;
+    claude)   cmd_claude ;;
+    arquivos) cmd_arquivos ;;
+    onde)     onde_claude || { msg "nao achei o Claude Code"; exit 1; } ;;
+    instalar) cmd_instalar ;;
+    *) msg "uso: trabalho [abrir|claude|arquivos|onde|instalar]"; exit 1 ;;
+esac

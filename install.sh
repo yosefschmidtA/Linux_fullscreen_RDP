@@ -52,10 +52,15 @@ apt-get update -qq
 # xfonts-base traz as fontes CORE do X: a barra usa -adobe-helvetica-11, bitmap
 # e sem antialiasing, que e o que faz o texto ficar identico ao do dialogo do
 # xrdp em vez de so parecido.
+#
+# imagemagick e do barra-apps, NAO da barra: ele converte o icone do app UMA vez
+# (na hora em que voce o fixa) para pixels crus. E o que evita linkar libpng no
+# barra-tarefas.c e manter a barra sem dependencia de imagem nenhuma.
 apt-get install -y --no-install-recommends \
     xrdp xorgxrdp xfwm4 xfce4-settings exo-utils xfce4-appfinder \
     i3 xfce4-terminal dbus-x11 x11-xserver-utils fonts-dejavu-core \
-    zenity x11-utils gcc libx11-dev libxrandr-dev xfonts-base
+    zenity x11-utils gcc libx11-dev libxrandr-dev xfonts-base imagemagick \
+    libxft-dev fonts-dejavu-core xterm ranger tmux
 
 echo
 echo "==> [2/7] Scripts auxiliares, servico do X11-unix e itens do menu"
@@ -66,6 +71,7 @@ install -m 755 "$SRC/jogo-windows"       /usr/local/bin/jogo-windows
 install -m 755 "$SRC/transferir-usb"     /usr/local/bin/transferir-usb
 install -m 755 "$SRC/audio-dispositivos" /usr/local/bin/audio-dispositivos
 install -m 755 "$SRC/camera-rede"        /usr/local/bin/camera-rede
+install -m 755 "$SRC/barra-apps"          /usr/local/bin/barra-apps
 install -m 644 "$SRC/x11-unix-writable.service" /etc/systemd/system/
 
 # A ponte de video precisa do v4l2loopback, que NAO vem no kernel da WSL e nao
@@ -92,17 +98,44 @@ else
     echo "           rode: bash $SRC/compilar-v4l2loopback"
 fi
 
-# A barra de tarefas e o unico componente compilado deste repositorio. E C com
-# Xlib cru, nao um painel de desktop environment: 2,6 MB de RSS contra os 21 MB
-# da primeira versao em Python+Tk, e o visual exige desenhar cada pixel a mao de
-# qualquer jeito - um toolkit seria peso sem uso. O startwm.sh a sobe a cada
-# login. Ver README, "A barra de tarefas".
+# Os DOIS componentes compilados deste repositorio, ambos C com Xlib cru e sem
+# toolkit. O startwm.sh sobe a barra a cada login; a bancada e por demanda.
+# Ver README, "A barra de tarefas" e "Trocar o VS Code".
 if gcc -O2 -Wall -o "$SRC/barra-tarefas" "$SRC/barra-tarefas.c" \
         -lX11 -lXrandr 2>/dev/null; then
     install -m 755 "$SRC/barra-tarefas" /usr/local/bin/barra-tarefas
     echo "    barra-tarefas compilada e instalada"
 else
     echo "    AVISO: barra-tarefas nao compilou; a sessao sobe sem ela"
+fi
+
+# A bancada nao entra na sessao sozinha e nao e essencial: se as bibliotecas de
+# Xft faltarem, o resto do ambiente sobe igual.
+if gcc -O2 -Wall -o "$SRC/bancada" "$SRC/bancada.c" \
+        $(pkg-config --cflags xft 2>/dev/null) -lX11 -lXft 2>/dev/null; then
+    install -m 755 "$SRC/bancada" /usr/local/bin/bancada
+    echo "    bancada compilada e instalada"
+else
+    echo "    AVISO: bancada nao compilou (falta libxft-dev?); segue sem ela"
+fi
+
+# O trecho que entra no shell: a funcao `bancada`, que abre na pasta atual e
+# devolve o prompt, como o `code .` do VS Code. Instalado fora do repositorio
+# porque o .bashrc nao pode depender de onde o repositorio esta.
+#
+# A linha no .bashrc e marcada e idempotente: reinstalar nao duplica. Nao se
+# usa /etc/profile.d aqui porque terminal interativo NAO-login (o caso normal:
+# xfce4-terminal, xterm) le o .bashrc e ignora o profile.d.
+install -D -m 644 "$SRC/perfil.sh" /usr/local/share/linux-fullscreen/perfil.sh
+MARCA='# linux-fullscreen'
+if ! grep -qF "$MARCA" "$REAL_HOME/.bashrc" 2>/dev/null; then
+    cp -a "$REAL_HOME/.bashrc" "$REAL_HOME/.bashrc.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    printf '\n%s\n. /usr/local/share/linux-fullscreen/perfil.sh\n' "$MARCA" \
+        >> "$REAL_HOME/.bashrc"
+    chown "$REAL_USER:$REAL_USER" "$REAL_HOME/.bashrc"
+    echo "    funcao 'bancada' ligada no .bashrc"
+else
+    echo "    .bashrc ja carrega o perfil.sh"
 fi
 
 # Os .desktop sao a "interface": sem painel, quem lista aplicativos e o

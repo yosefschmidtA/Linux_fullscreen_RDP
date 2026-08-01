@@ -1,0 +1,1622 @@
+/* bancada — a "oficina": arvore de arquivos, editor e Claude Code numa janela
+ * so, sem terminal por baixo e sem toolkit.
+ *
+ *   gcc -O2 -Wall -o bancada bancada.c -lX11 -lXft $(pkg-config --cflags xft)
+ *   DISPLAY=:10 ./bancada [pasta]
+ *
+ * POR QUE ELA EXISTE
+ *
+ * O VS Code custava 845 MB de PSS (medido em 01/08/2026, 11 processos) para
+ * servir de arvore de arquivos e de editor ocasional — o resto do trabalho ja
+ * era no terminal. Isto aqui e a mesma tela, sem as partes que nao se usavam:
+ *
+ *   +--------------------------------------------------------------+
+ *   | [Projeto] [Salvar] [Claude]        caminho/do/arquivo.c   *   |
+ *   +-------------+------------------------------------------------+
+ *   |  arvore     | [Claude] [bancada.c * x] [README.md  x]        |
+ *   |  de         +------------------------------------------------+
+ *   |  arquivos   |  o painel da aba escolhida, ocupando tudo:     |
+ *   |             |  ou o editor de um arquivo, ou o xterm com o   |
+ *   |             |  Claude Code                                   |
+ *   +-------------+------------------------------------------------+
+ *
+ * XFT, E NAO A FONTE CORE DA BARRA
+ *
+ * A barra-tarefas.c usa fonte CORE em iso8859-1, e isso e certo la: sao rotulos
+ * ASCII de dez letras e o visual arcaico depende de nao haver antialiasing.
+ * Aqui seria um desastre. Um editor com fonte iso8859-1 CORROMPE, ao salvar,
+ * todo caractere fora do latin-1 — e o README deste projeto e cheio de "—",
+ * "→" e acento. Editor que estraga arquivo e pior do que nenhum editor. Por
+ * isso aqui entra o Xft: UTF-8 de verdade, e o custo e uma biblioteca a mais
+ * NESTE binario, nao na barra.
+ *
+ * O TERMINAL E DE VERDADE, E EMBUTIDO
+ *
+ * O Claude Code e um programa de terminal; nao ha como desenha-lo com Xlib. Mas
+ * o X11 deixa uma janela de outro cliente virar filha da nossa: o xterm aceita
+ * "-into <id>" e passa a viver dentro do painel de baixo. Nao ha emulador de
+ * terminal escrito aqui — seria um projeto inteiro — e mesmo assim a bancada
+ * nao depende de terminal nenhum para existir.
+ *
+ * ABAS, E O CLAUDE COMO UMA DELAS
+ *
+ * O Claude morava num painel fixo embaixo, sempre roubando altura do editor
+ * mesmo quando ninguem olhava para ele. Virou aba: o painel de baixo sumiu e o
+ * conteudo escolhido ocupa a area inteira. A aba do Claude e a primeira, nao
+ * fecha e nao tem arquivo; as outras sao arquivos abertos.
+ *
+ * Uma aba guarda o ESTADO INTEIRO de um arquivo (buffer, cursor, rolagem,
+ * desfazer). O editor todo continua mexendo nos mesmos globais de sempre - a
+ * troca de aba salva os globais numa struct e carrega os da outra. Sao
+ * ponteiros e inteiros, dezenas de bytes: trocar de aba nao copia texto. Foi de
+ * proposito, para nao ter de reescrever cada funcao de edicao em cima de um
+ * ponteiro de contexto, que e onde se erra.
+ *
+ * A SESSAO
+ *
+ * As abas abertas voltam na proxima vez, por projeto, de
+ * ~/.config/bancada/sessoes/. Grava-se so o que da para reconstruir do disco:
+ * caminho, cursor e rolagem — nunca conteudo nao salvo. A conversa do Claude
+ * nao entra; a aba dele sobe limpa, e quem quiser a anterior usa
+ * `claude --continue` dentro dela.
+ *
+ * O QUE ESTE EDITOR NAO TEM, DE PROPOSITO
+ *
+ * Sem realce de sintaxe, sem busca, sem selecao de mouse, sem area de
+ * transferencia, sem auto-completar. Para editar a serio, nvim e vim estao no
+ * disco. Isto aqui e para abrir, olhar, corrigir uma linha e salvar.
+ * O que ele TEM de ter, e tem: UTF-8 correto, acento morto do teclado ABNT2,
+ * desfazer, e aviso antes de perder alteracao.
+ */
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/Xatom.h>
+#include <X11/keysym.h>
+#include <X11/Xft/Xft.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <locale.h>
+#include <dirent.h>
+#include <signal.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <sys/select.h>
+
+/* ---- medidas ------------------------------------------------------------- */
+#define BARRA_H    28          /* barra de ferramentas do topo */
+#define ABAS_H     24          /* faixa das abas, logo abaixo dela */
+#define ARVORE_W  240          /* largura da coluna da esquerda */
+#define PAD         2
+#define GAP         4
+#define MARGEM      6          /* respiro interno do texto */
+#define FECHAR_W   14          /* caixinha do "x" dentro da aba */
+#define ABA_W_MAX 200
+#define ABA_W_MIN  60
+
+#define MAX_ARQ  (8 * 1024 * 1024)   /* teto para abrir um arquivo */
+#define MAX_ABAS   16                /* incluindo a do Claude */
+#define UNDO_N     32                /* instantaneos guardados, POR ABA */
+/* Teto de memoria do desfazer, POR ABA. Era 8 MB quando havia um buffer so;
+ * com 16 abas o mesmo numero viraria 128 MB de teto, o que briga com a premissa
+ * de RAM baixa do projeto. Para arquivo de codigo normal 2 MB ainda dao os 32
+ * passos inteiros. */
+#define UNDO_BYTES (2 * 1024 * 1024)
+
+/* ---- estado do X --------------------------------------------------------- */
+static Display  *dpy;
+static int       tela;
+static Window    raiz, win, w_arv, w_ed, w_term;
+static GC        gc;
+static XftFont  *fonte;
+static XftDraw  *dr_barra, *dr_arv, *dr_ed;
+static XftColor  c_ink, c_fraco, c_sel, c_aberto;
+static XIM       xim;
+static XIC       xic;
+static Atom      A_DELETE;
+
+static unsigned long FACE, FACE_ESC, HI, SH, INK, PAPEL;
+
+static int larg = 1100, alt = 700;   /* tamanho da janela */
+static int avanco, altura_lin, base_lin;   /* metrica da fonte monoespacada */
+
+/* ---- projeto e arvore ---------------------------------------------------- */
+typedef struct { char nome[256]; int dir; } Entrada;
+
+static char     projeto[PATH_MAX];   /* raiz escolhida no botao "Projeto" */
+static char     pasta[PATH_MAX];     /* pasta que a arvore mostra agora */
+static Entrada *entradas;
+static int      n_entradas, cap_entradas;
+static int      arv_topo;            /* primeira linha visivel da arvore */
+
+/* ---- buffer de texto ----------------------------------------------------- */
+static char   **linhas;
+static int      n_linhas, cap_linhas;
+static char     arquivo[PATH_MAX];   /* vazio = nenhum arquivo aberto */
+static int      sujo;                /* alterado desde o ultimo salvar */
+static int      sem_nl_final;        /* o arquivo original nao terminava em \n */
+static int      crlf;                /* o arquivo original usava \r\n */
+static int      cur_l, cur_c;        /* cursor: linha, e COLUNA EM BYTES */
+static int      topo, col0;          /* rolagem vertical e horizontal */
+
+/* ---- desfazer ------------------------------------------------------------ */
+typedef struct { char **l; int n; int cur_l, cur_c; size_t bytes; } Instante;
+static Instante undo[UNDO_N];
+static int      undo_n, undo_pos;
+
+/* ---- terminal embutido --------------------------------------------------- */
+static pid_t    pid_term;
+
+/* ---- sessao -------------------------------------------------------------- */
+static int      restaurando;         /* lendo a sessao gravada agora */
+
+static void desenhar(void);
+static void redimensionar(void);
+static void abrir_arquivo(const char *caminho);
+static void carregar_pasta(const char *p);
+static void seguir_cursor(void);
+static void esticar_terminal(void);
+static void mostrar_painel(void);
+static void ativar(int i);
+static void fechar_aba(int i);
+
+static void morrer(const char *m) { fprintf(stderr, "bancada: %s\n", m); exit(1); }
+
+/* =========================================================================
+ * UTF-8
+ *
+ * O editor guarda BYTES e conta CARACTERES. Toda a aritmetica de cursor passa
+ * por aqui: mover uma casa nao e somar 1, e pular a sequencia inteira. Errar
+ * isto e o jeito classico de um editor cortar um caractere ao meio e gravar
+ * lixo no arquivo.
+ * ========================================================================= */
+static int cont_utf8(unsigned char c) { return (c & 0xC0) == 0x80; }
+
+static int prox_car(const char *s, int i)
+{
+    if (!s[i]) return i;
+    i++;
+    while (s[i] && cont_utf8((unsigned char) s[i])) i++;
+    return i;
+}
+
+static int car_anterior(const char *s, int i)
+{
+    if (i <= 0) return 0;
+    i--;
+    while (i > 0 && cont_utf8((unsigned char) s[i])) i--;
+    return i;
+}
+
+/* Quantos caracteres ha nos primeiros n bytes - e a COLUNA na tela, porque a
+ * fonte e monoespacada e todo caractere ocupa um avanco. */
+static int colunas_ate(const char *s, int n)
+{
+    int i, k = 0;
+    for (i = 0; i < n && s[i]; i++)
+        if (!cont_utf8((unsigned char) s[i])) k++;
+    return k;
+}
+
+static int byte_da_coluna(const char *s, int col)
+{
+    int i = 0, k = 0;
+    while (s[i] && k < col) { i = prox_car(s, i); k++; }
+    return i;
+}
+
+/* =========================================================================
+ * Buffer de linhas
+ * ========================================================================= */
+static void linhas_cabe(int n)
+{
+    if (n <= cap_linhas) return;
+    cap_linhas = n + n / 2 + 64;
+    linhas = realloc(linhas, (size_t) cap_linhas * sizeof *linhas);
+    if (!linhas) morrer("sem memoria");
+}
+
+static void limpar_buffer(void)
+{
+    int i;
+    for (i = 0; i < n_linhas; i++) free(linhas[i]);
+    n_linhas = 0;
+}
+
+static char *dup_str(const char *s) { char *p = strdup(s); if (!p) morrer("sem memoria"); return p; }
+
+static void inserir_linha(int em, const char *txt)
+{
+    linhas_cabe(n_linhas + 1);
+    memmove(&linhas[em + 1], &linhas[em], (size_t) (n_linhas - em) * sizeof *linhas);
+    linhas[em] = dup_str(txt);
+    n_linhas++;
+}
+
+static void remover_linha(int em)
+{
+    free(linhas[em]);
+    memmove(&linhas[em], &linhas[em + 1], (size_t) (n_linhas - em - 1) * sizeof *linhas);
+    n_linhas--;
+}
+
+/* =========================================================================
+ * Desfazer
+ *
+ * Instantaneo do buffer inteiro, nao registro de operacoes. E a implementacao
+ * mais simples que esta CERTA, e o custo esta limitado nos dois eixos: no
+ * maximo UNDO_N instantaneos e UNDO_BYTES de memoria somada; o mais antigo sai
+ * quando qualquer um dos dois estoura. Para arquivo de codigo normal isso da
+ * dezenas de passos por alguns megabytes.
+ * ========================================================================= */
+static size_t peso(char **l, int n)
+{
+    size_t t = 0; int i;
+    for (i = 0; i < n; i++) t += strlen(l[i]) + 1 + sizeof(char *);
+    return t;
+}
+
+static void soltar_instante(Instante *in)
+{
+    int i;
+    if (!in->l) return;
+    for (i = 0; i < in->n; i++) free(in->l[i]);
+    free(in->l);
+    in->l = NULL; in->n = 0; in->bytes = 0;
+}
+
+static size_t undo_total(void)
+{
+    size_t t = 0; int i;
+    for (i = 0; i < UNDO_N; i++) t += undo[i].bytes;
+    return t;
+}
+
+static void guardar_instante(void)
+{
+    Instante *in;
+    int i;
+
+    /* Grava por cima do mais antigo quando o anel da a volta. */
+    in = &undo[undo_pos];
+    soltar_instante(in);
+
+    in->l = malloc((size_t) (n_linhas + 1) * sizeof *in->l);
+    if (!in->l) return;                     /* sem memoria: segue sem desfazer */
+    for (i = 0; i < n_linhas; i++) in->l[i] = dup_str(linhas[i]);
+    in->n = n_linhas;
+    in->cur_l = cur_l; in->cur_c = cur_c;
+    in->bytes = peso(in->l, in->n);
+
+    undo_pos = (undo_pos + 1) % UNDO_N;
+    if (undo_n < UNDO_N) undo_n++;
+
+    while (undo_total() > UNDO_BYTES && undo_n > 1) {
+        int velho = (undo_pos - undo_n + UNDO_N) % UNDO_N;
+        soltar_instante(&undo[velho]);
+        undo_n--;
+    }
+}
+
+static void desfazer(void)
+{
+    Instante *in;
+    int i, idx;
+
+    if (undo_n == 0) return;
+    idx = (undo_pos - 1 + UNDO_N) % UNDO_N;
+    in = &undo[idx];
+    if (!in->l) return;
+
+    limpar_buffer();
+    linhas_cabe(in->n + 1);
+    for (i = 0; i < in->n; i++) linhas[i] = dup_str(in->l[i]);
+    n_linhas = in->n;
+    cur_l = in->cur_l; cur_c = in->cur_c;
+    if (cur_l >= n_linhas) cur_l = n_linhas ? n_linhas - 1 : 0;
+    if (n_linhas == 0) { inserir_linha(0, ""); cur_l = cur_c = 0; }
+
+    soltar_instante(in);
+    undo_pos = idx; undo_n--;
+    sujo = 1;
+}
+
+/* AGRUPAMENTO. Sem isto, cada tecla vira um instantaneo e o Ctrl+Z anda letra
+ * por letra - com 32 instantaneos, o desfazer nao alcancaria nem uma frase.
+ * Aqui uma sequencia de digitacao vira UM passo: so se guarda instantaneo
+ * quando o tipo de acao muda (digitar / apagar / estrutural) ou quando o cursor
+ * foi movido por fora. Navegar zera o grupo, e por isso mover o cursor fecha o
+ * passo atual - que e como um editor de verdade se comporta. */
+enum { G_NENHUM, G_DIGITANDO, G_APAGANDO };
+static int grupo;
+
+static void talvez_guardar(int tipo)
+{
+    if (tipo == G_NENHUM || tipo != grupo) guardar_instante();
+    grupo = tipo;
+}
+
+/* =========================================================================
+ * Abas
+ *
+ * A aba 0 e sempre a do Claude: nao tem buffer, nao fecha, e o painel dela e o
+ * xterm. As demais sao arquivos.
+ *
+ * O TRUQUE, e o motivo de isto caber em poucas linhas: a aba nao e um contexto
+ * que as funcoes de edicao recebem, e um LUGAR ONDE OS GLOBAIS DORMEM. Trocar
+ * de aba e guardar os globais na struct da aba que sai e carregar os da que
+ * entra. Nada de texto se move - "linhas" e um ponteiro, e o anel de desfazer
+ * sao 32 structs. Por isso inserir_texto(), desfazer() e seguir_cursor()
+ * continuam exatamente como eram, sem uma linha a mais.
+ *
+ * "carregada" e a aba cujo buffer esta nos globais neste momento, ou -1 quando
+ * nenhuma esta (no inicio, e quando a ultima aba de arquivo fecha). Ela NAO e
+ * a mesma coisa que "atual": com a aba do Claude a frente, o buffer da ultima
+ * aba de arquivo continua carregado, so nao aparece.
+ * ========================================================================= */
+typedef struct {
+    int      claude;                  /* a aba do terminal */
+    char     arquivo[PATH_MAX];
+    char   **linhas;
+    int      n_linhas, cap_linhas;
+    int      sujo, sem_nl_final, crlf;
+    int      cur_l, cur_c, topo, col0;
+    Instante undo[UNDO_N];
+    int      undo_n, undo_pos, grupo;
+    int      x, w;                    /* onde a aba ficou desenhada */
+} Aba;
+
+static Aba abas[MAX_ABAS];
+static int n_abas;
+static int atual;                     /* aba a frente */
+static int carregada = -1;            /* aba cujo buffer esta nos globais */
+
+static void globais_para_aba(Aba *a)
+{
+    snprintf(a->arquivo, sizeof a->arquivo, "%s", arquivo);
+    a->linhas = linhas; a->n_linhas = n_linhas; a->cap_linhas = cap_linhas;
+    a->sujo = sujo; a->sem_nl_final = sem_nl_final; a->crlf = crlf;
+    a->cur_l = cur_l; a->cur_c = cur_c; a->topo = topo; a->col0 = col0;
+    memcpy(a->undo, undo, sizeof undo);
+    a->undo_n = undo_n; a->undo_pos = undo_pos; a->grupo = grupo;
+}
+
+static void aba_para_globais(Aba *a)
+{
+    snprintf(arquivo, sizeof arquivo, "%s", a->arquivo);
+    linhas = a->linhas; n_linhas = a->n_linhas; cap_linhas = a->cap_linhas;
+    sujo = a->sujo; sem_nl_final = a->sem_nl_final; crlf = a->crlf;
+    cur_l = a->cur_l; cur_c = a->cur_c; topo = a->topo; col0 = a->col0;
+    memcpy(undo, a->undo, sizeof undo);
+    undo_n = a->undo_n; undo_pos = a->undo_pos; grupo = a->grupo;
+}
+
+/* Larga os globais SEM liberar nada - o que eles apontavam ja pertence a struct
+ * de outra aba. Chamar limpar_buffer() ou esquecer_undo() aqui liberaria o
+ * texto da aba vizinha, e o estrago so apareceria ao voltar para ela. */
+static void globais_zerar(void)
+{
+    linhas = NULL; n_linhas = cap_linhas = 0;
+    arquivo[0] = '\0';
+    sujo = sem_nl_final = crlf = 0;
+    cur_l = cur_c = topo = col0 = 0;
+    memset(undo, 0, sizeof undo);
+    undo_n = undo_pos = 0; grupo = G_NENHUM;
+}
+
+/* Antes de olhar qualquer campo das structs, os globais tem de descer para a
+ * aba carregada - la e que estao "sujo" e o cursor de verdade. */
+static void sincronizar(void)
+{
+    if (carregada >= 0) globais_para_aba(&abas[carregada]);
+}
+
+static const char *nome_base(const char *p)
+{
+    const char *b = strrchr(p, '/');
+    return b ? b + 1 : p;
+}
+
+static int aba_do_arquivo(const char *caminho)
+{
+    int i;
+    for (i = 0; i < n_abas; i++)
+        if (!abas[i].claude && !strcmp(abas[i].arquivo, caminho)) return i;
+    return -1;
+}
+
+/* Devolve um buffer estatico: quem chamar tem de usar antes de chamar de novo. */
+static const char *rotulo_aba(int i)
+{
+    static char r[300];
+    if (abas[i].claude) snprintf(r, sizeof r, "Claude");
+    else snprintf(r, sizeof r, "%s%s", nome_base(abas[i].arquivo),
+                  abas[i].sujo ? " *" : "");
+    return r;
+}
+
+/* =========================================================================
+ * Arquivos
+ * ========================================================================= */
+static int e_binario(const char *b, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) if (b[i] == '\0') return 1;
+    return 0;
+}
+
+/* zenity, como no resto do projeto: e a escada de dialogo ja usada pelo
+ * jogo-windows e pelo barra-apps, e escrever um seletor de arquivos em Xlib
+ * seria mais codigo do que o editor inteiro.
+ *
+ * O texto vai pelo AMBIENTE, nao interpolado no comando: assim um caminho com
+ * aspas ou cifrao nao vira comando. Aqui isso nao e teoria - os nomes vem de
+ * nomes de arquivo, que sao seus e podem ter qualquer coisa. */
+static int zenity(const char *tipo, const char *texto)
+{
+    char cmd[256];
+    setenv("BANCADA_TXT", texto, 1);
+    snprintf(cmd, sizeof cmd,
+             "zenity --%s --title=bancada --width=380 --text=\"$BANCADA_TXT\" 2>/dev/null",
+             tipo);
+    return system(cmd) == 0;
+}
+
+static int perguntar(const char *t) { return zenity("question", t); }
+
+/* Calado enquanto restaura a sessao: um arquivo que virou binario ou sumiu
+ * desde a ultima vez daria uma fila de dialogos na abertura, antes mesmo de a
+ * janela aparecer. Ele so nao volta como aba. */
+static void avisar(const char *t)
+{
+    if (restaurando) return;
+    (void) zenity("error", t);
+}
+
+/* Le e VALIDA o arquivo sem tocar em estado nenhum: devolve o texto inteiro (o
+ * chamador libera) ou NULL. Ficou separado do resto porque, com abas, uma falha
+ * no meio do caminho nao pode mais deixar uma aba vazia e quebrada para tras -
+ * a aba so nasce depois que o arquivo passou por aqui. */
+static char *ler_texto(const char *caminho, size_t *fora_n)
+{
+    FILE *f;
+    struct stat st;
+    char *todo;
+    size_t n;
+
+    if (stat(caminho, &st) != 0 || !S_ISREG(st.st_mode)) return NULL;
+    if (st.st_size > MAX_ARQ) { avisar("Arquivo grande demais para a bancada."); return NULL; }
+
+    f = fopen(caminho, "rb");
+    if (!f) return NULL;
+    todo = malloc((size_t) st.st_size + 1);
+    if (!todo) { fclose(f); return NULL; }
+    n = fread(todo, 1, (size_t) st.st_size, f);
+    fclose(f);
+    todo[n] = '\0';
+
+    if (e_binario(todo, n)) {
+        free(todo);
+        avisar("Isso parece um arquivo binario; a bancada nao abre.");
+        return NULL;
+    }
+    *fora_n = n;
+    return todo;
+}
+
+/* Consome o texto lido e o quebra em linhas nos globais, que ja tem de estar
+ * vazios (aba nova) ou serem os desta mesma aba. */
+static void texto_para_buffer(char *todo, size_t n)
+{
+    char *p, *q;
+
+    /* Arquivo VAZIO nao pode ganhar uma linha em branco ao salvar: com n==0 o
+     * teste antigo dava "termina em \n" e o salvar acrescentava um. */
+    sem_nl_final = (n == 0) || (todo[n - 1] != '\n');
+    crlf = (memchr(todo, '\r', n) != NULL);
+
+    p = todo;
+    while (1) {
+        q = strchr(p, '\n');
+        if (q) {
+            *q = '\0';
+            /* O \r sai da linha para nao virar caractere de tela, mas o
+             * arquivo LEMBRA que era CRLF e volta CRLF no salvar. Converter
+             * final de linha sem avisar e das piores coisas que um editor faz:
+             * o diff seguinte mostra o arquivo inteiro mudado. */
+            { size_t l = strlen(p); if (l && p[l - 1] == '\r') p[l - 1] = '\0'; }
+            inserir_linha(n_linhas, p);
+            p = q + 1;
+        } else {
+            if (*p || n_linhas == 0) inserir_linha(n_linhas, p);
+            break;
+        }
+    }
+    if (n_linhas == 0) inserir_linha(0, "");
+    free(todo);
+}
+
+/* Abrir agora e SEMPRE abrir uma aba. O arquivo que ja esta aberto so vem para
+ * a frente - e por isso sumiu daqui o "descartar alteracoes?": nada mais e
+ * sobrescrito ao abrir. A pergunta migrou para fechar_aba(), que e onde o
+ * trabalho passa a correr risco de verdade. */
+static void abrir_arquivo(const char *caminho)
+{
+    char *todo;
+    size_t n;
+    int i;
+
+    sincronizar();
+
+    i = aba_do_arquivo(caminho);
+    if (i >= 0) { ativar(i); return; }
+
+    if (n_abas >= MAX_ABAS) { avisar("Abas demais abertas; feche alguma."); return; }
+
+    todo = ler_texto(caminho, &n);
+    if (!todo) return;
+
+    /* Daqui em diante nada pode falhar: os globais passam a ser da aba nova. */
+    globais_zerar();
+    carregada = n_abas;
+    memset(&abas[n_abas], 0, sizeof abas[0]);
+    n_abas++;
+
+    texto_para_buffer(todo, n);
+    snprintf(arquivo, sizeof arquivo, "%s", caminho);
+    cur_l = cur_c = topo = col0 = 0;
+    sujo = 0;
+    globais_para_aba(&abas[carregada]);
+
+    ativar(carregada);
+}
+
+/* =========================================================================
+ * Sessao — quais abas estavam abertas, por projeto
+ *
+ * Grava so o que da para reconstruir do disco: caminho, cursor e rolagem. NAO
+ * grava conteudo nao salvo. Um editor que ressuscita texto que voce nao mandou
+ * gravar precisa acertar isso SEMPRE, e errar uma vez custa o arquivo; aqui,
+ * fechar com alteracao pendente continua perguntando, que e a garantia simples
+ * e que ja funciona.
+ *
+ * A conversa do Claude nao entra: a aba dele sobe limpa. Quem quiser a anterior
+ * usa `claude --continue` dentro da propria aba.
+ * ========================================================================= */
+static void caminho_sessao(char *fora, size_t n)
+{
+    const char *casa = getenv("HOME");
+    char cod[PATH_MAX];
+    size_t i;
+
+    fora[0] = '\0';
+    if (!casa) return;
+
+    /* O caminho do projeto vira o nome do arquivo com "/" -> "%": legivel, sem
+     * hash e sem colisao. Fundo demais nao ganha sessao gravada - melhor nao
+     * gravar do que gravar num nome truncado, que colidiria com o do vizinho. */
+    for (i = 0; projeto[i] && i < sizeof cod - 1; i++)
+        cod[i] = (projeto[i] == '/') ? '%' : projeto[i];
+    cod[i] = '\0';
+    if (i > 200) return;
+
+    snprintf(fora, n, "%s/.config/bancada/sessoes/%s", casa, cod);
+}
+
+static void salvar_sessao(void)
+{
+    char caminho[PATH_MAX], dir[PATH_MAX];
+    const char *casa = getenv("HOME");
+    size_t np;
+    FILE *f;
+    int i;
+
+    if (restaurando || !casa) return;
+    caminho_sessao(caminho, sizeof caminho);
+    if (!caminho[0]) return;
+
+    snprintf(dir, sizeof dir, "%s/.config", casa);                 mkdir(dir, 0755);
+    snprintf(dir, sizeof dir, "%s/.config/bancada", casa);         mkdir(dir, 0755);
+    snprintf(dir, sizeof dir, "%s/.config/bancada/sessoes", casa); mkdir(dir, 0755);
+
+    sincronizar();
+    f = fopen(caminho, "w");
+    if (!f) return;
+
+    np = strlen(projeto);
+    fprintf(f, "# bancada: sessao de %s\n", projeto);
+    fprintf(f, "atual %d\n", atual);
+    for (i = 0; i < n_abas; i++) {
+        if (abas[i].claude) continue;
+        /* So o que esta DENTRO do projeto. Sem isto, trocar de projeto pelo
+         * botao levaria os arquivos do projeto velho para a sessao do novo, e
+         * a proxima abertura viria com arquivos que nao sao dali. */
+        if (strncmp(abas[i].arquivo, projeto, np) != 0) continue;
+        fprintf(f, "aba %d %d %d %d %s\n", abas[i].cur_l, abas[i].cur_c,
+                abas[i].topo, abas[i].col0, abas[i].arquivo);
+    }
+    fclose(f);
+}
+
+static void restaurar_sessao(void)
+{
+    char caminho[PATH_MAX], linha[4200];
+    FILE *f;
+    int quer_atual = 0;
+
+    caminho_sessao(caminho, sizeof caminho);
+    if (!caminho[0]) return;
+    f = fopen(caminho, "r");
+    if (!f) return;
+
+    restaurando = 1;
+    while (fgets(linha, sizeof linha, f)) {
+        int l, c, t, c0;
+        char arq[4096];
+
+        if (sscanf(linha, "atual %d", &quer_atual) == 1) continue;
+        if (sscanf(linha, "aba %d %d %d %d %4095[^\n]", &l, &c, &t, &c0, arq) != 5)
+            continue;
+
+        abrir_arquivo(arq);
+        /* So mexe no cursor se o arquivo REALMENTE abriu: ele pode ter sumido,
+         * virado binario ou crescido demais desde a ultima vez. */
+        if (carregada < 0 || strcmp(arquivo, arq) != 0) continue;
+
+        if (l >= 0 && l < n_linhas) {
+            cur_l = l;
+            cur_c = (c > 0 && c <= (int) strlen(linhas[l])) ? c : 0;
+        }
+        topo = (t >= 0 && t < n_linhas) ? t : 0;
+        col0 = c0 > 0 ? c0 : 0;
+        globais_para_aba(&abas[carregada]);
+    }
+    fclose(f);
+
+    restaurando = 0;
+    if (quer_atual >= n_abas) quer_atual = n_abas - 1;
+    if (quer_atual < 0) quer_atual = 0;
+    ativar(quer_atual);
+}
+
+static int salvar(void)
+{
+    FILE *f;
+    int i;
+
+    if (!arquivo[0]) return 0;
+    f = fopen(arquivo, "wb");
+    if (!f) { avisar("Nao consegui gravar o arquivo."); return 0; }
+    for (i = 0; i < n_linhas; i++) {
+        fputs(linhas[i], f);
+        if (i < n_linhas - 1 || !sem_nl_final) {
+            if (crlf) fputc('\r', f);
+            fputc('\n', f);
+        }
+    }
+    fclose(f);
+    sujo = 0;
+    return 1;
+}
+
+/* =========================================================================
+ * Arvore de arquivos
+ * ========================================================================= */
+static int cmp_entrada(const void *a, const void *b)
+{
+    const Entrada *x = a, *y = b;
+    if (x->dir != y->dir) return y->dir - x->dir;      /* pastas primeiro */
+    return strcmp(x->nome, y->nome);
+}
+
+static void carregar_pasta(const char *p)
+{
+    DIR *d;
+    struct dirent *e;
+    char cheio[PATH_MAX];
+    struct stat st;
+
+    d = opendir(p);
+    if (!d) return;
+    snprintf(pasta, sizeof pasta, "%s", p);
+    n_entradas = 0;
+    arv_topo = 0;
+
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".")) continue;
+        if (e->d_name[0] == '.' && strcmp(e->d_name, "..")) continue;  /* ocultos fora */
+        if (n_entradas >= cap_entradas) {
+            cap_entradas = cap_entradas ? cap_entradas * 2 : 128;
+            entradas = realloc(entradas, (size_t) cap_entradas * sizeof *entradas);
+            if (!entradas) morrer("sem memoria");
+        }
+        snprintf(cheio, sizeof cheio, "%s/%s", p, e->d_name);
+        snprintf(entradas[n_entradas].nome, sizeof entradas[0].nome, "%s", e->d_name);
+        entradas[n_entradas].dir = (stat(cheio, &st) == 0 && S_ISDIR(st.st_mode));
+        n_entradas++;
+    }
+    closedir(d);
+    qsort(entradas, (size_t) n_entradas, sizeof *entradas, cmp_entrada);
+}
+
+/* =========================================================================
+ * Geometria do painel
+ *
+ * O painel e a area a direita da arvore e abaixo das abas. O editor e o xterm
+ * disputam esse MESMO retangulo - so um deles fica mapeado por vez. Enquanto
+ * o Claude era um painel fixo embaixo, havia dois retangulos e o TERM_H
+ * roubava altura do editor mesmo com ninguem olhando.
+ * ========================================================================= */
+#define CONT_X ARVORE_W
+#define CONT_Y (BARRA_H + ABAS_H)
+
+static int cont_w(void) { int w = larg - ARVORE_W;          return w < 80 ? 80 : w; }
+static int cont_h(void) { int h = alt - BARRA_H - ABAS_H;   return h < altura_lin ? altura_lin : h; }
+
+/* =========================================================================
+ * Desenho — o mesmo bisel Motif da barra-tarefas.c, para as duas ferramentas
+ * parecerem a mesma coisa.
+ * ========================================================================= */
+static void linha_px(Drawable d, int x0, int y0, int x1, int y1, unsigned long c)
+{
+    XSetForeground(dpy, gc, c);
+    XDrawLine(dpy, d, gc, x0, y0, x1, y1);
+}
+
+static void bisel(Drawable d, int x, int y, int w, int h, int fundo, int afundado)
+{
+    unsigned long a = afundado ? SH : HI, b = afundado ? HI : SH;
+
+    XSetForeground(dpy, gc, (unsigned long) fundo);
+    XFillRectangle(dpy, d, gc, x, y, (unsigned) w, (unsigned) h);
+    linha_px(d, x, y, x + w - 2, y, a);
+    linha_px(d, x, y, x, y + h - 2, a);
+    linha_px(d, x, y + h - 1, x + w - 1, y + h - 1, INK);
+    linha_px(d, x + w - 1, y, x + w - 1, y + h - 1, INK);
+    linha_px(d, x + 1, y + h - 2, x + w - 2, y + h - 2, b);
+    linha_px(d, x + w - 2, y + 1, x + w - 2, y + h - 2, b);
+}
+
+static void texto(XftDraw *dr, int x, int y, const char *s, XftColor *cor)
+{
+    XftDrawStringUtf8(dr, cor, fonte, x, y, (const FcChar8 *) s, (int) strlen(s));
+}
+
+/* --- botoes da barra de ferramentas --------------------------------------- */
+typedef struct { const char *rotulo; int x, w; } Botao;
+static Botao botoes[] = { { "Projeto", 0, 74 }, { "Salvar", 0, 66 }, { "Claude", 0, 66 } };
+#define N_BOTOES ((int) (sizeof botoes / sizeof botoes[0]))
+
+static void desenhar_barra(void)
+{
+    int i, x = PAD;
+    char titulo[PATH_MAX + 64];
+
+    XSetForeground(dpy, gc, FACE);
+    XFillRectangle(dpy, win, gc, 0, 0, (unsigned) larg, BARRA_H);
+
+    for (i = 0; i < N_BOTOES; i++) {
+        botoes[i].x = x;
+        bisel(win, x, PAD, botoes[i].w, BARRA_H - 2 * PAD, (int) FACE, 0);
+        texto(dr_barra, x + 10, PAD + base_lin + 3, botoes[i].rotulo, &c_ink);
+        x += botoes[i].w + GAP;
+    }
+
+    snprintf(titulo, sizeof titulo, "%s%s",
+             arquivo[0] ? arquivo : "(nenhum arquivo aberto)", sujo ? "  *" : "");
+    texto(dr_barra, x + 12, PAD + base_lin + 3, titulo, &c_fraco);
+}
+
+/* --- a faixa das abas ------------------------------------------------------
+ * Desenha em duas passadas porque a largura de cada aba depende de quantas ha:
+ * a primeira mede o que cada uma gostaria de ocupar, a segunda desenha ja
+ * sabendo se coube. Nao ha rolagem de abas - quando nao cabe, todas encolhem
+ * junto e o nome e cortado. E o comportamento que nao esconde aba nenhuma. */
+static void desenhar_x(int cx, int cy)
+{
+    linha_px(win, cx,     cy,     cx + 6, cy + 6, INK);
+    linha_px(win, cx + 6, cy,     cx,     cy + 6, INK);
+}
+
+static void desenhar_abas(void)
+{
+    int i, x = ARVORE_W + PAD;
+    int disp = larg - ARVORE_W - 2 * PAD;
+    int larguras[MAX_ABAS], soma = 0;
+    int y = BARRA_H + PAD, h = ABAS_H - 2 * PAD;
+    int linha_base = BARRA_H + (ABAS_H + base_lin) / 2 - 2;
+
+    XSetForeground(dpy, gc, FACE);
+    XFillRectangle(dpy, win, gc, ARVORE_W, BARRA_H, (unsigned) (larg - ARVORE_W), ABAS_H);
+
+    for (i = 0; i < n_abas; i++) {
+        const char *r = rotulo_aba(i);
+        int w = MARGEM + colunas_ate(r, (int) strlen(r)) * avanco + MARGEM;
+        if (!abas[i].claude) w += FECHAR_W;
+        if (w > ABA_W_MAX) w = ABA_W_MAX;
+        larguras[i] = w;
+        soma += w + PAD;
+    }
+    if (soma > disp && n_abas > 0) {
+        int w = (disp - n_abas * PAD) / n_abas;
+        if (w < ABA_W_MIN) w = ABA_W_MIN;
+        for (i = 0; i < n_abas; i++) larguras[i] = w;
+    }
+
+    for (i = 0; i < n_abas; i++) {
+        const char *r = rotulo_aba(i);
+        int w = larguras[i], ativa = (i == atual);
+        int reservado = MARGEM + (abas[i].claude ? MARGEM : FECHAR_W);
+        int cabe = (w - reservado) / avanco;
+        char corte[300];
+
+        abas[i].x = x;
+        abas[i].w = w;
+
+        /* a aba da frente sobe (bisel em relevo, face clara); as outras afundam */
+        bisel(win, x, y, w, h, (int) (ativa ? FACE : FACE_ESC), !ativa);
+
+        if (cabe < 0) cabe = 0;
+        snprintf(corte, sizeof corte, "%.*s", byte_da_coluna(r, cabe), r);
+        texto(dr_barra, x + MARGEM, linha_base, corte, ativa ? &c_ink : &c_fraco);
+
+        if (!abas[i].claude)
+            desenhar_x(x + w - FECHAR_W + 2, BARRA_H + ABAS_H / 2 - 3);
+
+        x += w + PAD;
+    }
+}
+
+static void desenhar_arvore(void)
+{
+    int i, y, vis;
+
+    XSetForeground(dpy, gc, PAPEL);
+    XFillRectangle(dpy, w_arv, gc, 0, 0, (unsigned) ARVORE_W, (unsigned) (alt - BARRA_H));
+
+    /* cabecalho: a pasta atual, cortada pela esquerda quando nao cabe */
+    {
+        const char *p = pasta;
+        int cabe = (ARVORE_W - 2 * MARGEM) / avanco;
+        int n = (int) strlen(p);
+        if (colunas_ate(p, n) > cabe) p = p + byte_da_coluna(p, colunas_ate(p, n) - cabe + 1);
+        XSetForeground(dpy, gc, FACE);
+        XFillRectangle(dpy, w_arv, gc, 0, 0, (unsigned) ARVORE_W, (unsigned) altura_lin + 2);
+        texto(dr_arv, MARGEM, base_lin + 1, p, &c_fraco);
+    }
+
+    vis = (alt - BARRA_H - altura_lin - 2) / altura_lin;
+    for (i = 0; i < vis && arv_topo + i < n_entradas; i++) {
+        Entrada *e = &entradas[arv_topo + i];
+        char rot[300];
+        int em_aba = -1, frente = 0;
+
+        y = altura_lin + 2 + i * altura_lin;
+        snprintf(rot, sizeof rot, "%s%s", e->dir ? "[+] " : "    ", e->nome);
+
+        if (!e->dir) {
+            /* caminho inteiro, nao so o nome: dois arquivos com o mesmo
+             * nome em pastas diferentes acenderiam os dois */
+            char cheio[PATH_MAX + 300];
+            snprintf(cheio, sizeof cheio, "%s/%s", pasta, e->nome);
+            em_aba = aba_do_arquivo(cheio);
+            frente = (em_aba >= 0 && em_aba == atual);
+        }
+        /* tres estados, agora que ha mais de um arquivo aberto por vez: o da
+         * aba da frente acende; os que estao em outra aba ficam numa cor
+         * propria, para se saber o que ja esta carregado sem ler as abas */
+        if (frente) {
+            XSetForeground(dpy, gc, SH);
+            XFillRectangle(dpy, w_arv, gc, 0, y, (unsigned) ARVORE_W, (unsigned) altura_lin);
+        }
+        texto(dr_arv, MARGEM, y + base_lin, rot,
+              frente ? &c_sel : (em_aba >= 0 ? &c_aberto : &c_ink));
+    }
+}
+
+static void desenhar_editor(void)
+{
+    int w = cont_w(), h = cont_h();
+    int vis = (h - 2 * MARGEM) / altura_lin, i;
+
+    XSetForeground(dpy, gc, PAPEL);
+    XFillRectangle(dpy, w_ed, gc, 0, 0, (unsigned) w, (unsigned) h);
+
+    for (i = 0; i < vis && topo + i < n_linhas; i++) {
+        const char *s = linhas[topo + i];
+        int corte = byte_da_coluna(s, col0);
+        int y = MARGEM + i * altura_lin + base_lin;
+        texto(dr_ed, MARGEM, y, s + corte, &c_ink);
+    }
+
+    /* cursor: barra vertical de 2px, sem piscar (piscar exigiria acordar o
+     * processo duas vezes por segundo so para isso) */
+    if (cur_l >= topo && cur_l < topo + vis) {
+        int cx = MARGEM + (colunas_ate(linhas[cur_l], cur_c) - col0) * avanco;
+        int cy = MARGEM + (cur_l - topo) * altura_lin;
+        if (cx >= MARGEM - 1) {
+            XSetForeground(dpy, gc, INK);
+            XFillRectangle(dpy, w_ed, gc, cx, cy, 2, (unsigned) altura_lin);
+        }
+    }
+}
+
+static void desenhar(void)
+{
+    sincronizar();          /* "sujo" e o cursor vivem nos globais; as abas leem deles */
+    desenhar_barra();
+    desenhar_abas();
+    desenhar_arvore();
+    /* Na aba do Claude quem desenha o painel e o xterm, e o w_ed nem esta
+     * mapeado. Sem esta guarda, a aba do Claude sem arquivo nenhum carregado
+     * cairia num linhas[cur_l] com linhas == NULL. */
+    if (!abas[atual].claude && carregada >= 0) desenhar_editor();
+    XFlush(dpy);
+}
+
+/* =========================================================================
+ * Rolagem — o cursor manda; a tela segue.
+ * ========================================================================= */
+static void seguir_cursor(void)
+{
+    int vis, cabe, col;
+
+    if (carregada < 0 || n_linhas == 0) return;   /* nenhuma aba de arquivo carregada */
+
+    vis  = (cont_h() - 2 * MARGEM) / altura_lin;
+    cabe = (cont_w() - 2 * MARGEM) / avanco;
+    col  = colunas_ate(linhas[cur_l], cur_c);
+
+    if (vis < 1) vis = 1;
+    if (cur_l < topo) topo = cur_l;
+    if (cur_l >= topo + vis) topo = cur_l - vis + 1;
+    if (col < col0) col0 = col;
+    if (col >= col0 + cabe) col0 = col - cabe + 1;
+    if (col0 < 0) col0 = 0;
+}
+
+/* =========================================================================
+ * Edicao
+ * ========================================================================= */
+static void inserir_texto(const char *t, int n)
+{
+    char *velha = linhas[cur_l];
+    size_t lv = strlen(velha);
+    char *nova;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (t[i] == '\n' || t[i] == '\r') {          /* Enter: parte a linha */
+            char *resto = dup_str(velha + cur_c);
+            velha[cur_c] = '\0';
+            linhas[cur_l] = realloc(velha, (size_t) cur_c + 1);
+            inserir_linha(cur_l + 1, resto);
+            free(resto);
+            cur_l++; cur_c = 0;
+            velha = linhas[cur_l]; lv = strlen(velha);
+            continue;
+        }
+        nova = malloc(lv + 2);
+        if (!nova) return;
+        memcpy(nova, velha, (size_t) cur_c);
+        nova[cur_c] = t[i];
+        memcpy(nova + cur_c + 1, velha + cur_c, lv - (size_t) cur_c + 1);
+        free(velha);
+        linhas[cur_l] = velha = nova;
+        lv++; cur_c++;
+    }
+    sujo = 1;
+}
+
+static void apagar_atras(void)
+{
+    char *l = linhas[cur_l];
+
+    if (cur_c > 0) {
+        int ini = car_anterior(l, cur_c);
+        memmove(l + ini, l + cur_c, strlen(l) - (size_t) cur_c + 1);
+        cur_c = ini;
+    } else if (cur_l > 0) {
+        char *acima = linhas[cur_l - 1];
+        size_t la = strlen(acima);
+        char *junto = malloc(la + strlen(l) + 1);
+        if (!junto) return;
+        strcpy(junto, acima); strcat(junto, l);
+        free(linhas[cur_l - 1]);
+        linhas[cur_l - 1] = junto;
+        remover_linha(cur_l);
+        cur_l--; cur_c = (int) la;
+    } else return;
+    sujo = 1;
+}
+
+static void apagar_frente(void)
+{
+    char *l = linhas[cur_l];
+    size_t n = strlen(l);
+
+    if (cur_c < (int) n) {
+        int fim = prox_car(l, cur_c);
+        memmove(l + cur_c, l + fim, n - (size_t) fim + 1);
+    } else if (cur_l < n_linhas - 1) {
+        char *abaixo = linhas[cur_l + 1];
+        char *junto = malloc(n + strlen(abaixo) + 1);
+        if (!junto) return;
+        strcpy(junto, l); strcat(junto, abaixo);
+        free(linhas[cur_l]);
+        linhas[cur_l] = junto;
+        remover_linha(cur_l + 1);
+    } else return;
+    sujo = 1;
+}
+
+/* =========================================================================
+ * O Claude, embutido
+ *
+ * O binario vem do `trabalho onde`, que ja sabe procura-lo (nesta maquina ele
+ * mora dentro da extensao do VS Code, num caminho com a versao). Assim ha um
+ * lugar so no projeto que sabe disso.
+ * ========================================================================= */
+static void caminho_claude(char *fora, size_t n)
+{
+    FILE *f = popen("trabalho onde 2>/dev/null", "r");
+    char linha[PATH_MAX] = "";
+
+    if (f) { if (fgets(linha, sizeof linha, f)) { char *nl = strchr(linha, '\n'); if (nl) *nl = '\0'; } pclose(f); }
+    snprintf(fora, n, "%s", linha[0] ? linha : "claude");
+}
+
+static void abrir_claude(void)
+{
+    char id[32], cmd[PATH_MAX * 2 + 64], cla[PATH_MAX];
+
+    if (pid_term > 0) { kill(pid_term, SIGTERM); pid_term = 0; }
+
+    caminho_claude(cla, sizeof cla);
+    snprintf(id, sizeof id, "%lu", (unsigned long) w_term);
+    snprintf(cmd, sizeof cmd, "cd '%s' && exec '%s'", projeto, cla);
+
+    pid_term = fork();
+    if (pid_term == 0) {
+        setsid();
+        execlp("xterm", "xterm", "-into", id,
+               "-fa", "DejaVu Sans Mono", "-fs", "10",
+               "-bg", "black", "-fg", "gray90", "-b", "2",
+               "-e", "sh", "-c", cmd, (char *) NULL);
+        _exit(127);
+    }
+}
+
+/* O botao "Claude" da barra so traz a aba para a frente; se o processo tiver
+ * morrido (o Claude saiu, o xterm fechou), ressuscita antes. Como o SIGCHLD e
+ * SIG_IGN, o filho morto some sozinho e o kill(pid,0) e o teste que sobra. */
+static void ir_para_claude(void)
+{
+    if (pid_term <= 0 || kill(pid_term, 0) != 0) abrir_claude();
+    ativar(0);
+}
+
+/* Depois de um resize, o xterm nao se estica sozinho: com "-into" ele e apenas
+ * filho da nossa janela e mantem a geometria com que nasceu. Quem o acerta e
+ * este laco, que redimensiona os filhos do painel. */
+static void esticar_terminal(void)
+{
+    Window r, pai, *filhos = NULL;
+    unsigned n = 0, i;
+    int w = cont_w(), h = cont_h();
+
+    if (XQueryTree(dpy, w_term, &r, &pai, &filhos, &n) && filhos) {
+        for (i = 0; i < n; i++)
+            XMoveResizeWindow(dpy, filhos[i], 0, 0, (unsigned) w, (unsigned) h);
+        XFree(filhos);
+    }
+}
+
+/* =========================================================================
+ * Geometria
+ * ========================================================================= */
+/* O editor e o xterm ocupam o MESMO retangulo; so um fica mapeado. */
+static void redimensionar(void)
+{
+    unsigned w = (unsigned) cont_w(), h = (unsigned) cont_h();
+
+    XMoveResizeWindow(dpy, w_arv, 0, BARRA_H, ARVORE_W, (unsigned) (alt - BARRA_H));
+    XMoveResizeWindow(dpy, w_ed,   CONT_X, CONT_Y, w, h);
+    XMoveResizeWindow(dpy, w_term, CONT_X, CONT_Y, w, h);
+    esticar_terminal();
+    seguir_cursor();
+}
+
+/* =========================================================================
+ * Troca de aba
+ * ========================================================================= */
+static void focar_terminal(void)
+{
+    Window r, pai, *f = NULL;
+    unsigned n = 0;
+
+    if (XQueryTree(dpy, w_term, &r, &pai, &f, &n) && f && n)
+        XSetInputFocus(dpy, f[0], RevertToParent, CurrentTime);
+    if (f) XFree(f);
+}
+
+static void mostrar_painel(void)
+{
+    if (abas[atual].claude) {
+        XUnmapWindow(dpy, w_ed);
+        XMapWindow(dpy, w_term);
+        /* Enquanto esteve escondido o xterm nao soube dos resizes: com "-into"
+         * ele so obedece a quem o redimensiona de fora, e isso somos nos. */
+        esticar_terminal();
+        focar_terminal();
+    } else {
+        XUnmapWindow(dpy, w_term);
+        XMapWindow(dpy, w_ed);
+        XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
+    }
+}
+
+static void ativar(int i)
+{
+    if (i < 0 || i >= n_abas) return;
+
+    sincronizar();
+    if (!abas[i].claude) { aba_para_globais(&abas[i]); carregada = i; }
+    atual = i;
+    mostrar_painel();
+
+    /* SEM seguir_cursor() aqui, e isso NAO e esquecimento. Ele existe para
+     * arrastar a tela ATE o cursor, e o cursor so anda por acao do teclado.
+     * Chamado na troca de aba, ele desfazia a rolagem de quem tinha descido o
+     * arquivo com a roda do mouse sem mexer no cursor: rolar ate a linha 36,
+     * ir para outra aba e voltar devolvia a aba na linha 1. Medido em
+     * 01/08/2026. O topo e o col0 guardados na aba ja sao validos - foram
+     * salvos num estado coerente e nenhum resize os invalida. */
+
+    /* Toda mudanca de aba passa por aqui - abrir, fechar e trocar chamam
+     * ativar(). Gravar neste ponto faz a sessao sobreviver tambem a um kill,
+     * nao so a uma saida limpa. Sao poucas linhas num arquivo minusculo, no
+     * ritmo de um clique humano. */
+    salvar_sessao();
+}
+
+static void fechar_aba(int i)
+{
+    int k;
+
+    if (i < 0 || i >= n_abas || abas[i].claude) return;   /* a do Claude nao fecha */
+
+    sincronizar();
+    if (abas[i].sujo) {
+        char m[320];
+        snprintf(m, sizeof m, "%s tem alteracoes nao salvas. Fechar assim mesmo?",
+                 nome_base(abas[i].arquivo));
+        if (!perguntar(m)) return;
+    }
+
+    /* Libera o que e DESTA aba. Nao da para usar limpar_buffer()/esquecer_undo(),
+     * que mexem nos globais: a aba fechada pode nao ser a carregada. */
+    for (k = 0; k < abas[i].n_linhas; k++) free(abas[i].linhas[k]);
+    free(abas[i].linhas);
+    for (k = 0; k < UNDO_N; k++) soltar_instante(&abas[i].undo[k]);
+
+    if (carregada == i) { carregada = -1; globais_zerar(); }
+    else if (carregada > i) carregada--;
+
+    memmove(&abas[i], &abas[i + 1], (size_t) (n_abas - i - 1) * sizeof *abas);
+    n_abas--;
+
+    if (atual > i || atual >= n_abas) atual--;
+    if (atual < 0) atual = 0;
+    ativar(atual);
+}
+
+/* =========================================================================
+ * Eventos
+ * ========================================================================= */
+static void clique_arvore(int y)
+{
+    int i = (y - altura_lin - 2) / altura_lin + arv_topo;
+    char cheio[PATH_MAX + 300];
+
+    if (i < 0 || i >= n_entradas) return;
+    snprintf(cheio, sizeof cheio, "%s/%s", pasta, entradas[i].nome);
+
+    if (entradas[i].dir) {
+        char real[PATH_MAX];
+        if (realpath(cheio, real)) carregar_pasta(real);
+    } else {
+        /* realpath antes de abrir: o caminho volta canonico e cabe em PATH_MAX,
+         * e e o mesmo que a arvore compara para acender a linha do arquivo
+         * aberto. Sem isso, "a/./b" e "a/b" seriam dois arquivos diferentes. */
+        char real[PATH_MAX];
+        if (realpath(cheio, real)) abrir_arquivo(real);
+    }
+}
+
+/* Sair passou a ser mais perigoso: pode haver alteracao pendente numa aba que
+ * nem esta na tela. */
+static int algum_sujo(void)
+{
+    int i;
+    sincronizar();
+    for (i = 0; i < n_abas; i++) if (abas[i].sujo) return 1;
+    return 0;
+}
+
+static void clique_abas(int x)
+{
+    int i;
+
+    for (i = 0; i < n_abas; i++)
+        if (x >= abas[i].x && x < abas[i].x + abas[i].w) {
+            if (!abas[i].claude && x >= abas[i].x + abas[i].w - FECHAR_W) fechar_aba(i);
+            else ativar(i);
+            return;
+        }
+}
+
+static void escolher_projeto(void)
+{
+    FILE *f;
+    char linha[PATH_MAX] = "", cmd[PATH_MAX + 160];
+
+    snprintf(cmd, sizeof cmd,
+             "zenity --file-selection --directory --title='Projeto' "
+             "--filename='%s/' 2>/dev/null", projeto);
+    f = popen(cmd, "r");
+    if (!f) return;
+    if (fgets(linha, sizeof linha, f)) { char *nl = strchr(linha, '\n'); if (nl) *nl = '\0'; }
+    pclose(f);
+    if (!linha[0]) return;
+
+    salvar_sessao();                      /* fecha a sessao do projeto que sai */
+    snprintf(projeto, sizeof projeto, "%s", linha);
+    carregar_pasta(projeto);
+    abrir_claude();                       /* o Claude segue o projeto */
+    salvar_sessao();                      /* e abre a do que entra */
+}
+
+static void tecla(XKeyEvent *ev)
+{
+    char buf[64];
+    KeySym ks = NoSymbol;
+    Status st;
+    int n = 0;
+    int ctrl = (ev->state & ControlMask) != 0;
+
+    if (xic) n = Xutf8LookupString(xic, ev, buf, sizeof buf - 1, &ks, &st);
+    else     n = XLookupString(ev, buf, sizeof buf - 1, &ks, NULL);
+    buf[n > 0 ? n : 0] = '\0';
+
+    /* As teclas de ABA valem em qualquer aba, inclusive na do Claude - por isso
+     * vem antes da guarda logo abaixo. */
+    if (ctrl) {
+        switch (ks) {
+        case XK_Tab:          ativar((atual + 1) % n_abas); desenhar(); return;
+        case XK_ISO_Left_Tab: ativar((atual - 1 + n_abas) % n_abas); desenhar(); return;
+        case XK_w: case XK_W: fechar_aba(atual); desenhar(); return;
+        }
+    }
+
+    /* Na aba do Claude o teclado e do xterm. As unicas teclas que chegam aqui
+     * sao as capturadas por XGrabKey, ja tratadas acima; qualquer outra coisa
+     * seria editar as escondidas um arquivo que nem esta na tela. */
+    if (abas[atual].claude) return;
+
+    if (ctrl) {
+        switch (ks) {
+        case XK_s: case XK_S: salvar(); desenhar(); return;
+        case XK_z: case XK_Z: grupo = G_NENHUM; desfazer(); seguir_cursor(); desenhar(); return;
+        case XK_q: case XK_Q:
+            if (!algum_sujo() || perguntar("Ha alteracoes nao salvas. Sair mesmo assim?")) {
+                salvar_sessao();
+                if (pid_term > 0) kill(pid_term, SIGTERM);
+                exit(0);
+            }
+            return;
+        }
+        return;                            /* outros Ctrl+ nao fazem nada */
+    }
+
+    if (carregada < 0) return;             /* nenhuma aba de arquivo carregada */
+
+    switch (ks) {
+    case XK_Left: case XK_Right: case XK_Up: case XK_Down:
+    case XK_Home: case XK_End: case XK_Prior: case XK_Next:
+        grupo = G_NENHUM;                 /* mover o cursor fecha o passo */
+        break;
+    }
+
+    switch (ks) {
+    case XK_Left:  if (cur_c > 0) cur_c = car_anterior(linhas[cur_l], cur_c);
+                   else if (cur_l > 0) { cur_l--; cur_c = (int) strlen(linhas[cur_l]); }
+                   break;
+    case XK_Right: if (cur_c < (int) strlen(linhas[cur_l])) cur_c = prox_car(linhas[cur_l], cur_c);
+                   else if (cur_l < n_linhas - 1) { cur_l++; cur_c = 0; }
+                   break;
+    case XK_Up:
+    case XK_Down: {
+        int col = colunas_ate(linhas[cur_l], cur_c);
+        if (ks == XK_Up   && cur_l > 0)            cur_l--;
+        if (ks == XK_Down && cur_l < n_linhas - 1) cur_l++;
+        cur_c = byte_da_coluna(linhas[cur_l], col);
+        break;
+    }
+    case XK_Home:  cur_c = 0; break;
+    case XK_End:   cur_c = (int) strlen(linhas[cur_l]); break;
+    case XK_Prior:
+    case XK_Next: {
+        int vis = (cont_h() - 2 * MARGEM) / altura_lin;
+        cur_l += (ks == XK_Next ? vis : -vis);
+        if (cur_l < 0) cur_l = 0;
+        if (cur_l >= n_linhas) cur_l = n_linhas - 1;
+        cur_c = 0;
+        break;
+    }
+    case XK_BackSpace: talvez_guardar(G_APAGANDO);  apagar_atras();  break;
+    case XK_Delete:    talvez_guardar(G_APAGANDO);  apagar_frente(); break;
+    case XK_Return:
+    case XK_KP_Enter:  talvez_guardar(G_NENHUM); inserir_texto("\n", 1); break;
+    case XK_Tab:       talvez_guardar(G_NENHUM); inserir_texto("    ", 4); break;
+    case XK_Escape:    return;
+    default:
+        if (n > 0 && (unsigned char) buf[0] >= 32) {
+            talvez_guardar(G_DIGITANDO);
+            inserir_texto(buf, n);
+        }
+        break;
+    }
+    seguir_cursor();
+    desenhar();
+}
+
+/* Ctrl+Tab tem de funcionar TAMBEM com o foco dentro do xterm, senao a aba do
+ * Claude vira uma armadilha: entra-se nela pelo teclado e so se sai pelo mouse.
+ * XGrabKey na janela-mae alcanca a subarvore inteira - o xterm e neto dela - e
+ * com owner_events=False o evento vem para ca em vez de ir para o xterm.
+ * As quatro combinacoes sao por causa do CapsLock e do NumLock, que entram no
+ * "state" e fariam o grab nao casar. Grava-se so o Tab: cada tecla capturada
+ * aqui e uma tecla a menos para o Claude Code, que usa o Shift+Tab. */
+static void pegar_teclas(void)
+{
+    KeyCode k = XKeysymToKeycode(dpy, XK_Tab);
+    unsigned trava[] = { 0, LockMask, Mod2Mask, LockMask | Mod2Mask };
+    unsigned i;
+
+    if (!k) return;
+    for (i = 0; i < sizeof trava / sizeof trava[0]; i++) {
+        XGrabKey(dpy, k, ControlMask | trava[i], win, False,
+                 GrabModeAsync, GrabModeAsync);
+        XGrabKey(dpy, k, ControlMask | ShiftMask | trava[i], win, False,
+                 GrabModeAsync, GrabModeAsync);
+    }
+}
+
+/* Com abas, XSetInputFocus passa a mirar janela que acabou de ser desmapeada -
+ * o que devolve BadMatch, e o tratador padrao do Xlib MATA o processo. Erro de
+ * foco e de janela ja morta se ignora; o resto continua aparecendo no stderr. */
+static int erro_x(Display *d, XErrorEvent *e)
+{
+    char m[160];
+
+    if (e->error_code == BadMatch || e->error_code == BadWindow) return 0;
+    XGetErrorText(d, e->error_code, m, sizeof m);
+    fprintf(stderr, "bancada: erro do X: %s\n", m);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    XSetWindowAttributes at;
+    XColor c;
+    Colormap cm;
+    XGlyphInfo gi;
+    XRenderColor rc;
+    char inicial[PATH_MAX];
+
+    setlocale(LC_ALL, "");
+    if (!XSupportsLocale()) fprintf(stderr, "bancada: locale sem suporte no X\n");
+    XSetLocaleModifiers("");
+    signal(SIGCHLD, SIG_IGN);
+
+    dpy = XOpenDisplay(NULL);
+    if (!dpy) morrer("nao abriu o display");
+    XSetErrorHandler(erro_x);
+    tela = DefaultScreen(dpy);
+    raiz = RootWindow(dpy, tela);
+    cm   = DefaultColormap(dpy, tela);
+
+#define COR(s) (XParseColor(dpy, cm, s, &c), XAllocColor(dpy, cm, &c), c.pixel)
+    FACE  = COR("#DEDEDE");
+    FACE_ESC = COR("#C4C4C4");     /* face das abas de tras */
+    HI    = COR("#FFFFFF");
+    SH    = COR("#808080");
+    INK   = COR("#000000");
+    PAPEL = COR("#FFFFFF");
+#undef COR
+
+    /* A pasta inicial: o argumento, ou de onde a bancada foi chamada. */
+    if (argc > 1 && realpath(argv[1], inicial)) ;
+    else if (!getcwd(inicial, sizeof inicial)) snprintf(inicial, sizeof inicial, "%s", ".");
+    snprintf(projeto, sizeof projeto, "%s", inicial);
+
+    at.background_pixel = FACE;
+    at.event_mask = ExposureMask | StructureNotifyMask | KeyPressMask |
+                    ButtonPressMask | FocusChangeMask;
+    win = XCreateWindow(dpy, raiz, 0, 0, (unsigned) larg, (unsigned) alt, 0,
+                        CopyFromParent, InputOutput, CopyFromParent,
+                        CWBackPixel | CWEventMask, &at);
+    XStoreName(dpy, win, "bancada");
+    { XClassHint ch = { "bancada", "Bancada" }; XSetClassHint(dpy, win, &ch); }
+    A_DELETE = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols(dpy, win, &A_DELETE, 1);
+
+    at.event_mask = ExposureMask | ButtonPressMask;
+    w_arv = XCreateWindow(dpy, win, 0, BARRA_H, ARVORE_W, (unsigned) (alt - BARRA_H), 0,
+                          CopyFromParent, InputOutput, CopyFromParent,
+                          CWBackPixel | CWEventMask, &at);
+    /* SEM KeyPressMask aqui, e isso NAO e esquecimento. O X entrega a tecla a
+     * MENOR janela sob o ponteiro que a tenha pedido, subindo dali - e nao
+     * simplesmente a janela com foco. Com KeyPressMask no editor, as teclas
+     * chegavam com window=w_ed enquanto o contexto de entrada (XIC) apontava
+     * para a janela-mae; o XFilterEvent nao reconhecia o evento como dele e o
+     * acento morto do ABNT2 nunca compunha: ' + a saia "a" em vez de "a" com
+     * acento. Medido em 01/08/2026 contra o xterm, que no mesmo ambiente
+     * compunha certo. Deixando so a mae pedir teclado, o evento sobe ate ela e
+     * o XIM funciona. */
+    at.event_mask = ExposureMask | ButtonPressMask;
+    w_ed = XCreateWindow(dpy, win, CONT_X, CONT_Y,
+                         (unsigned) (larg - ARVORE_W), (unsigned) (alt - BARRA_H - ABAS_H), 0,
+                         CopyFromParent, InputOutput, CopyFromParent,
+                         CWBackPixel | CWEventMask, &at);
+    at.background_pixel = INK;
+    /* SubstructureNotifyMask: o xterm nasce depois, de forma assincrona, e com
+     * "-into" ele mantem a geometria de 80x24 com que veio ao mundo. E este
+     * aviso que diz a hora certa de estica-lo para o painel inteiro. */
+    at.event_mask = ButtonPressMask | SubstructureNotifyMask;
+    w_term = XCreateWindow(dpy, win, CONT_X, CONT_Y,
+                           (unsigned) (larg - ARVORE_W), (unsigned) (alt - BARRA_H - ABAS_H), 0,
+                           CopyFromParent, InputOutput, CopyFromParent,
+                           CWBackPixel | CWEventMask, &at);
+    gc = XCreateGC(dpy, win, 0, NULL);
+
+    fonte = XftFontOpenName(dpy, tela, "DejaVu Sans Mono:size=10");
+    if (!fonte) fonte = XftFontOpenName(dpy, tela, "monospace:size=10");
+    if (!fonte) morrer("nao achei fonte monoespacada");
+
+    XftTextExtentsUtf8(dpy, fonte, (const FcChar8 *) "M", 1, &gi);
+    avanco     = gi.xOff ? gi.xOff : 8;
+    altura_lin = fonte->ascent + fonte->descent + 2;
+    base_lin   = fonte->ascent;
+
+    dr_barra = XftDrawCreate(dpy, win,   DefaultVisual(dpy, tela), cm);
+    dr_arv   = XftDrawCreate(dpy, w_arv, DefaultVisual(dpy, tela), cm);
+    dr_ed    = XftDrawCreate(dpy, w_ed,  DefaultVisual(dpy, tela), cm);
+
+#define XCOR(dst, r, g, b) do { rc.red=(r); rc.green=(g); rc.blue=(b); rc.alpha=0xffff; \
+        XftColorAllocValue(dpy, DefaultVisual(dpy, tela), cm, &rc, (dst)); } while (0)
+    XCOR(&c_ink,    0x0000, 0x0000, 0x0000);
+    XCOR(&c_fraco,  0x5000, 0x5000, 0x5000);
+    XCOR(&c_sel,    0xffff, 0xffff, 0xffff);
+    XCOR(&c_aberto, 0x1000, 0x3000, 0x9000);   /* na arvore: aberto em outra aba */
+#undef XCOR
+
+    xim = XOpenIM(dpy, NULL, NULL, NULL);
+    if (xim)
+        xic = XCreateIC(xim, XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
+                        XNClientWindow, win, XNFocusWindow, win, (char *) NULL);
+    if (!xic)
+        fprintf(stderr, "bancada: sem XIM; acento morto do ABNT2 nao vai compor\n");
+
+    /* A aba 0 e a do Claude, e ela existe desde o inicio. Sem nenhum arquivo
+     * aberto nao ha buffer nenhum: "carregada" fica em -1 e os globais do
+     * editor ficam zerados ate a primeira aba de arquivo nascer. */
+    abas[0].claude = 1;
+    n_abas = 1;
+    atual = 0;
+    carregada = -1;
+    globais_zerar();
+
+    carregar_pasta(projeto);
+
+    /* Nada de XMapSubwindows: quem decide qual dos dois paineis fica visivel e
+     * o mostrar_painel(), e ele precisa da janela-mae ja mapeada para o
+     * XSetInputFocus valer. */
+    XMapWindow(dpy, w_arv);
+    XMapWindow(dpy, win);
+    XSync(dpy, False);
+    pegar_teclas();
+    abrir_claude();
+    mostrar_painel();
+    /* Depois de mapear: restaurar abre abas, e abrir aba mapeia e move o foco. */
+    restaurar_sessao();
+
+    for (;;) {
+        XEvent ev;
+        XNextEvent(dpy, &ev);
+        if (XFilterEvent(&ev, None)) continue;     /* o XIM come as teclas mortas */
+
+        switch (ev.type) {
+        case Expose:
+            if (ev.xexpose.count == 0) desenhar();
+            break;
+        case ConfigureNotify:
+            if (ev.xconfigure.window == win &&
+                (ev.xconfigure.width != larg || ev.xconfigure.height != alt)) {
+                larg = ev.xconfigure.width;
+                alt  = ev.xconfigure.height;
+                redimensionar();
+                desenhar();
+            }
+            break;
+        case MapNotify:
+            esticar_terminal();
+            break;
+        case KeyPress:
+            tecla(&ev.xkey);
+            break;
+        case FocusIn:
+            if (xic) XSetICFocus(xic);
+            break;
+        case FocusOut:
+            if (xic) XUnsetICFocus(xic);
+            break;
+        case ButtonPress:
+            if (ev.xbutton.window == w_arv) {
+                if (ev.xbutton.button == Button4 || ev.xbutton.button == Button5) {
+                    arv_topo += (ev.xbutton.button == Button5 ? 3 : -3);
+                    if (arv_topo < 0) arv_topo = 0;
+                    if (arv_topo > n_entradas - 1) arv_topo = n_entradas - 1;
+                } else {
+                    clique_arvore(ev.xbutton.y);
+                }
+                desenhar();
+            } else if (ev.xbutton.window == w_ed && carregada >= 0) {
+                if (ev.xbutton.button == Button4 || ev.xbutton.button == Button5) {
+                    topo += (ev.xbutton.button == Button5 ? 3 : -3);
+                    if (topo < 0) topo = 0;
+                    if (topo > n_linhas - 1) topo = n_linhas - 1;
+                } else {
+                    int l = topo + (ev.xbutton.y - MARGEM) / altura_lin;
+                    if (l < 0) l = 0;
+                    if (l >= n_linhas) l = n_linhas - 1;
+                    cur_l = l;
+                    cur_c = byte_da_coluna(linhas[cur_l],
+                                           col0 + (ev.xbutton.x - MARGEM) / avanco);
+                    XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
+                }
+                desenhar();
+            } else if (ev.xbutton.window == w_term) {
+                focar_terminal();
+            } else if (ev.xbutton.window == win && ev.xbutton.y < BARRA_H) {
+                int i;
+                for (i = 0; i < N_BOTOES; i++)
+                    if (ev.xbutton.x >= botoes[i].x &&
+                        ev.xbutton.x < botoes[i].x + botoes[i].w) {
+                        if (i == 0) escolher_projeto();
+                        else if (i == 1) salvar();
+                        else ir_para_claude();
+                        desenhar();
+                        break;
+                    }
+            } else if (ev.xbutton.window == win &&
+                       ev.xbutton.y < BARRA_H + ABAS_H && ev.xbutton.x >= ARVORE_W) {
+                clique_abas(ev.xbutton.x);
+                desenhar();
+            }
+            break;
+        case ClientMessage:
+            if ((Atom) ev.xclient.data.l[0] == A_DELETE) {
+                if (!algum_sujo() || perguntar("Ha alteracoes nao salvas. Sair mesmo assim?")) {
+                    salvar_sessao();
+                    if (pid_term > 0) kill(pid_term, SIGTERM);
+                    return 0;
+                }
+            }
+            break;
+        }
+    }
+    return 0;
+}
