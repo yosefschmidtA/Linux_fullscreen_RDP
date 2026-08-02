@@ -128,7 +128,27 @@ cmd() {   # mesmo motivo do -r explicado no bind()
     xfconf-query -c "$CH" -p "/commands/custom/$1" -n -t string -s "$2"
     echo "  $1  ->  $2"
 }
-cmd '<Primary><Alt>t' 'exo-open --launch TerminalEmulator'
+# Ctrl+Alt+T abre o terminal DESTE repositorio (terminal.c), nao o do XFCE.
+# Trocado em 02/08/2026, junto com a saida do "xfce4-terminal &" do startwm.sh:
+# a sessao passou a nascer sem terminal nenhum, entao esta tecla virou o unico
+# caminho normal para abrir um.
+#
+# O teste esta AQUI, na hora de gravar, e nao dentro do comando gravado. O
+# terminal.c e opcional no install.sh (ele avisa e segue quando o libxft-dev
+# falta), e sem terminal no login uma tecla morta deixaria a sessao sem caminho
+# obvio para um shell - so pelo appfinder. Um `sh -c "if ..."` no valor tambem
+# resolveria, mas quem executa esses comandos e o xfsettingsd, que passa a string
+# pelo g_shell_parse_argv antes de rodar: aspas dentro do valor sao mais uma
+# camada de citacao para errar, e o sintoma de erro e a tecla nao fazer NADA,
+# calada. Com o valor sem aspa nenhuma nao ha o que dar errado.
+#
+# Se o binario aparecer depois, o startwm.sh roda este script a cada login e a
+# tecla se corrige sozinha no proximo.
+if [ -x /usr/local/bin/terminal ]; then
+    cmd '<Primary><Alt>t' '/usr/local/bin/terminal'
+else
+    cmd '<Primary><Alt>t' 'exo-open --launch TerminalEmulator'
+fi
 cmd '<Alt>F3'         'xfce4-appfinder'
 cmd '<Super>r'        'xfce4-appfinder -c'
 
@@ -151,14 +171,27 @@ cmd '<Primary><Alt>s' 'flameshot gui'
 # Estas tres ja vinham do padrao do XFCE apontando para o xfce4-screenshooter,
 # que nunca foi instalado - eram atalhos orfaos. Repontadas para o flameshot;
 # so servem em teclado que tenha a tecla, mas nao custam nada deixar corretas.
+#
+# A pasta sai de $HOME, expandido AQUI, na hora de gravar. Ate 02/08/2026 era
+# "/home/yosef/prints" chumbado - errado para qualquer outro usuario, e o
+# flameshot nao avisa: ele so nao salva. E o $HOME tem de ser expandido no
+# momento da gravacao mesmo, porque quem executa esses comandos e o
+# xfsettingsd, que nao passa a string por shell nenhum - um "$HOME" literal
+# no valor chegaria ao flameshot como o nome de uma pasta chamada "$HOME".
+mkdir -p "$HOME/prints"
 cmd 'Print'           'flameshot gui'
-cmd '<Shift>Print'    'flameshot full -p /home/yosef/prints'
-cmd '<Alt>Print'      'flameshot screen -p /home/yosef/prints'
+cmd '<Shift>Print'    "flameshot full -p $HOME/prints"
+cmd '<Alt>Print'      "flameshot screen -p $HOME/prints"
 
 echo
 echo "== helper de terminal do exo =="
-# O Ctrl+Alt+T ja vem mapeado para "exo-open --launch TerminalEmulator", mas
-# sem este arquivo o exo nao sabe QUAL terminal e a tecla nao faz nada.
+# O Ctrl+Alt+T NAO passa mais por aqui (ver o bloco acima), mas este arquivo
+# continua valendo: e por ele que o appfinder, o Thunar e qualquer app que chame
+# "exo-open --launch TerminalEmulator" descobrem QUAL terminal abrir. Sem ele,
+# esses caminhos nao fazem nada. Fica no xfce4-terminal porque o exo so aceita
+# helper REGISTRADO (um .desktop em share/xfce4/helpers, com X-XFCE-Binaries), e
+# registrar o terminal.c ali seria mais um arquivo para manter em troca de um
+# caminho que quase nunca e usado nesta sessao.
 HELP="$HOME/.config/xfce4/helpers.rc"
 mkdir -p "$(dirname "$HELP")"
 if grep -q '^TerminalEmulator=' "$HELP" 2>/dev/null; then

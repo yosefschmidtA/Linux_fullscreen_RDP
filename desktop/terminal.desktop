@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Terminal
+Name[pt_BR]=Terminal
+GenericName=Emulador de terminal
+GenericName[pt_BR]=Emulador de terminal
+Comment=O terminal deste projeto, do pty ao pixel: C + Xlib + Xft
+Comment[pt_BR]=O terminal deste projeto, do pty ao pixel: C + Xlib + Xft
+Exec=/usr/local/bin/terminal
+Icon=utilities-terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;prompt;bash;
+StartupNotify=false

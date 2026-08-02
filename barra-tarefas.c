@@ -72,7 +72,7 @@ static int          LARG;
 static time_t       mt_ref;      /* mtime do cache no instante do clique */
 static int          cam_ref;     /* estado da ponte de video no clique */
 
-enum { BOTAO, RELOGIO, BOTAO_USB, VOLUME, BOTAO_JOGOS, BOTAO_APP, BOTAO_MAIS };
+enum { BOTAO, RELOGIO, BOTAO_USB, VOLUME, BOTAO_COISAS, BOTAO_APP, BOTAO_MAIS };
 
 /* Os quatro ultimos campos so existem para BOTAO_APP, que nasce em tempo de
  * execucao e por isso nao pode apontar para literal de string como os fixos.
@@ -157,7 +157,7 @@ static Item fixos_antes[] = {
     { VOLUME,      "Mic",     VOL_LARG, NULL,       "source", 0, 0 },
     { BOTAO_USB,   "Audio",    92, NULL,          "audio",  0, 0 },
     { BOTAO_USB,   "Camera",   92, NULL,          "camera", 0, 0 },
-    { BOTAO_JOGOS, "Jogos",    52, NULL,          NULL,     0, 0 },
+    { BOTAO_COISAS, "Coisas",   56, NULL,          NULL,     0, 0 },
 };
 static Item fixos_depois[] = {
     { BOTAO_MAIS,  "+",        20, NULL,          NULL,     0, 0 },
@@ -177,7 +177,7 @@ static int  n_itens;
 /* ---- menu suspenso -------------------------------------------------------
  * Serve a dois botoes, e a mecanica e a mesma nos dois: um comando externo
  * imprime as linhas, o menu mostra e o clique devolve a escolha ao mesmo
- * comando. A barra nao sabe nada sobre audio nem sobre jogos.
+ * comando. A barra nao sabe nada sobre audio nem sobre o que abre no Windows.
  *
  * DISPOSITIVOS DE AUDIO. O Linux so tem dois dispositivos de cada lado (xrdp e,
  * quando anexada, a placa USB). Um menu feito so com o pactl mostraria
@@ -185,11 +185,18 @@ static int  n_itens;
  * monitor - que sao do Windows e so existem atras do canal RDP. Por isso a
  * lista vem do audio-dispositivos, que junta os dois mundos.
  *
- * JOGOS. A lista vem do jogo-windows --listar-jogos, que le uma PASTA de
- * atalhos na area de trabalho do Windows. Por que ler no clique, e nao guardar:
- * assim um atalho novo aparece sem reiniciar a barra - que e o ponto todo de
- * usar uma pasta - e nao ha nada a vigiar enquanto o menu esta fechado. Custa
- * 48 ms (medido em 31/07/2026, com o cache do caminho ja quente).
+ * COISAS. A lista vem do abrir-windows --listar-coisas, que le uma PASTA na
+ * area de trabalho do Windows. Por que ler no clique, e nao guardar: assim um
+ * item novo aparece sem reiniciar a barra - que e o ponto todo de usar uma
+ * pasta - e nao ha nada a vigiar enquanto o menu esta fechado. Custa 48 ms
+ * (medido em 31/07/2026, com o cache do caminho ja quente; remedido em
+ * 02/08/2026 depois da generalizacao: 34 ms).
+ *
+ * Ate 02/08/2026 este botao se chamava "Jogos" e o script, jogo-windows. A
+ * pasta passou a aceitar qualquer arquivo - um .docx dela abre no Word, no
+ * monitor cedido - e por isso o rotulo virou "Coisas". A largura saiu de 52
+ * para 56 px porque "Coisas" mede 34 px na helvetica-11 contra 30 de "Jogos",
+ * e 56 mantem a mesma folga de 22 px que o botao tinha.
  *
  * O FORMATO E UM SO, e por isso os dois cabem no mesmo parser:
  *
@@ -198,7 +205,7 @@ static int  n_itens;
  * O id nunca e desenhado - e o que volta para o comando -, e por isso ele pode
  * ter acento enquanto o rotulo, que passa pelo XDrawString, nao pode.
  */
-#define MAX_POP 24        /* teto de linhas do menu; 24 jogos e folgado */
+#define MAX_POP 24        /* teto de linhas do menu; 24 itens e folgado */
 #define POP_LINHA 18
 
 /* Onde as primitivas de desenho pintam. Existe porque levantado/gravado/linha/
@@ -367,7 +374,7 @@ static void solta(const char *cmd)
 }
 
 /* Cita um texto para o shell, com a regra do apostrofo: fecha a aspa, escapa,
- * reabre. Existe porque o nome do jogo e um NOME DE ARQUIVO escolhido por voce -
+ * reabre. Existe porque o nome da coisa e um NOME DE ARQUIVO escolhido por voce -
  * "Assassin's Creed.lnk" e um nome perfeitamente normal, e sem isto o comando
  * sairia partido no meio. */
 static void cita(char *fora, size_t n, const char *s)
@@ -498,8 +505,8 @@ static void abrir_popup(Item *it)
         goto montar;
     }
 
-    if (it->tipo == BOTAO_JOGOS) {
-        snprintf(cmd, sizeof cmd, "jogo-windows --listar-jogos 2>/dev/null");
+    if (it->tipo == BOTAO_COISAS) {
+        snprintf(cmd, sizeof cmd, "abrir-windows --listar-coisas 2>/dev/null");
     } else {
         snprintf(pop_lado, sizeof pop_lado, "%s",
                  !strcmp(it->dev, "sink") ? "saida" : "entrada");
@@ -535,10 +542,10 @@ static void abrir_popup(Item *it)
     /* Pasta vazia (ou nao encontrada) abriria um menu de zero linha, e o clique
      * pareceria um botao morto. Uma linha de aviso, com id vazio para o
      * escolher_popup a ignorar, diz o que fazer. */
-    if (pop_n == 0 && it->tipo == BOTAO_JOGOS) {
+    if (pop_n == 0 && it->tipo == BOTAO_COISAS) {
         pop_id[0][0] = '\0';
         snprintf(pop_rot[0], sizeof pop_rot[0],
-                 "ponha um atalho na pasta Jogos");
+                 "ponha um atalho ou arquivo na pasta Coisas");
         pop_atual[0] = 0;
         larg = XTextWidth(fonte, pop_rot[0], strlen(pop_rot[0])) + 32;
         pop_n = 1;
@@ -585,11 +592,12 @@ static void escolher_popup(int i)
         if (pop_tipo == BOTAO_APP)
             /* o apps.conf muda; o tick ve o mtime e remonta a barra */
             snprintf(cmd, sizeof cmd, "barra-apps remover %s", q);
-        else if (pop_tipo == BOTAO_JOGOS)
-            /* O jogo-windows faz o resto sozinho: pergunta o monitor, encolhe a
-             * sessao, lanca e devolve o multimonitor quando voce fechar. A barra
-             * so passa o nome. Solto, porque ele vive enquanto durar o jogo. */
-            snprintf(cmd, sizeof cmd, "jogo-windows %s", q);
+        else if (pop_tipo == BOTAO_COISAS)
+            /* O abrir-windows faz o resto sozinho: pergunta o monitor, encolhe a
+             * sessao, abre e devolve o multimonitor quando voce fechar. A barra
+             * so passa o nome. Solto, porque ele vive enquanto a coisa estiver
+             * aberta - seja um jogo ou um .docx no Word. */
+            snprintf(cmd, sizeof cmd, "abrir-windows %s", q);
         else
             snprintf(cmd, sizeof cmd, "audio-dispositivos usar %s %s",
                      pop_lado, q);
@@ -829,7 +837,7 @@ static void tick(void)
  * monitor errado de forma imprevisivel.
  *
  * A regra de desempate e por POSICAO: o monitor que contem a origem (0,0). E o
- * mesmo critério que o jogo-windows usa para numerar monitores (esquerda para a
+ * mesmo critério que o abrir-windows usa para numerar monitores (esquerda para a
  * direita), e nao depende de flag que o xrdp pode nao setar. */
 static void primario(int *px, int *py, int *pw, int *ph)
 {
@@ -1107,7 +1115,7 @@ static void recarregar_apps(void)
  * A DIVISAO. A barra nao sabe o que e um aplicativo: ela pede a lista ao
  * barra-apps, desenha os icones e devolve o id que voce clicou. .desktop, tema
  * de icones e linha de comando sao problema de la. Mesma divisao do
- * audio-dispositivos e do jogo-windows.
+ * audio-dispositivos e do abrir-windows.
  *
  * POR QUE NAO HA libpng AQUI. Estes sao os primeiros pixels de verdade que a
  * barra desenha, e seria natural linkar uma biblioteca de imagem — seria
@@ -1201,8 +1209,8 @@ static time_t apps_mtime(void)
 }
 
 /* Poe a barra no lugar certo do monitor primario. Chamada no arranque e a cada
- * mudanca de monitor - o jogo-windows encolhe a sessao para um monitor so
- * enquanto o jogo roda, e sem isto a barra ficaria fora da tela ate o proximo
+ * mudanca de monitor - o abrir-windows encolhe a sessao para um monitor so
+ * enquanto a coisa esta aberta, e sem isto a barra ficaria fora da tela ate o proximo
  * login. Tambem cobre monitor plugado/desplugado e reconexao com layout novo. */
 static void reposicionar(void)
 {
@@ -1218,7 +1226,7 @@ static void reposicionar(void)
     XRaiseWindow(dpy, win);
     aplicar_strut(bx, my, mh);   /* a reserva muda junto: o strut e medido da
                                   * borda da TELA, e a tela muda de tamanho
-                                  * quando o jogo-windows encolhe a sessao */
+                                  * quando o abrir-windows encolhe a sessao */
 }
 
 int main(void)
@@ -1388,7 +1396,7 @@ int main(void)
                     if (it->tipo == VOLUME) {
                         aplicar_volume(it, ev.xbutton.x);
                         arrastando = i;
-                    } else if (it->tipo == BOTAO_JOGOS) {
+                    } else if (it->tipo == BOTAO_COISAS) {
                         abrir_popup(it);
                     } else if (it->tipo == BOTAO_APP) {
                         char cmd[400], q[320];

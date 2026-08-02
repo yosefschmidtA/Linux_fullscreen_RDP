@@ -1,22 +1,37 @@
 #!/usr/bin/env bash
 #
-# jogo-windows — cede um monitor da sessao para um jogo do Windows.
+# abrir-windows — cede um monitor da sessao para uma coisa do Windows.
 #
-# A sessao Linux encolhe para UM monitor enquanto o jogo roda e volta ao
-# multimonitor quando voce fecha. O jogo roda NATIVO no Windows: nenhum pixel
-# dele passa pelo x264 do xrdp, entao nao ha pedagio de latencia nem o teto de
-# 62 fps da sessao. E o que faz esta abordagem ganhar de qualquer streaming.
+# A sessao Linux encolhe para UM monitor enquanto a coisa esta aberta e volta ao
+# multimonitor quando voce fecha. Ela roda NATIVA no Windows: nenhum pixel dela
+# passa pelo x264 do xrdp, entao nao ha pedagio de latencia nem o teto de 62 fps
+# da sessao. E o que faz esta abordagem ganhar de qualquer streaming.
 #
-#   jogo-windows                 menu de jogos, depois de monitores
-#   jogo-windows "<nome>"        pula o menu de jogos
-#   jogo-windows --identificar   pisca o numero de cada monitor e sai
-#   jogo-windows --listar        mostra os monitores vistos agora
-#   jogo-windows --listar-jogos  so os nomes dos jogos, para a barra
-#   jogo-windows --perfil        gera o .rdp e mostra, sem mexer na sessao
+#   abrir-windows                  menu de coisas, depois de monitores
+#   abrir-windows "<nome>"         pula o menu
+#   abrir-windows --identificar    pisca o numero de cada monitor e sai
+#   abrir-windows --listar         mostra os monitores vistos agora
+#   abrir-windows --listar-coisas  so os nomes, para a barra
+#   abrir-windows --perfil         gera o .rdp e mostra, sem mexer na sessao
 #
-# De onde vem a lista de jogos: de uma PASTA de atalhos na area de trabalho do
-# Windows (veja pasta_jogos()). Poe o atalho la, o jogo aparece no menu e na
-# barra — sem editar arquivo de configuracao nenhum.
+# ATE 02/08/2026 ISTO SE CHAMAVA jogo-windows e so abria jogo. Generalizou
+# porque o mecanismo nunca teve nada de jogo: o lancar() entrega o caminho ao
+# `start ""` do Windows e quem resolve o resto e o shell de la. Verificado no
+# mesmo dia com `ftype`, que responde
+#
+#   Word.Document.12="C:\...\Office16\WINWORD.EXE" /n "%1" /o "%u"
+#
+# ou seja, um .docx na pasta abre no Word DE VERDADE, no monitor cedido, sem uma
+# linha de codigo a mais. O caminho considerado antes — VNC do Windows dentro de
+# uma janela X — foi recusado: recai na mesma recursao que adiou o Moonlight (o
+# mstsc cobre a area de trabalho que o VNC capturaria), poe um daemon a mais no
+# Windows, e o echo de tecla atravessaria DOIS desktops remotos em serie, que e
+# o pior caso justamente para editor de texto. Ceder o monitor da fidelidade
+# total a custo zero de transporte.
+#
+# De onde vem a lista: de uma PASTA na area de trabalho do Windows (veja
+# pasta_coisas()). Poe o atalho — ou o proprio arquivo — la, e ele aparece no
+# menu e na barra, sem editar arquivo de configuracao nenhum.
 #
 # Como escolhe o monitor: nao usa `selectedmonitors`, que depende dos IDs
 # opacos do mstsc (`mstsc /l`, so visiveis numa caixa de dialogo, sem jeito de
@@ -33,7 +48,11 @@ set -u
 export DISPLAY="${DISPLAY:-:10}"
 
 CFG="$HOME/.config/linux-fullscreen"
-JOGOS="$CFG/jogos.conf"
+# O jogos.conf e o formato ANTIGO, de quando nao havia pasta. Continua sendo o
+# plano B quando a pasta nao existe, e o nome do arquivo NAO muda junto com o do
+# script de proposito: e arquivo do usuario, escrito por ele, e renomear dado de
+# usuario calado e um jeito de fazer trabalho sumir.
+LEGADO="$CFG/jogos.conf"
 MONS="$CFG/monitores.conf"
 
 PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
@@ -47,7 +66,7 @@ msg() { printf '%s\n' "$*" >&2; }
 morrer() {
     msg "erro: $*"
     command -v zenity >/dev/null &&
-        zenity --error --width=380 --title="jogo-windows" --text="$*" 2>/dev/null
+        zenity --error --width=380 --title="abrir-windows" --text="$*" 2>/dev/null
     exit 1
 }
 
@@ -113,7 +132,7 @@ idx_de() { printf '%s' "${ORDEM[$(( $1 - 1 ))]}"; }   # posicao (1..N) -> indice
 rotulo() {   # $1 = posicao (1..N)
     local i; i=$(idx_de "$1")
     local extra=""
-    [ "${MON_PRI[$i]}" = "True" ] && extra=" — primario (os jogos abrem aqui)"
+    [ "${MON_PRI[$i]}" = "True" ] && extra=" — primario (o Windows abre aqui)"
     printf '%d: %sx%s%s' "$1" "${MON_W[$i]}" "${MON_H[$i]}" "$extra"
 }
 
@@ -155,10 +174,14 @@ identificar() {
 }
 
 # --- escolher os monitores -------------------------------------------------
-# Pergunta pelo monitor do JOGO, que e como a gente pensa nisso. O Linux fica
+# Pergunta pelo monitor do WINDOWS, que e como a gente pensa nisso. O Linux fica
 # com outro. Guarda a ultima escolha por ambiente, mas SEMPRE pergunta: e um
 # clique, e voce corrige na hora se abrir no lugar errado.
-POS_JOGO=0; POS_LINUX=0
+POS_ALVO=0; POS_LINUX=0
+# O nome da coisa escolhida. Nasce vazio porque o --perfil chama o
+# escolher_monitores SEM ter escolhido nada, e com `set -u` uma referencia a
+# variavel nao definida derrubaria o script ali.
+ALVO=""
 
 escolher_monitores() {
     local n="${#ORDEM[@]}" sig; sig=$(assinatura)
@@ -168,7 +191,7 @@ escolher_monitores() {
     fi
 
     if [ "$n" -eq 1 ]; then
-        morrer "so ha um monitor: nao ha o que ceder ao jogo"
+        morrer "so ha um monitor: nao ha o que ceder ao Windows"
     fi
 
     local IDENT="Identificar monitores (pisca o numero em cada tela)"
@@ -182,12 +205,14 @@ escolher_monitores() {
         done
         opts+=("$IDENT")
 
-        local esc; esc=$(escolher "Monitor do jogo" \
-            "Em qual monitor o jogo vai abrir?
+        local quem="a coisa do Windows"
+        [ -n "$ALVO" ] && quem="\"$ALVO\""
+        local esc; esc=$(escolher "Monitor do Windows" \
+            "Em qual monitor $quem vai abrir?
 Os monitores estao numerados da esquerda para a direita." "${opts[@]}")
         [ -n "${esc:-}" ] || return 1
         [ "$esc" = "$IDENT" ] && { identificar; continue; }
-        POS_JOGO="${esc%%:*}"
+        POS_ALVO="${esc%%:*}"
         break
     done
 
@@ -195,7 +220,7 @@ Os monitores estao numerados da esquerda para a direita." "${opts[@]}")
     # mais, pergunta — o Linux fica em UM monitor (veja o README sobre por que
     # ainda nao ocupa dois).
     local restantes=() p
-    for p in $(seq 1 "$n"); do [ "$p" != "$POS_JOGO" ] && restantes+=("$p"); done
+    for p in $(seq 1 "$n"); do [ "$p" != "$POS_ALVO" ] && restantes+=("$p"); done
 
     if [ "${#restantes[@]}" -eq 1 ]; then
         POS_LINUX="${restantes[0]}"
@@ -214,24 +239,24 @@ Os monitores estao numerados da esquerda para a direita." "${opts[@]}")
 
     mkdir -p "$CFG"
     { [ -f "$MONS" ] && grep -v "^$sig|" "$MONS"
-      printf '%s|%s|%s\n' "$sig" "$POS_JOGO" "$POS_LINUX"; } > "$MONS.novo" \
+      printf '%s|%s|%s\n' "$sig" "$POS_ALVO" "$POS_LINUX"; } > "$MONS.novo" \
         && mv "$MONS.novo" "$MONS"
 }
 
 # --- os dois perfis .rdp ---------------------------------------------------
-# O perfil do jogo e gerado a partir do seu perfil normal, nao de um modelo
+# O perfil encolhido e gerado a partir do seu perfil normal, nao de um modelo
 # proprio — assim os ajustes de fluidez (bpp 32, LAN, sem compressao) valem
 # nos dois, e afinar um afina o outro.
 
 # Onde esta o "Linux Fullscreen.rdp". Ate 31/07/2026 o caminho era chumbado em
 # "$WINHOME/Desktop/Linux Fullscreen.rdp", e bastou arrumar a area de trabalho
-# (mover os atalhos para uma subpasta) para o jogo-windows parar com
+# (mover os atalhos para uma subpasta) para este script parar com
 # "nao achei o perfil base". Arrumar o desktop e uma coisa normal de se fazer;
 # quebrar o lancador por causa disso, nao. Agora ele procura.
 #
 # Um nivel de subpasta e o suficiente: e assim que as pessoas arrumam desktop
 # (uma pasta "Tudo", "Atalhos", "Coisas"). Mais fundo seria varrer arvore no
-# drvfs, que e caro — o mesmo motivo do cache da pasta de jogos.
+# drvfs, que e caro — o mesmo motivo do cache da pasta de coisas.
 perfil_base() {
     local p
     if [ -r "$CFG/perfil-base.conf" ]; then       # escape manual
@@ -282,11 +307,11 @@ Procurei na area de trabalho e nas subpastas dela, dentro de
 Se ele estiver noutro lugar, escreva o caminho (do lado Linux) em
   $CFG/perfil-base.conf"
     # BASE_W sai do arquivo ACHADO, nao de um caminho montado a mao: e ele que o
-    # restaurar() usa para devolver o multimonitor no fim do jogo.
+    # restaurar() usa para devolver o multimonitor quando voce fecha.
     BASE_W=$(wslpath -w "$BASE_U") || morrer "wslpath falhou em $BASE_U"
 
     local dir_u="$WINHOME_U/AppData/Local/linux-fullscreen"
-    JOGO_W="$WINHOME_W\\AppData\\Local\\linux-fullscreen\\jogo.rdp"
+    ALVO_W="$WINHOME_W\\AppData\\Local\\linux-fullscreen\\abrir.rdp"
     mkdir -p "$dir_u"
 
     # retangulo bem dentro do monitor escolhido, em coordenadas do Windows
@@ -298,24 +323,24 @@ Se ele estiver noutro lugar, escreva o caminho (do lado Linux) em
     #
     # O ler_rdp NAO e enfeite: ASSINAR O PERFIL O CONVERTE PARA UTF-16LE, e a
     # partir dai o grep aqui devolvia "binary file matches" na saida de ERRO e
-    # nada na saida padrao. O jogo.rdp saia com 53 bytes — so as duas linhas do
+    # nada na saida padrao. O abrir.rdp saia com 53 bytes — so as duas linhas do
     # printf abaixo, sem endereco, sem credencial e sem nenhum ajuste de
     # fluidez. Falhava calado: o arquivo existia, o script seguia feliz e quem
     # reclamava era o mstsc, muito depois. Diagnosticado em 31/07/2026.
     ler_rdp "$BASE_U" \
       | grep -viE '^(use multimon|selectedmonitors|winposstr|signscope|signature):' \
-      > "$dir_u/jogo.rdp"
+      > "$dir_u/abrir.rdp"
     printf 'use multimon:i:0\r\nwinposstr:s:0,1,%d,%d,%d,%d\r\n' "$l" "$t" "$r" "$b" \
-        >> "$dir_u/jogo.rdp"
+        >> "$dir_u/abrir.rdp"
 
-    # Sem isto o mstsc mostra o aviso de "fornecedor desconhecido" a cada
-    # partida, porque o perfil e regerado com coordenadas novas. O thumbprint
+    # Sem isto o mstsc mostra o aviso de "fornecedor desconhecido" toda vez,
+    # porque o perfil e regerado com coordenadas novas. O thumbprint
     # vem do windows/assinar-rdp.ps1; sem ele, segue sem assinar.
     local tp="$dir_u/thumbprint.txt"
     if [ -f "$tp" ]; then
         ( cd /tmp && /mnt/c/Windows/System32/rdpsign.exe /sha256 \
-            "$(tr -d ' \r\n' < "$tp")" "$JOGO_W" ) >/dev/null 2>&1 \
-            || msg "aviso: nao consegui assinar o perfil do jogo"
+            "$(tr -d ' \r\n' < "$tp")" "$ALVO_W" ) >/dev/null 2>&1 \
+            || msg "aviso: nao consegui assinar o perfil encolhido"
     fi
 }
 
@@ -345,7 +370,12 @@ restaurar() {
     abrir_mstsc "$BASE_W"
 }
 
-# --- lancar o jogo ---------------------------------------------------------
+# --- lancar a coisa --------------------------------------------------------
+#
+# Repare que nao ha nada aqui sobre o QUE esta sendo aberto: o `start ""` do
+# Windows resolve executavel, atalho e associacao de arquivo pelo mesmo caminho.
+# E por isso que generalizar de "jogo" para "coisa" nao custou codigo nenhum.
+#
 #
 # ARMADILHA MEDIDA (31/07/2026), e ela era um BUG ANTIGO, nao uma novidade desta
 # mudanca. A versao anterior recebia a linha inteira numa string e a expandia sem
@@ -372,27 +402,37 @@ lancar() {   # $@ = programa e argumentos, ja separados
     esac
 }
 
-# --- de onde vem a lista de jogos ------------------------------------------
+# --- de onde vem a lista de coisas -----------------------------------------
 #
-# A fonte da verdade e uma PASTA de atalhos na area de trabalho do Windows.
-# Colocar o atalho la e o unico passo: o menu e a barra passam a mostrar o jogo.
+# A fonte da verdade e uma PASTA na area de trabalho do Windows, chamada
+# "Coisas". Poe o item la e o unico passo esta feito: o menu e a barra passam a
+# mostra-lo. Vale tanto um ATALHO (.lnk, .url) quanto o PROPRIO ARQUIVO — um
+# .docx solto ali abre no Word, um .pdf no leitor de PDF, porque quem decide e a
+# associacao do Windows e nao este script.
 #
-# POR QUE ATALHO, E NAO A LINHA DE COMANDO. Varios jogos so sobem pelo atalho
-# que o instalador criou — ele carrega o diretorio de trabalho e os argumentos
-# certos, e reproduzir isso na mao e um jeito de errar. Entregando o .lnk ao
-# shell do Windows (`start "" "...lnk"`), quem resolve tudo isso e o proprio
-# Windows. Por isso nao ha parser de .lnk aqui: o formato e binario e nao
-# precisamos dele. O .url (atalho de Steam) tambem passa pelo mesmo caminho.
+# POR QUE ATALHO SERVE, E NAO SO A LINHA DE COMANDO. Varios jogos so sobem pelo
+# atalho que o instalador criou — ele carrega o diretorio de trabalho e os
+# argumentos certos, e reproduzir isso na mao e um jeito de errar. Entregando o
+# .lnk ao shell do Windows (`start "" "...lnk"`), quem resolve tudo isso e o
+# proprio Windows. Por isso nao ha parser de .lnk aqui: o formato e binario e
+# nao precisamos dele. O .url (atalho de Steam) passa pelo mesmo caminho.
 #
-# O NOME DO JOGO E O NOME DO ARQUIVO, sem a extensao. Renomear o atalho renomeia
-# o jogo — inclusive no monitores.conf, que e indexado por ambiente e nao por
-# jogo, entao nada quebra.
+# O NOME E O NOME DO ARQUIVO, sem a extensao — inclusive para arquivo de
+# verdade, para que "TCC.docx" e um atalho chamado "TCC" aparecam do mesmo
+# jeito na lista. Renomear o arquivo renomeia o item, e o monitores.conf nao se
+# importa: ele e indexado por ambiente, nao por item.
 #
-# Achar a pasta sem interop: `pasta_jogos` e chamada pela BARRA a cada vez que o
+# ATE 02/08/2026 A PASTA SE CHAMAVA "Jogos" e o filtro so aceitava
+# .lnk/.url/.exe/.bat/.cmd. O nome antigo continua sendo procurado logo depois
+# do novo, para a renomeacao da pasta no Windows nao ser obrigatoria no mesmo
+# minuto em que este script muda — e, se um dia as duas existirem, "Coisas"
+# ganha por vir primeiro na busca.
+#
+# Achar a pasta sem interop: `pasta_coisas` e chamada pela BARRA a cada vez que o
 # menu abre, e uma chamada de PowerShell leva quase um segundo (e o que
 # `ler_windows` custa). Por isso ela nao pergunta o perfil ao Windows — procura
 # nos caminhos conhecidos, pulando os perfis de sistema. O /mnt/c e
-# insensivel a maiusculas, entao "Jogos", "JOGOS" e "jogos" dao no mesmo.
+# insensivel a maiusculas, entao "Coisas", "COISAS" e "coisas" dao no mesmo.
 #
 # O CACHE NAO E ENFEITE. Medido em 31/07/2026: o glob em /mnt/c/Users/*/... custa
 # 540 ms, contra 38 ms para listar a pasta ja conhecida — o drvfs cobra caro por
@@ -402,112 +442,163 @@ lancar() {   # $@ = programa e argumentos, ja separados
 #
 # Invalida sozinho: se a pasta cacheada sumiu (mudou de maquina, trocou o perfil,
 # OneDrive assumiu a area de trabalho), o teste falha e o glob roda de novo.
-pasta_jogos() {
+pasta_coisas() {
     local p
-    if [ -r "$CFG/pasta-jogos.conf" ]; then      # escape, se a sua estiver noutro lugar
-        p=$(head -1 "$CFG/pasta-jogos.conf")
+    if [ -r "$CFG/pasta-coisas.conf" ]; then      # escape, se a sua estiver noutro lugar
+        p=$(head -1 "$CFG/pasta-coisas.conf")
         [ -d "$p" ] && { printf '%s\n' "$p"; return 0; }
     fi
-    if [ -r "$CFG/pasta-jogos.cache" ]; then
-        p=$(head -1 "$CFG/pasta-jogos.cache")
+    if [ -r "$CFG/pasta-coisas.cache" ]; then
+        p=$(head -1 "$CFG/pasta-coisas.cache")
         [ -d "$p" ] && { printf '%s\n' "$p"; return 0; }
     fi
-    for p in /mnt/c/Users/*/Desktop/Jogos \
-             /mnt/c/Users/*/OneDrive/Desktop/Jogos \
-             /mnt/c/Users/*/OneDrive/"Área de Trabalho"/Jogos; do
-        case "$p" in
-            */Public/*|*/Default/*|*/"Default User"/*|*/"All Users"/*|\
-            */"Todos os Usuários"/*|*/"Usuário Padrão"/*) continue ;;
-        esac
-        [ -d "$p" ] || continue
-        mkdir -p "$CFG" && printf '%s\n' "$p" > "$CFG/pasta-jogos.cache"
-        printf '%s\n' "$p"
-        return 0
+    # Um nivel de subpasta tambem, como o perfil_base() acima e pelo mesmo
+    # motivo: a Area de Trabalho desta maquina tem uma pasta "Tudo" onde os
+    # atalhos foram arrumados, e nada impede a "Coisas" de ir para la um dia.
+    # Acrescentado em 02/08/2026, ao varrer o projeto atras dos caminhos
+    # chumbados que a mudanca do .rdp expos.
+    #
+    # O laco EXTERNO e o nome da pasta, e nao mais um bloco de padroes so: assim
+    # TODOS os lugares de "Coisas" sao testados antes do primeiro de "Jogos", que
+    # e a precedencia que se quer.
+    #
+    # Medido em 02/08/2026: 580 ms com um nome so, 1150 ms com os dois — dobrou
+    # de novo, pelo mesmo motivo de sempre (dobrou a travessia de diretorio no
+    # drvfs). E o preco de nao obrigar a renomear a pasta no Windows no mesmo
+    # minuto, e ele so e pago quando o cache falha: o caminho normal continua
+    # sendo um unico teste de diretorio, medido em 5 ms no mesmo dia.
+    local nome
+    for nome in Coisas Jogos; do
+        for p in /mnt/c/Users/*/Desktop/"$nome" \
+                 /mnt/c/Users/*/Desktop/*/"$nome" \
+                 /mnt/c/Users/*/OneDrive/Desktop/"$nome" \
+                 /mnt/c/Users/*/OneDrive/Desktop/*/"$nome" \
+                 /mnt/c/Users/*/OneDrive/"Área de Trabalho"/"$nome" \
+                 /mnt/c/Users/*/OneDrive/"Área de Trabalho"/*/"$nome"; do
+            case "$p" in
+                */Public/*|*/Default/*|*/"Default User"/*|*/"All Users"/*|\
+                */"Todos os Usuários"/*|*/"Usuário Padrão"/*) continue ;;
+            esac
+            [ -d "$p" ] || continue
+            mkdir -p "$CFG" && printf '%s\n' "$p" > "$CFG/pasta-coisas.cache"
+            printf '%s\n' "$p"
+            return 0
+        done
     done
     return 1
 }
 
-# Os arquivos de atalho da pasta, um caminho Linux por linha. Sai 1 se nao ha
-# pasta ou ela esta vazia — e o sinal de que o jogos.conf antigo ainda manda.
-atalhos_da_pasta() {
-    local p f achou=1
-    p=$(pasta_jogos) || return 1
+# Os itens da pasta, um caminho Linux por linha. Sai 1 se nao ha pasta ou ela
+# esta vazia — e o sinal de que o jogos.conf antigo ainda manda.
+#
+# O FILTRO E POR EXCLUSAO, nao por lista de extensoes aceitas. Ate 02/08/2026 ele
+# so deixava passar .lnk/.url/.exe/.bat/.cmd, o que fazia sentido quando a pasta
+# se chamava "Jogos": tudo ali era lancador. Numa pasta chamada "Coisas" a lista
+# branca e a coisa errada — ela decidiria por voce que .docx nao e coisa, e um
+# arquivo largado ali sumiria do menu SEM DIZER NADA, que e o pior modo de
+# falhar. Agora passa qualquer arquivo e so o lixo do proprio Windows fica de
+# fora: o desktop.ini que ele escreve ao voce personalizar a pasta, o Thumbs.db
+# do cache de miniaturas, e os ocultos.
+itens_da_pasta() {
+    local p f b achou=1
+    p=$(pasta_coisas) || return 1
     for f in "$p"/*; do
         [ -f "$f" ] || continue
-        case "${f,,}" in
-            *.lnk|*.url|*.exe|*.bat|*.cmd) printf '%s\n' "$f"; achou=0 ;;
+        b="${f##*/}"
+        case "${b,,}" in
+            .*|desktop.ini|thumbs.db|ehthumbs.db|.ds_store) continue ;;
         esac
+        printf '%s\n' "$f"; achou=0
     done
     return $achou
 }
 
-nome_do_atalho() { local b="${1##*/}"; printf '%s\n' "${b%.*}"; }
+# O nome e o do arquivo sem a ultima extensao. Vale para atalho e para arquivo
+# de verdade pelo mesmo motivo: e o nome que VOCE deu, e e por ele que a barra
+# pede a coisa de volta.
+nome_do_item() { local b="${1##*/}"; printf '%s\n' "${b%.*}"; }
 
 # Os nomes, na ordem em que aparecem no menu e na barra.
-nomes_dos_jogos() {
+nomes_das_coisas() {
     local f achou=1
-    while IFS= read -r f; do nome_do_atalho "$f"; achou=0; done < <(atalhos_da_pasta)
+    while IFS= read -r f; do nome_do_item "$f"; achou=0; done < <(itens_da_pasta)
     [ "$achou" = 0 ] && return 0
-    [ -f "$JOGOS" ] || return 1
-    grep -vE '^\s*(#|$)' "$JOGOS" | sed 's/|.*//'
+    [ -f "$LEGADO" ] || return 1
+    grep -vE '^\s*(#|$)' "$LEGADO" | sed 's/|.*//'
 }
 
 # Nome -> linha de comando do Windows, CITADA PARA O SHELL: quem chama faz
 # `eval "cmd=($linha)"` e recebe um array de argumentos. E o formato do
 # jogos.conf ("exe com aspas" mais argumentos), entao as duas fontes saem iguais.
-# O printf %q cuida do caminho da pasta, inclusive das contrabarras do Windows.
+# O printf %q cuida do caminho da pasta, inclusive das contrabarras do Windows —
+# e tambem dos espacos de um nome de arquivo comum, que num .docx sao a regra e
+# nao a excecao.
 # A pasta ganha do jogos.conf quando os dois tem o mesmo nome.
-comando_do_jogo() {   # $1 = nome
+comando_da_coisa() {   # $1 = nome
     local f l
     while IFS= read -r f; do
-        if [ "$(nome_do_atalho "$f")" = "$1" ]; then
+        if [ "$(nome_do_item "$f")" = "$1" ]; then
             printf '%q\n' "$(wslpath -w "$f")"
             return 0
         fi
-    done < <(atalhos_da_pasta)
+    done < <(itens_da_pasta)
 
-    [ -f "$JOGOS" ] || return 1
+    [ -f "$LEGADO" ] || return 1
     while IFS= read -r l; do
         case "$l" in ''|'#'*) continue ;; esac
         [ "${l%%|*}" = "$1" ] && { printf '%s\n' "${l#*|}"; return 0; }
-    done < "$JOGOS"
+    done < "$LEGADO"
     return 1
 }
 
 # --- o menu ----------------------------------------------------------------
-semear_jogos() {
+# So roda quando NAO ha pasta nenhuma. O jeito recomendado e a pasta "Coisas";
+# este arquivo existe para quem ainda nao a criou.
+semear_legado() {
     mkdir -p "$CFG"
-    cat > "$JOGOS" <<'EOF'
-# Um jogo por linha:   Nome|linha de comando do Windows
+    cat > "$LEGADO" <<'EOF'
+# Uma coisa por linha:   Nome|linha de comando do Windows
+#
+# O jeito RECOMENDADO nao e este arquivo: e criar uma pasta "Coisas" na area de
+# trabalho do Windows e largar dentro os atalhos e arquivos. La um .docx tambem
+# vale, e nada precisa ser editado aqui.
 #
 # Steam:      steam://rungameid/<appid>   (o appid esta na URL da loja)
 # Executavel: "C:\caminho\jogo.exe" --args   (aspas se tiver espaco)
 #
-# Este arquivo e seu — o jogo-windows nunca o reescreve depois de criado.
+# Este arquivo e seu — o abrir-windows nunca o reescreve depois de criado.
 Hollow Knight: Silksong|steam://rungameid/1030300
 League of Legends|"C:\Riot Games\Riot Client\RiotClientServices.exe" --launch-product=league_of_legends --launch-patchline=live
 Battle.net|"C:\Program Files (x86)\Battle.net\Battle.net Launcher.exe"
 EOF
-    msg "criei $JOGOS com os jogos que achei. edite a vontade."
+    msg "criei $LEGADO. o jeito recomendado, porem, e a pasta \"Coisas\" na area de trabalho."
 }
 
 # ===========================================================================
 # ANTES do carregar_monitores, e de proposito: quem chama isto e a BARRA, toda
-# vez que o menu de jogos abre, e o carregar_monitores custa uma chamada de
+# vez que o menu de coisas abre, e o carregar_monitores custa uma chamada de
 # PowerShell (~1 s). Listar a pasta nao precisa falar com o Windows.
 #
 # Formato: <nome>\t<em uso>\t<rotulo>, o mesmo que o audio-dispositivos usa,
 # porque e o que o popup da barra ja sabe ler. O "em uso" e sempre 0 (nao ha
-# jogo "atual"). O rotulo vai TRANSLITERADO para ASCII: a barra desenha com a
+# coisa "atual"). O rotulo vai TRANSLITERADO para ASCII: a barra desenha com a
 # fonte core do X, que esta em iso8859-1, e um nome acentuado sairia corrompido
-# no XDrawString. O primeiro campo mantem o nome original — e por ele que a
-# barra pede o jogo de volta, e e ele que tem de casar com o nome do arquivo.
-if [ "${1:-}" = "--listar-jogos" ]; then
+# no XDrawString — e agora que arquivo comum entra na lista, nome acentuado
+# deixou de ser raro. O primeiro campo mantem o nome original: e por ele que a
+# barra pede a coisa de volta, e e ele que tem de casar com o nome do arquivo.
+#
+# O --listar-jogos continua aceito, mas NAO e o que protege a troca de nome: a
+# barra antiga chama o script pelo NOME ANTIGO do arquivo, entao a flag nunca
+# chegaria aqui. Quem cuida da transicao e o install.sh, que reinicia o xrdp — a
+# sessao volta com a barra nova e o script novo ao mesmo tempo, e o
+# /usr/local/bin/jogo-windows e apagado no mesmo passo. A flag velha fica so
+# porque custa um `||` e evita um menu vazio se alguem a digitar de cabeca.
+if [ "${1:-}" = "--listar-coisas" ] || [ "${1:-}" = "--listar-jogos" ]; then
     while IFS= read -r nome; do
         printf '%s\t0\t%s\n' "$nome" \
             "$(printf '%s' "$nome" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null \
                || printf '%s' "$nome")"
-    done < <(nomes_dos_jogos)
+    done < <(nomes_das_coisas)
     exit 0
 fi
 
@@ -523,65 +614,67 @@ case "${1:-}" in
     --perfil)
         escolher_monitores || exit 1
         preparar_perfis "$POS_LINUX"
-        msg "jogo  -> $(rotulo "$POS_JOGO")"
-        msg "Linux -> $(rotulo "$POS_LINUX")"
-        msg "perfil: $JOGO_W"
-        # via ler_rdp: depois de assinado o jogo.rdp tambem volta em UTF-16LE, e
+        msg "Windows -> $(rotulo "$POS_ALVO")"
+        msg "Linux   -> $(rotulo "$POS_LINUX")"
+        msg "perfil: $ALVO_W"
+        # via ler_rdp: depois de assinado o abrir.rdp tambem volta em UTF-16LE, e
         # um grep direto aqui respondia "binary file matches" e mostrava nada.
-        ler_rdp "$(wslpath -u "$JOGO_W")" \
+        ler_rdp "$(wslpath -u "$ALVO_W")" \
             | grep -E 'multimon|winposstr|screen mode|session bpp'
         exit 0 ;;
 esac
 
-# Semeia o jogos.conf so quando NAO ha pasta de atalhos: com a pasta no lugar
-# ela e a fonte da verdade, e criar um arquivo de exemplo por baixo so
-# confundiria (apareceriam jogos que voce nunca pos ali).
-atalhos_da_pasta >/dev/null || [ -f "$JOGOS" ] || semear_jogos
+# Semeia o jogos.conf so quando NAO ha pasta: com a pasta no lugar ela e a fonte
+# da verdade, e criar um arquivo de exemplo por baixo so confundiria (apareceriam
+# jogos que voce nunca pos ali).
+itens_da_pasta >/dev/null || [ -f "$LEGADO" ] || semear_legado
 
-mapfile -t nomes < <(nomes_dos_jogos)
+mapfile -t nomes < <(nomes_das_coisas)
 if [ "${#nomes[@]}" -eq 0 ]; then
-    p=$(pasta_jogos) &&
-        morrer "a pasta de jogos esta vazia: $p
-Ponha ali o atalho do jogo (.lnk ou .url) e tente de novo." ||
-        morrer "nenhum jogo: nao achei a pasta de atalhos nem $JOGOS"
+    p=$(pasta_coisas) &&
+        morrer "a pasta \"Coisas\" esta vazia: $p
+Ponha ali o atalho ou o proprio arquivo (um .docx serve) e tente de novo." ||
+        morrer "nada a abrir: nao achei a pasta \"Coisas\" na area de trabalho
+do Windows, nem o $LEGADO"
 fi
 
-alvo="${1:-}"
-if [ -z "$alvo" ]; then
-    alvo=$(escolher "Jogos do Windows" \
-        "O Linux encolhe para um monitor enquanto o jogo roda." "${nomes[@]}")
-    [ -n "${alvo:-}" ] || exit 0
+ALVO="${1:-}"
+if [ -z "$ALVO" ]; then
+    ALVO=$(escolher "Abrir no Windows" \
+        "O Linux encolhe para um monitor enquanto estiver aberto." "${nomes[@]}")
+    [ -n "${ALVO:-}" ] || exit 0
 fi
 
-linha_cmd=$(comando_do_jogo "$alvo") || morrer "jogo desconhecido: $alvo"
+linha_cmd=$(comando_da_coisa "$ALVO") || morrer "nao conheco \"$ALVO\""
 eval "comando=($linha_cmd)" 2>/dev/null ||
-    morrer "nao entendi a linha de comando de \"$alvo\": $linha_cmd"
-[ "${#comando[@]}" -gt 0 ] || morrer "linha de comando vazia para \"$alvo\""
+    morrer "nao entendi a linha de comando de \"$ALVO\": $linha_cmd"
+[ "${#comando[@]}" -gt 0 ] || morrer "linha de comando vazia para \"$ALVO\""
 
 escolher_monitores || exit 0
 preparar_perfis "$POS_LINUX"
 
-msg "jogo  -> $(rotulo "$POS_JOGO")"
-msg "Linux -> $(rotulo "$POS_LINUX")"
+msg "Windows -> $(rotulo "$POS_ALVO")"
+msg "Linux   -> $(rotulo "$POS_LINUX")"
 
 # A partir daqui a sessao esta mexida: restaure em QUALQUER saida.
 trap restaurar EXIT INT TERM HUP
 
 fechar_mstsc
-abrir_mstsc "$JOGO_W"
+abrir_mstsc "$ALVO_W"
 esperar_layout 1 || msg "aviso: a sessao nao encolheu como esperado; siga assim mesmo"
 
-# So depois de encolher — se lancar antes, o jogo nasce atras do mstsc.
+# So depois de encolher — se lancar antes, a janela nasce atras do mstsc.
 lancar "${comando[@]}"
 
 if command -v zenity >/dev/null; then
-    zenity --info --width=400 --title="$alvo" \
-      --text="Jogando \"$alvo\".
+    zenity --info --width=400 --title="$ALVO" \
+      --text="\"$ALVO\" aberto no Windows.
 
-Arraste o mouse para o monitor do jogo — nao precisa de Ctrl+Alt+Break.
+Arraste o mouse para o outro monitor — nao precisa de Ctrl+Alt+Break.
 
-Feche o jogo e clique OK para voltar ao multimonitor." 2>/dev/null
+Feche e clique OK para voltar ao multimonitor.
+(salve o que estiver editando ANTES de clicar)" 2>/dev/null
 else
-    read -r -p "feche o jogo e tecle Enter: " _ </dev/tty
+    read -r -p "feche a janela do Windows e tecle Enter: " _ </dev/tty
 fi
 # o trap devolve o multimonitor

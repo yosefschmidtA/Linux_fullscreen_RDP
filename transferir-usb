@@ -56,7 +56,14 @@ if [ -r "$CONF" ]; then
 fi
 
 PS_EXE="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-PS1_FONTE="$HOME/linux-fullscreen/windows/audio-padrao.ps1"
+# De onde sai o audio-padrao.ps1. O install.sh o instala em /usr/local/share,
+# FORA do repositorio, pelo mesmo motivo do perfil.sh: se este script so soubesse
+# procurar em ~/linux-fullscreen, mover ou renomear a pasta do repositorio faria
+# a troca de audio do lado Windows parar - com um aviso vago
+# ("audio-padrao.ps1 indisponivel") e nenhuma pista do porque.
+# O repositorio fica como plano B, para rodar direto de la sem instalar nada.
+PS1_FONTE=/usr/local/share/linux-fullscreen/audio-padrao.ps1
+[ -r "$PS1_FONTE" ] || PS1_FONTE="$HOME/linux-fullscreen/windows/audio-padrao.ps1"
 MSTSC="/mnt/c/Windows/System32/mstsc.exe"
 TASKKILL="/mnt/c/Windows/System32/taskkill.exe"
 
@@ -80,12 +87,48 @@ TASKKILL="/mnt/c/Windows/System32/taskkill.exe"
 # pe. Se alguem puser Policy=UBD, reconectar abre um desktop novo em branco e
 # isto passa a destruir trabalho. Ver README, "Por que a sessao sobrevive".
 # ---------------------------------------------------------------------------
+PERFIL_CACHE="$HOME/.config/linux-fullscreen/perfil-rdp.cache"
+
+# Onde esta o "Linux Fullscreen.rdp".
+#
+# Ate 02/08/2026 o caminho era chumbado em "%USERPROFILE%\Desktop\Linux
+# Fullscreen.rdp" - a MESMA armadilha que ja tinha quebrado o jogo-windows e o
+# .vbs em 31/07/2026, e que sobreviveu aqui porque este arquivo nao foi olhado
+# junto. Bastou mover o .rdp para uma subpasta "Tudo" da Area de Trabalho, que e
+# uma coisa normal de se fazer, para trocar o audio de lado matar o mstsc e nao
+# conseguir reabri-lo: o caminho chumbado nao existia mais, o mstsc abria um
+# dialogo de erro e a sessao ficava DESCONECTADA, com o usuario largado no
+# desktop do Windows tendo que achar o .vbs na mao.
+#
+# A funcao antiga so falhava quando o %USERPROFILE% vinha vazio; ela nunca
+# conferia se o arquivo existia, entao devolvia um caminho invalido com sucesso.
+# Agora ela procura - um nivel de subpasta, como o jogo-windows e o .vbs.
+#
+# O cache existe pelo mesmo motivo do jogo-windows: cada teste destes e I/O no
+# drvfs, e isto roda a cada clique no botao de audio da barra.
 perfil_rdp_windows() {
-    local up
+    local up upu p
+    if [ -r "$PERFIL_CACHE" ]; then
+        p=$(head -1 "$PERFIL_CACHE")
+        [ -f "$p" ] && { wslpath -w "$p"; return 0; }
+    fi
     up=$( cd /tmp && /mnt/c/Windows/System32/cmd.exe /c 'echo %USERPROFILE%' \
           2>/dev/null | tr -d '\r\n' )
     [ -n "$up" ] || return 1
-    printf '%s\\Desktop\\Linux Fullscreen.rdp' "$up"
+    upu=$(wslpath -u "$up" 2>/dev/null) || return 1
+    for p in "$upu/Desktop/Linux Fullscreen.rdp" \
+             "$upu/Desktop"/*/"Linux Fullscreen.rdp" \
+             "$upu/OneDrive/Desktop/Linux Fullscreen.rdp" \
+             "$upu/OneDrive/Desktop"/*/"Linux Fullscreen.rdp" \
+             "$upu/OneDrive/Área de Trabalho/Linux Fullscreen.rdp" \
+             "$upu/OneDrive/Área de Trabalho"/*/"Linux Fullscreen.rdp"; do
+        [ -f "$p" ] || continue
+        mkdir -p "$(dirname "$PERFIL_CACHE")" 2>/dev/null
+        printf '%s\n' "$p" > "$PERFIL_CACHE" 2>/dev/null
+        wslpath -w "$p"
+        return 0
+    done
+    return 1
 }
 
 # TRANSFERIR_SEM_RECONECTAR=1 desliga o vaivem do mstsc. Usado pelo
@@ -100,7 +143,6 @@ fechar_mstsc() {
 abrir_mstsc() {
     [ "${TRANSFERIR_SEM_RECONECTAR:-0}" = 1 ] && return 0
     local perfil
-    perfil=$(perfil_rdp_windows) || { msg "aviso: nao achei o perfil .rdp"; return 1; }
 
     # setsid --fork, e nao o "( cmd & )" de sempre. Medido em 30/07/2026: com
     # "( setsid mstsc ... & )" o bash ficava preso em do_wait esperando o
@@ -108,7 +150,22 @@ abrir_mstsc() {
     # O script nunca retornava, e o clique na barra deixava um bash pendurado
     # para sempre. O --fork faz o setsid bifurcar e sair na hora, entao nao
     # sobra filho para esperar. O </dev/null completa o desligamento.
-    ( cd /tmp && setsid --fork "$MSTSC" "$perfil" </dev/null >/dev/null 2>&1 )
+    if perfil=$(perfil_rdp_windows); then
+        ( cd /tmp && setsid --fork "$MSTSC" "$perfil" </dev/null >/dev/null 2>&1 )
+    else
+        # Plano B: o mesmo do "Linux Fullscreen.vbs". Sem o .rdp a sessao volta
+        # sem os ajustes de fluidez (LAN, sem compressao do lado do cliente),
+        # mas VOLTA - e aqui isso importa mais do que em qualquer outro lugar:
+        # quem chamou isto acabou de matar o mstsc para trocar o audio de lado,
+        # entao nao reabrir deixa a pessoa sem tela nenhuma.
+        #
+        # Reconectar assim continua casando a sessao que ja existe: o
+        # Policy=Default do sesman casa por usuario e BPP, e o padrao do mstsc
+        # tambem e 32 bits, igual ao "session bpp:i:32" do perfil.
+        msg "aviso: nao achei o \"Linux Fullscreen.rdp\"; reconectando sem os ajustes de fluidez"
+        ( cd /tmp && setsid --fork "$MSTSC" /v:localhost:3390 /multimon /f \
+          </dev/null >/dev/null 2>&1 )
+    fi
     sleep 1
 }
 

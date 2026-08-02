@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Bancada
+Name[pt_BR]=Bancada
+GenericName=Editor de codigo
+GenericName[pt_BR]=Editor de codigo
+Comment=Arvore de arquivos, abas, editor e Claude Code numa janela so
+Comment[pt_BR]=Arvore de arquivos, abas, editor e Claude Code numa janela so
+Exec=/usr/local/bin/bancada
+Icon=accessories-text-editor
+Terminal=false
+Categories=Development;TextEditor;
+Keywords=bancada;editor;codigo;code;ide;claude;
+StartupNotify=false

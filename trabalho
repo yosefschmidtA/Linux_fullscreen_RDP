@@ -37,18 +37,21 @@ msg() { printf '%s\n' "$*" >&2; }
 
 # --- achar o Claude Code ---------------------------------------------------
 #
-# ATENCAO: NESTA MAQUINA O CLI NAO ESTA INSTALADO SOZINHO. O binario vem dentro
-# da extensao do VS Code:
+# Desde 02/08/2026 o CLI ESTA instalado sozinho nesta maquina
+# (~/.local/bin/claude -> ~/.local/share/claude/versions/<versao>), entao o
+# `command -v` abaixo resolve e o resto nem roda. Desinstalar o VS Code nao leva
+# mais o Claude junto.
+#
+# O plano B continua aqui de proposito, porque ate entao ele era o UNICO caminho:
+# o binario tambem vem dentro da extensao do VS Code, em
 #
 #   ~/.vscode/extensions/anthropic.claude-code-<versao>-linux-x64/resources/
 #       native-binary/claude
 #
-# Ele roda perfeitamente fora do VS Code (medido: `claude --version` responde
-# 2.1.220), mas o caminho carrega a VERSAO — a cada atualizacao da extensao ele
-# muda. Por isso aqui se procura e se pega o maior por ordem de versao, em vez
-# de chumbar. E por isso, tambem, que desinstalar o VS Code levaria o Claude
-# junto: para se livrar mesmo dele, instale antes o CLI pelo instalador oficial;
-# ai o `command -v claude` acha e este bloco nem roda.
+# e ali o caminho carrega a VERSAO, mudando a cada atualizacao da extensao — dai
+# procurar e pegar o maior por ordem de versao, em vez de chumbar. Numa maquina
+# onde so exista a extensao, e este bloco que faz o `trabalho` e a bancada
+# acharem o Claude.
 onde_claude() {
     local c
     c=$(command -v claude 2>/dev/null) && { printf '%s\n' "$c"; return 0; }

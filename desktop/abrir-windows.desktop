@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Abrir no Windows
+Name[pt_BR]=Abrir no Windows
+GenericName=Abrir algo do Windows cedendo um monitor
+Comment=Encolhe a sessao para um monitor e abre a coisa nativa no Windows
+Comment[pt_BR]=Encolhe a sessao para um monitor e abre a coisa nativa no Windows
+Exec=/usr/local/bin/abrir-windows
+Icon=video-display
+Terminal=false
+Categories=Utility;
+Keywords=windows;monitor;jogo;jogos;game;games;steam;word;docx;documento;coisas;
+StartupNotify=false

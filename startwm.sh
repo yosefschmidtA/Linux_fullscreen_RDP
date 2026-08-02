@@ -130,8 +130,13 @@ fi
 # onde clicar para traze-la de volta. Se um dia mudar esse ajuste para false,
 # ou volte o painel, ou tire o atalho de minimizar.
 #
-# Para lancar programas sem painel: Ctrl+Alt+T (terminal), Alt+F3 ou Super+R
-# (xfce4-appfinder).
+# Para lancar programas sem painel: Ctrl+Alt+T (o terminal deste repositorio,
+# /usr/local/bin/terminal), Alt+F3 ou Super+R (xfce4-appfinder).
+#
+# A sessao nasce SEM terminal aberto. Ate 02/08/2026 havia um "xfce4-terminal &"
+# aqui, o que custava ~9 MB de RSS e uma janela para fechar a cada login mesmo
+# quando o login era so para abrir a bancada ou um jogo. Quem quiser um terminal
+# aperta Ctrl+Alt+T - e o que abre e o terminal.c, nao o do XFCE.
 #
 # Tudo no mesmo barramento dbus, com o xfwm4 no exec final - quando ele morre,
 # o sh morre, o dbus-launch morre, e a sessao cai inteira. E o que faz o
@@ -155,12 +160,11 @@ exec dbus-launch --exit-with-session sh -c '
     set -x
     setxkbmap -model abnt2 -layout br
     xfsettingsd &
-    xfce4-terminal &
 
     # Barra de tarefas (relogio + desligar), no visual do dialogo do xrdp.
     # Compilada de barra-tarefas.c pelo install.sh; se nao estiver instalada, a
     # sessao segue sem ela. Ela mesma acha o monitor primario pelo XRandR e se
-    # reposiciona quando o layout muda (o jogo-windows encolhe a sessao), entao
+    # reposiciona quando o layout muda (o abrir-windows encolhe a sessao), entao
     # nao precisa de sleep aqui nem de coordenada chumbada.
     [ -x /usr/local/bin/barra-tarefas ] && /usr/local/bin/barra-tarefas &
 
@@ -196,9 +200,18 @@ exec dbus-launch --exit-with-session sh -c '
     #
     # Este bloco e o que remove a duplicata e grava as setas por ultimo - ou
     # seja, e ele que garante o grab. Tirar daqui devolve o bug.
-    if [ -r "$HOME/linux-fullscreen/xfwm-atalhos.sh" ]; then
-        ( sleep 4; bash "$HOME/linux-fullscreen/xfwm-atalhos.sh" >/dev/null 2>&1 ) &
-    fi
+    #
+    # O caminho instalado vem primeiro, e o repositorio e o plano B. Chumbar
+    # "$HOME/linux-fullscreen" aqui significava que renomear ou mover a pasta do
+    # repositorio derrubava os atalhos de janela no proximo login, em silencio -
+    # a sessao sobe igual, so o Super+seta e que morre. E o mesmo motivo pelo
+    # qual o perfil.sh mora fora do repositorio.
+    for atalhos in /usr/local/share/linux-fullscreen/xfwm-atalhos.sh \
+                   "$HOME/linux-fullscreen/xfwm-atalhos.sh"; do
+        [ -r "$atalhos" ] || continue
+        ( sleep 4; bash "$atalhos" >/dev/null 2>&1 ) &
+        break
+    done
 
     exec xfwm4
 '

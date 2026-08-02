@@ -67,7 +67,7 @@ echo "==> [2/7] Scripts auxiliares, servico do X11-unix e itens do menu"
 install -m 755 "$SRC/fix-x11-unix"       /usr/local/bin/fix-x11-unix
 install -m 755 "$SRC/linux-desktop-up"   /usr/local/bin/linux-desktop-up
 install -m 755 "$SRC/linux-desktop-down" /usr/local/bin/linux-desktop-down
-install -m 755 "$SRC/jogo-windows"       /usr/local/bin/jogo-windows
+install -m 755 "$SRC/abrir-windows"      /usr/local/bin/abrir-windows
 install -m 755 "$SRC/transferir-usb"     /usr/local/bin/transferir-usb
 install -m 755 "$SRC/audio-dispositivos" /usr/local/bin/audio-dispositivos
 install -m 755 "$SRC/camera-rede"        /usr/local/bin/camera-rede
@@ -98,9 +98,13 @@ else
     echo "           rode: bash $SRC/compilar-v4l2loopback"
 fi
 
-# Os DOIS componentes compilados deste repositorio, ambos C com Xlib cru e sem
-# toolkit. O startwm.sh sobe a barra a cada login; a bancada e por demanda.
-# Ver README, "A barra de tarefas" e "Trocar o VS Code".
+# Os TRES componentes compilados deste repositorio, todos C com Xlib cru e sem
+# toolkit. O startwm.sh sobe a barra a cada login; a bancada e o terminal sao
+# por demanda. Ver README, "A barra de tarefas", "Trocar o VS Code" e "Um
+# emulador de terminal escrito aqui".
+#
+# Nenhum dos tres e obrigatorio para a sessao subir, e por isso cada um falha
+# sozinho, com aviso, em vez de derrubar a instalacao inteira.
 if gcc -O2 -Wall -o "$SRC/barra-tarefas" "$SRC/barra-tarefas.c" \
         -lX11 -lXrandr 2>/dev/null; then
     install -m 755 "$SRC/barra-tarefas" /usr/local/bin/barra-tarefas
@@ -119,6 +123,29 @@ else
     echo "    AVISO: bancada nao compilou (falta libxft-dev?); segue sem ela"
 fi
 
+# O emulador de terminal proprio. E INDEPENDENTE: a bancada continua usando o
+# xterm na aba do Claude, e nada nesta sessao passa a depender deste binario.
+# Instala-se porque ele so serve para ser aberto, e nao para ser compilado a
+# mao toda vez.
+#
+# O -lfontconfig e a mais em relacao a bancada: quem escolhe a fonte de reserva
+# para o caractere que a DejaVu nao tem (japones, emoji) e o FcFontMatch,
+# chamado direto. Nao e pacote novo - o libxft-dev ja depende do
+# libfontconfig1-dev, que instala tanto o cabecalho quanto o .so do link.
+#
+# Sem as fontes Noto instaladas, a reserva nao acha nada e esses caracteres
+# saem como caixa vazia. Nao se instala fonte aqui de proposito: seriam dezenas
+# de MB de disco para um caso que quase nao aparece, e quem precisar resolve com
+# um `apt install fonts-noto-core fonts-noto-color-emoji` - a reserva passa a
+# achar sozinha, sem recompilar nada.
+if gcc -O2 -Wall -o "$SRC/terminal" "$SRC/terminal.c" \
+        $(pkg-config --cflags xft 2>/dev/null) -lX11 -lXft -lfontconfig 2>/dev/null; then
+    install -m 755 "$SRC/terminal" /usr/local/bin/terminal
+    echo "    terminal compilado e instalado"
+else
+    echo "    AVISO: terminal nao compilou (falta libxft-dev?); segue sem ele"
+fi
+
 # O trecho que entra no shell: a funcao `bancada`, que abre na pasta atual e
 # devolve o prompt, como o `code .` do VS Code. Instalado fora do repositorio
 # porque o .bashrc nao pode depender de onde o repositorio esta.
@@ -127,6 +154,22 @@ fi
 # usa /etc/profile.d aqui porque terminal interativo NAO-login (o caso normal:
 # xfce4-terminal, xterm) le o .bashrc e ignora o profile.d.
 install -D -m 644 "$SRC/perfil.sh" /usr/local/share/linux-fullscreen/perfil.sh
+
+# Estas duas vao para o mesmo lugar e pelo mesmo motivo do perfil.sh: quem as usa
+# nao pode depender de o repositorio estar em ~/linux-fullscreen.
+#
+#   audio-padrao.ps1   e a ponte de audio do lado Windows. O transferir-usb e o
+#                      audio-dispositivos o copiam para o LOCALAPPDATA; sem
+#                      achar a fonte, trocar o padrao do Windows para de
+#                      funcionar com um aviso vago.
+#   xfwm-atalhos.sh    e chamado pelo startwm.sh a cada login. Sem achar, a
+#                      sessao sobe igual e so os Super+seta morrem - falha
+#                      silenciosa, do tipo que este projeto mais paga caro.
+#
+# Os dois mantem o repositorio como plano B, entao rodar de la sem instalar
+# continua valendo.
+install -m 644 "$SRC/windows/audio-padrao.ps1" /usr/local/share/linux-fullscreen/audio-padrao.ps1
+install -m 755 "$SRC/xfwm-atalhos.sh"          /usr/local/share/linux-fullscreen/xfwm-atalhos.sh
 MARCA='# linux-fullscreen'
 if ! grep -qF "$MARCA" "$REAL_HOME/.bashrc" 2>/dev/null; then
     cp -a "$REAL_HOME/.bashrc" "$REAL_HOME/.bashrc.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
@@ -143,6 +186,14 @@ fi
 # sessao entra por aqui - e o lugar de crescer a UI sem subir um DE inteiro.
 install -d -m 755 /usr/share/applications
 install -m 644 "$SRC"/desktop/*.desktop /usr/share/applications/
+
+# Nomes que este projeto ja usou e nao usa mais. O install e idempotente por
+# copia, o que NAO apaga o que saiu de circulacao: sem esta linha, quem instalou
+# antes de 02/08/2026 ficaria com o jogo-windows antigo em /usr/local/bin e o
+# item "Jogos (Windows)" no appfinder para sempre, apontando para um script que
+# nao recebe mais correcao. Vira lixo silencioso - o pior tipo.
+rm -f /usr/local/bin/jogo-windows /usr/share/applications/jogos-windows.desktop
+
 update-desktop-database /usr/share/applications 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable --quiet x11-unix-writable.service

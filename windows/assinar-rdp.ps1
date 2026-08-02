@@ -22,16 +22,53 @@
 # `Test-Path HKCU:\Software\Microsoft\Cryptography` responde False. Nada a ver
 # com a maquina; e so o contexto. Ctrl+Alt+Break, abra o PowerShell e rode la.
 
-param([switch]$Maquina)
+param([switch]$Maquina, [string]$Perfil)
 
 $ErrorActionPreference = 'Stop'
 
+# Onde esta o "Linux Fullscreen.rdp".
+#
+# Ate 02/08/2026 era chumbado em "%USERPROFILE%\Desktop\Linux Fullscreen.rdp" -
+# a mesma armadilha que quebrou o jogo-windows, o .vbs e o transferir-usb quando
+# a Area de Trabalho foi arrumada numa subpasta. Aqui a falha era so barulhenta
+# ("nao achei o perfil"), mas ela morde justo na hora ruim: assinar e o que se
+# faz DEPOIS de editar o .rdp, porque editar invalida a assinatura.
+#
+# A ordem comeca pelo lado do proprio script ($PSScriptRoot): quem move o .rdp
+# para uma pasta costuma levar este .ps1 junto.
+function AcharPerfil {
+    $nome = 'Linux Fullscreen.rdp'
+    $raizes = @(
+        (Join-Path $env:USERPROFILE 'Desktop'),
+        (Join-Path $env:USERPROFILE 'OneDrive\Desktop'),
+        (Join-Path $env:USERPROFILE 'OneDrive\Área de Trabalho')
+    )
+    foreach ($d in @($PSScriptRoot) + $raizes) {
+        if ($d -and (Test-Path -LiteralPath (Join-Path $d $nome))) {
+            return (Join-Path $d $nome)
+        }
+    }
+    # um nivel de subpasta, como fazem os outros lancadores deste projeto
+    foreach ($d in $raizes) {
+        if (-not (Test-Path -LiteralPath $d)) { continue }
+        $achado = Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue |
+                  ForEach-Object { Join-Path $_.FullName $nome } |
+                  Where-Object { Test-Path -LiteralPath $_ } |
+                  Select-Object -First 1
+        if ($achado) { return $achado }
+    }
+    return $null
+}
+
 $assunto = 'CN=Linux Fullscreen (assinatura de .rdp)'
-$rdp     = Join-Path $env:USERPROFILE 'Desktop\Linux Fullscreen.rdp'
+$rdp     = if ($Perfil) { $Perfil } else { AcharPerfil }
 $dados   = Join-Path $env:LOCALAPPDATA 'linux-fullscreen'
 $escopo  = if ($Maquina) { 'LocalMachine' } else { 'CurrentUser' }
 
-if (-not (Test-Path $rdp)) { throw "nao achei o perfil: $rdp" }
+if (-not $rdp -or -not (Test-Path -LiteralPath $rdp)) {
+    throw "nao achei o ""Linux Fullscreen.rdp"". Procurei ao lado deste script, na Area de Trabalho e um nivel de subpasta abaixo. Use -Perfil <caminho> para dizer onde ele esta."
+}
+Write-Host "perfil               : $rdp"
 New-Item -ItemType Directory -Force -Path $dados | Out-Null
 
 # --- 1. o certificado (reaproveita se ja existir) --------------------------

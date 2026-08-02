@@ -8,7 +8,7 @@ terminal e uma barra própria. Premissa permanente: **RAM baixa**.
 Windows                              WSL2 (Ubuntu-24.04)
 mstsc.exe /multimon /f  <--RDP-->    xrdp :3390
                                        └─ Xorg :10 (driver xrdpdev, virtual)
-                                            └─ xfwm4 + xfce4-terminal + barra
+                                            └─ xfwm4 + barra (sem terminal)
 ```
 
 ## Antes de ler o README
@@ -27,16 +27,17 @@ só a seção necessária. Ler tudo custa ~35 mil tokens e quase nunca é precis
 | `install.sh` | instalador principal, idempotente. Compila a barra no passo 2 |
 | `startwm.sh` | → `/etc/xrdp/startwm.sh`. Sobe a sessão inteira; limpa vars do WSLg |
 | `barra-tarefas.c` | C + Xlib cru, 3,0 MB de RSS. Fonte **core**, iso8859-1 |
-| `bancada.c` | o "VS Code" próprio: árvore + **abas** + editor + xterm embutido com o Claude (que é a aba 0, **aberta sob demanda**). C + Xlib + **Xft**, 2,4 MB de PSS sem o Claude. Binário abre em **hex** e imagem em **preview**, ambos só-leitura. Sessão por projeto em `~/.config/bancada/sessoes/` |
+| `bancada.c` | o "VS Code" próprio: árvore + **abas** + editor + xterm embutido com o Claude (que é a aba 0, **aberta sob demanda**). C + Xlib + **Xft**, 2,4 MB de PSS sem o Claude. Binário abre em **hex** e imagem em **preview**, ambos só-leitura. Sessão por projeto em `~/.config/bancada/sessoes/`. Desde 02/08/2026 é um editor de texto normal: seleção com mouse e `Shift`+setas, `Ctrl+C/X/V/A`, digitar substitui a marca, `Alt+↑/↓` move a linha. Dona de PRIMARY e CLIPBOARD |
+| `terminal.c` | emulador de terminal próprio, do pty ao pixel. C + Xlib + Xft, 2,66 MB de PSS contra 8,12 do xterm. É o terminal **da sessão** desde 02/08/2026 (`Ctrl+Alt+T`), mas **não** o da bancada: a aba 0 segue no xterm. `SIGUSR1` despeja a grade em texto |
 | `perfil.sh` | o pedaço do projeto que entra no shell: a função `bancada`, que abre na pasta atual e devolve o prompt, como o `code .` |
-| `barra-apps` | atalhos de aplicativo da barra: lê `.desktop`, converte o ícone e mantém o `apps.conf` |
+| `barra-apps` | atalhos de aplicativo da barra: lê `.desktop`, converte o ícone e mantém o `apps.conf`. Programa nosso só entra na lista do `[+]` se tiver um `.desktop` em `desktop/` |
 | `trabalho` | substitui o VS Code: ranger + Claude Code lado a lado num tmux. `trabalho instalar` cria os `.desktop` |
 | `transferir-usb` | passa headset/webcam entre Windows e Linux (usbipd) |
 | `camera-rede` | **a webcam de verdade**: ponte de vídeo por rede, sem tirar do Windows |
 | `compilar-v4l2loopback` | refaz o módulo quando a WSL troca de kernel (senão a câmera some) |
 | `v4l2loopback.service` | carrega o módulo no boot; **não** use `/lib/modules`, a WSL apaga |
 | `audio-dispositivos` | lista/escolhe saída e entrada, juntando Linux e Windows |
-| `jogo-windows` | encolhe a sessão para um monitor e cede outro ao jogo. A lista de jogos é a pasta `Jogos` da área de trabalho do Windows |
+| `abrir-windows` | encolhe a sessão para um monitor e cede outro ao Windows. A lista é a pasta `Coisas` da área de trabalho do Windows, e aceita **qualquer arquivo**: um `.docx` ali abre no Word de verdade. Chamava-se `jogo-windows`/`Jogos` até 02/08/2026 |
 | `linux-desktop-down` | "botão de desligar": encerra sessão ou a VM |
 | `xfwm-atalhos.sh` | atalhos de janela; reaplicado a cada login pelo `startwm.sh` |
 | `instalar-som.sh` | compila o `pulseaudio-module-xrdp` + ajustes de buffer |
@@ -92,7 +93,7 @@ barra-tarefas.c  ──exec──>  transferir-usb  ──exec──>  audio-pad
        │                          │
        └────exec────>  audio-dispositivos  ──exec──>  audio-padrao.ps1
        └────exec────>  linux-desktop-down  ──exec──>  transferir-usb
-       └────exec────>  jogo-windows        ──exec──>  mstsc.exe / cmd.exe
+       └────exec────>  abrir-windows       ──exec──>  mstsc.exe / cmd.exe
        └────exec────>  barra-apps          ──exec──>  zenity / convert / o app
                                   └──(.desktop)──>  trabalho  ──exec──>  tmux + ranger + claude
 ```
@@ -109,10 +110,18 @@ entre eles são visíveis ao AST.
 | `Policy=Default` no `sesman.ini` | é o que faz a sessão sobreviver a fechar o mstsc. Com `UBD`, reconectar abre desktop vazio e **destrói trabalho** |
 | `cycle_hidden=true` no xfwm4 | a barra **não** tem lista de janelas; `Alt+Tab` é o único caminho de volta ao minimizar |
 | uma tecla por ação do xfwm4 | duas teclas na mesma ação = só uma pega o grab, e a vencedora é a última gravada |
+| o valor do `Ctrl+Alt+T` sem aspas | a sessão nasce sem terminal, então essa tecla é o único caminho normal para um shell. Quem a executa é o `xfsettingsd`, que passa a string pelo `g_shell_parse_argv`: aspas no valor são uma camada a mais para errar, e o erro é a tecla **não fazer nada, calada**. O `if` de fallback fica no `xfwm-atalhos.sh`, na hora de gravar |
 | rótulos da barra em ASCII | a fonte core está em `iso8859-1`; acento sai corrompido no `XDrawString` |
 | `bancada.c` usa **Xft**, a barra usa fonte **core** | não unifique: na barra o iso8859-1 é o visual arcaico; num editor ele **corromperia** todo caractere fora do latin-1 ao salvar |
+| `Ctrl+C` da bancada **não** entra no `XGrabKey` | com grab ele deixaria de chegar ao Claude da aba 0, onde é o "interrompe isso". Só o `Ctrl+Tab` é capturado; o resto depende do foco, que é o certo aqui |
+| `apagar_selecao()` **não** guarda instantâneo de desfazer | quem chama é que sabe se aquilo é um passo sozinho (Delete) ou a primeira metade de um par (recortar, colar/digitar por cima). Guardar ali faria o `Ctrl+Z` andar meio passo — desfaria o colado sem devolver o apagado |
+| o texto colado passa por filtro | `\r` sai (senão `\r\n` do Windows vira **duas** quebras no `inserir_texto()`), e byte de controle abaixo de 32 que não seja `\n`/`\t` também. Quem decide `\r\n` no arquivo é a flag `crlf`, ao salvar |
+| a seleção da bancada morre na troca de aba | ela vive nos globais do editor, como o cursor — depois da troca eles apontam para o buffer de outro arquivo, e o intervalo não quer dizer nada lá |
 | só a janela-mãe pede `KeyPressMask` na bancada | o X entrega a tecla à menor janela sob o ponteiro que a pediu, não à que tem foco. Com o filho pedindo, o `XFilterEvent` não reconhece o evento e o **acento morto do ABNT2 para de compor** |
 | a bancada precisa de `XSetErrorHandler` | trocar de aba desmapeia uma janela e mapeia outra; `XSetInputFocus` na recém-desmapeada dá `BadMatch`, e o tratador padrão do Xlib **mata o processo** |
+| o `terminal.c` **não** entra na bancada | ele existe por gosto de ter o próprio, não para trocar o xterm da aba 0 — que funciona. Mexer nisso traz de volta todo o trabalho das invariantes de janela adotada, para economizar 14 MB num par que gasta 195 |
+| a reserva de fonte parte do pedido **cru**, nunca de `fonte->pattern` | o pattern de uma fonte já aberta é o resolvido: traz `FC_FILE` e `FC_FONTVERSION`, ambos de prioridade **maior** que o charset. O `FcFontMatch` devolve a mesma fonte, e CJK/emoji ficam caixa vazia com as Noto instaladas e funcionando |
+| `setsid()` **antes** do `TIOCSCTTY` no filho do pty | sem virar líder de sessão primeiro, o pty não vira terminal de *controle*: tudo funciona e só o `Ctrl+C` não faz nada |
 | `globais_zerar()` e `fechar_aba()` **não** usam `limpar_buffer`/`esquecer_undo` | eles mexem nos globais, que apontam para o buffer de outra aba. Liberar ali destrói o texto da aba vizinha, e só aparece ao voltar para ela |
 | nada de `seguir_cursor()` ao ativar aba | ele arrasta a tela até o cursor, que só anda pelo teclado — desfaz a rolagem de quem desceu o arquivo com a roda do mouse. O `topo`/`col0` guardados na aba já são válidos |
 | a bancada **não** levanta o Claude sozinha | subir só com a janela custava 490 MB a quem abriu para olhar um arquivo. Só o botão `[Claude]` e o clique no painel vazio o abrem; abrir a bancada, restaurar sessão e `Ctrl+Tab` não. Trocar de projeto reabre **só** o que já estava de pé |
@@ -120,7 +129,7 @@ entre eles são visíveis ao AST.
 | qualquer `NUL` no arquivo **inteiro** manda para o hex | o cheiro olha só 512 bytes, mas o `texto_para_buffer()` varre com `strchr()`: um `NUL` no meio faria o resto do arquivo sumir do buffer e o salvar gravá-lo truncado |
 | nenhuma lib de imagem no `bancada.c` também | quem decodifica é o `convert` (16 MB de pico, 0,03 s, e morre), devolvendo PPM cru pelo pipe. A `libpng` até já está no processo pela freetype, mas resolveria só PNG — pelo pipe vêm seis formatos num caminho só |
 | a sessão da bancada **não** guarda texto não salvo | só caminho, cursor e rolagem. Ressuscitar texto que o usuário não mandou gravar tem de acertar sempre; errar uma vez custa o arquivo |
-| o `perfil.sh` é instalado **fora** do repositório | se o `.bashrc` apontasse para a pasta do repositório, mover o repositório quebraria o shell. E não é `/etc/profile.d`: terminal interativo não-login lê o `.bashrc` e ignora o `profile.d` |
+| o `perfil.sh`, o `audio-padrao.ps1` e o `xfwm-atalhos.sh` são instalados **fora** do repositório (`/usr/local/share/linux-fullscreen/`) | se o `.bashrc` apontasse para a pasta do repositório, mover o repositório quebraria o shell. Vale igual para os outros dois: mover a pasta derrubava a troca de áudio do Windows e, calado, os atalhos de janela no login. Quem os usa procura no instalado primeiro, com o repositório como plano B. E não é `/etc/profile.d`: terminal interativo não-login lê o `.bashrc` e ignora o `profile.d` |
 | nenhuma lib de imagem no `barra-tarefas.c` | o ícone é convertido pelo `barra-apps` para pixels crus (1200 bytes) uma vez, ao fixar. A barra só faz `fread` + `XPutImage`. Linkar libpng aqui é o fim da premissa do arquivo |
 | dicas de tamanho **antes** do `XResizeWindow` | elas dizem `min=max`; sem atualizar primeiro, o xfwm4 recusa a largura nova e o conteúdo transborda |
 | barra **não** é `override_redirect` | janela não gerenciada não tem strut: o xfwm4 ignora o `_NET_WM_STRUT_PARTIAL` e as janelas maximizadas voltam a passar por baixo dela, sem erro nenhum |
@@ -128,26 +137,30 @@ entre eles são visíveis ao AST.
 | `allowed_users=anybody` | volta para `console` a cada upgrade do `xserver-xorg-legacy` e a sessão para de subir |
 | vídeo **nunca** por USB/IP | o `vhci_hcd` satura em 0,25 MB/s e o navegador pede 18,4 — dá chuvisco. Áudio cabe (0,18), vídeo não |
 | lançar `.exe` com argumentos separados | a interop do WSL **escapa aspas embutidas**: `start "" $linha` com aspas dentro da string vira `"\"C:\Riot" Games\...` no Windows. Cada pedaço tem de ser um argumento do bash |
-| nada de interop no caminho do menu | a barra chama `jogo-windows --listar-jogos` a cada abertura; um `powershell.exe` ali custaria ~1 s por clique |
+| nada de interop no caminho do menu | a barra chama `abrir-windows --listar-coisas` a cada abertura; um `powershell.exe` ali custaria ~1 s por clique |
+| o filtro da pasta `Coisas` é lista **negra**, não branca | numa pasta que aceita qualquer arquivo, uma lista de extensões aceitas decide por você que `.docx` não é coisa — e o arquivo largado lá **some do menu sem dizer nada**. Só o lixo do Windows (`desktop.ini`, `Thumbs.db`, ocultos) fica de fora |
 
 ## Armadilhas do ambiente (custaram horas)
 
 - **`.rdp` da Área de Trabalho é UTF-16LE.** `sed`/`grep` ASCII não casam e
   **não avisam**. Editar por bytes. Mexer nele invalida a assinatura → re-assinar
   com `rdpsign`. **Quem o converte é o próprio `rdpsign`**: nasce ASCII, volta
-  UTF-16LE assinado. Passe por `ler_rdp()` (`jogo-windows`) antes de filtrar —
+  UTF-16LE assinado. Passe por `ler_rdp()` (`abrir-windows`) antes de filtrar —
   sem isso o `grep` responde `binary file matches` no stderr e nada no stdout, e
   o resultado é um `.rdp` de 53 bytes que ninguém percebe.
 - **Nada de caminho chumbado na Área de Trabalho.** Arrumar o desktop numa
-  subpasta é normal e já quebrou o `jogo-windows` (erro visível) e o `.vbs`
-  (queda silenciosa para `mstsc /f` sem os ajustes). Os dois procuram um nível
-  de subpasta abaixo.
+  subpasta é normal e já quebrou **três** coisas: o `abrir-windows` (erro
+  visível), o `.vbs` (queda silenciosa para `mstsc /f` sem os ajustes) e, dois
+  dias depois, o `transferir-usb` — que matava o mstsc para trocar o áudio e
+  **não conseguia reabri-lo**, deixando a sessão desconectada. Os três procuram
+  um nível de subpasta abaixo, nas três variantes de área de trabalho. Quando um
+  caminho chumbado quebrar, **procure os outros no mesmo dia**.
 - **Saída do PowerShell não é UTF-8** (CP-850/1252). `grep` declara
   `binary file matches` e engole tudo. Use `grep -a` + `tr -cd '[:print:]\t\n'`.
 - **Lançar `.exe` do Windows:** `setsid --fork`, nunca `( cmd & )`. O proxy de
   interop segura o descritor de saída original e quem estiver **lendo** trava
   até a janela do Windows fechar.
-- **O binário do `claude` mora dentro da extensão do VS Code** (`~/.vscode/extensions/anthropic.claude-code-<versao>/resources/native-binary/claude`). O caminho tem a versão e muda a cada atualização; desinstalar o VS Code leva o Claude junto. O `trabalho` procura em vez de chumbar.
+- ~~**O binário do `claude` mora dentro da extensão do VS Code.**~~ **Não vale mais** (medido em 02/08/2026): o CLI está instalado sozinho em `~/.local/share/claude/versions/`, e `trabalho onde` responde `~/.local/bin/claude`. Desinstalar o VS Code **não** leva o Claude junto. O `onde_claude()` tenta `command -v claude` primeiro e só cai na extensão como plano B — continue usando ele em vez de chumbar caminho.
 - **Opções de janela do `xfce4-terminal` vêm antes das de aba.** `--maximize` depois de `--title` é ignorado **sem erro** — a janela abre no tamanho padrão.
 - **`pgrep -c` conta zumbi.** Filtre com `grep -v defunct` antes de concluir que
   há duas instâncias.
@@ -164,8 +177,18 @@ entre eles são visíveis ao AST.
   preta. Antes de acreditar num print de teste, confira que a janela está
   visível (`xwininfo -root -children` dá o empilhamento) — ou, melhor, meça o
   estado por `fprintf` em vez de olhar a tela.
-- **`install.sh` derruba a sessão** (reinicia o xrdp). Para trocar só o
-  `startwm.sh`, copie o arquivo com `sudo cp` em vez de rodar o instalador.
+- ~~**`install.sh` derruba a sessão**~~ — **ele a duplica** (medido em
+  02/08/2026). Reiniciar o xrdp apaga a tabela de sessões, que vive na memória do
+  sesman; no reconnect ele abre um display novo e o antigo fica **órfão**, vivo e
+  sem `sesexec` que o recolha. Ficou de pé 11 h segurando **1,66 GB**. O
+  `Policy=Default` não cobre este caso: ele protege contra o mstsc fechar, não
+  contra o sesman reiniciar. Sintoma: dois `Xorg :` no `ps`. Limpeza sem
+  reiniciar nada: `kill -TERM` no `xfwm4` e no `Xorg` do display velho (os
+  clientes X caem junto) e depois no `xrdp-chansrv`, que não cai. Processo com
+  `PPID 1` + sessão própria + `tty ?` sobrevive — foi como um `gmx mdrun` de 11 h
+  atravessou a limpeza intacto. Ver README, "Mas o `Policy=Default` não protege
+  contra o *sesman* reiniciar". Para trocar só o `startwm.sh`, copie o arquivo
+  com `sudo cp` em vez de rodar o instalador.
 - **O xrdp às vezes não marca monitor primário** (`xrandr` sem o `*`). Desempate
   por posição: o monitor que contém a origem `(0,0)`.
 

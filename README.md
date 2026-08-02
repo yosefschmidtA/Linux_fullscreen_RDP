@@ -124,7 +124,7 @@ sessão fullscreen. Para reverter, `guiApplications=true` e `wsl --shutdown`.
 
 | Atalho | Ação |
 |---|---|
-| `Ctrl+Alt+T` | novo terminal |
+| `Ctrl+Alt+T` | novo terminal — o `terminal.c` deste repositório |
 | `Alt+F3` ou `Super+R` | xfce4-appfinder (é assim que se abre programa) |
 | `Alt+F4` | fecha a janela |
 | `Alt+Tab` | alterna janelas (inclui as minimizadas) |
@@ -483,7 +483,7 @@ Escreva a função de ação e ponha **uma linha** na tabela `itens[]`:
 static Item itens[] = {
     { BOTAO_USB,   "Audio",    92, NULL,          "audio",  0, 0 },
     { BOTAO_USB,   "Camera",   92, NULL,          "camera", 0, 0 },
-    { BOTAO_JOGOS, "Jogos",    52, NULL,          NULL,     0, 0 },
+    { BOTAO_COISAS,"Coisas",   56, NULL,          NULL,     0, 0 },
     { RELOGIO,     NULL,       52, NULL,          NULL,     0, 0 },
     { BOTAO,       "Desligar", 66, acao_desligar, NULL,     0, 0 },
 };
@@ -491,22 +491,31 @@ static Item itens[] = {
 
 A largura da barra é calculada a partir dela; nada mais precisa mudar.
 
-### O botão "Jogos" (31/07/2026)
+### O botão "Coisas" (31/07/2026, renomeado em 02/08/2026)
 
-Abre a lista de jogos e lança o escolhido — o `jogo-windows` faz o resto sozinho
-(pergunta o monitor, encolhe a sessão, lança e devolve o multimonitor quando
-você fecha). A lista vem da **pasta de atalhos** descrita em "Jogar no Windows
-cedendo um monitor": pôs o atalho lá, o jogo está na barra.
+Abre a lista e lança o escolhido — o `abrir-windows` faz o resto sozinho
+(pergunta o monitor, encolhe a sessão, abre e devolve o multimonitor quando
+você fecha). A lista vem da **pasta** descrita em "Abrir coisas do Windows
+cedendo um monitor": pôs o item lá, ele está na barra.
 
-**Um botão que abre menu, e não um botão por jogo.** A barra tem largura fixa
-calculada da tabela `itens[]`; um botão por jogo faria ela crescer sem limite a
-cada atalho novo, e nomes longos precisariam ser encurtados. O menu já existia
+> **Chamava-se "Jogos" até 02/08/2026**, quando a pasta passou a aceitar
+> qualquer arquivo e não só lançador. A largura do botão saiu de 52 para 56 px:
+> medido no mesmo dia com a própria fonte da barra, `"Coisas"` ocupa 34 px na
+> `-*-helvetica-medium-r-normal--11-*` contra 30 px de `"Jogos"`, e 56 mantém a
+> mesma folga de 22 px que o botão já tinha. Não é chute — a fonte é
+> proporcional, e somar "mais um caractere" erraria.
+
+**Um botão que abre menu, e não um botão por item.** A barra tem largura fixa
+calculada da tabela `itens[]`; um botão por item faria ela crescer sem limite a
+cada arquivo novo, e nomes longos precisariam ser encurtados. O menu já existia
 para a escolha de dispositivo de áudio, e escala para qualquer quantidade.
 
-**A lista é lida no clique, não guardada.** É o que faz um atalho novo aparecer
+**A lista é lida no clique, não guardada.** É o que faz um item novo aparecer
 sem reiniciar a barra — que é o ponto todo de usar uma pasta — e não deixa nada
 para vigiar enquanto o menu está fechado. Custa 48 ms com o cache do caminho
-quente (veja a medição na seção do `jogo-windows`).
+quente (31/07/2026), e 34 ms na remedição de 02/08/2026 depois da generalização
+— aceitar qualquer arquivo não custou tempo, porque o gasto é a travessia de
+diretório no drvfs e não o filtro.
 
 **Os dois menus compartilham o parser** porque compartilham o formato:
 
@@ -516,10 +525,18 @@ quente (veja a medição na seção do `jogo-windows`).
 
 O `id` nunca é desenhado — é o que volta para o comando —, e por isso ele pode
 ter acento enquanto o rótulo, que passa pelo `XDrawString`, não pode. Quem
-transliera é o `jogo-windows --listar-jogos`, com
-`iconv -t ASCII//TRANSLIT`; a barra continua sem saber o que é um jogo.
+transliera é o `abrir-windows --listar-coisas`, com
+`iconv -t ASCII//TRANSLIT`; a barra continua sem saber o que é um jogo — nem o
+que é um documento.
 
-> O nome do jogo é um **nome de arquivo escolhido por você**, então "Assassin's
+> Isso **deixou de ser um caso raro em 02/08/2026**. Enquanto a pasta só tinha
+> jogo, nome acentuado era exceção; com documento na lista virou regra. Medido
+> no mesmo dia: um arquivo de teste `Relatório Final.docx` sai como
+> `Relatório Final` no campo `id` e `Relatorio Final` no rótulo, que é
+> exatamente o que se quer — o acento sobrevive onde importa (o nome que volta
+> para o comando) e desaparece onde quebraria (o `XDrawString`).
+
+> O nome é um **nome de arquivo escolhido por você**, então "Assassin's
 > Creed.lnk" é normal e partiria o comando ao meio. A `cita()` aplica a regra do
 > apóstrofo (fecha a aspa, escapa, reabre) antes de montar a linha.
 
@@ -528,7 +545,7 @@ o clique parecia um botão morto.
 
 ### Atalhos de aplicativo, com ícone (31/07/2026)
 
-Entre o botão "Jogos" e o relógio ficam os seus apps, e depois deles um `[+]`:
+Entre o botão "Coisas" e o relógio ficam os seus apps, e depois deles um `[+]`:
 
 ```
 [Vol][Mic][Audio: Linux][Camera: Rede][Jogos][@][>_][+] 16:28 [Desligar]
@@ -559,6 +576,38 @@ para decorar.
 Estes botões **lançam, não alternam**. Continua não havendo lista de janelas, e
 isso é deliberado: minimizou, volta pelo `Alt+Tab` (veja "Minimizar sem barra de
 tarefas"). Um `[+]` que fixasse janelas seria outra coisa, e não é esta.
+
+**Pôr um programa deste projeto na barra (02/08/2026).** A lista do `[+]` é a
+dos `.desktop` instalados, então um binário nosso só aparece lá se tiver um. Foi
+o caso do `terminal`: ganhou o `desktop/terminal.desktop` do repositório, que o
+`install.sh` já leva para `/usr/share/applications` junto com os outros. Depois
+disso é o caminho normal — `[+]`, clicar em "Terminal", pronto.
+
+O `bancada.desktop` foi junto, no mesmo dia e pelo mesmo motivo. Ele existia,
+mas escrito à mão em `~/.local/share/applications/` — **fora do repositório**,
+ou seja, fora do git e fora do `install.sh`: sobrevivia a tudo, menos a formatar
+a máquina, que é justamente o caso em que ele faz falta. Estar no git guarda o
+arquivo; é o `install.sh` que o *põe no lugar onde o `[+]` procura*. De passagem,
+o `Exec=bancada` virou `Exec=/usr/local/bin/bancada`, para não depender do PATH
+de quem lança.
+
+> **Mover um `.desktop` já fixado tira o ícone da barra, calado.** O `apps.conf`
+> guarda o **caminho** do `.desktop`, e o `fixados()` pula silenciosamente as
+> linhas cujo arquivo não existe mais — de propósito, para um app desinstalado
+> não deixar um botão quebrado. Mudar o arquivo de `~/.local/share/applications`
+> para `/usr/share/applications` é exatamente esse caso: some o botão, sem erro
+> nenhum. Ao mover, corrija a linha do `apps.conf` junto (foi o que se fez aqui,
+> e a barra continuou com os mesmos 734 px, na mesma ordem).
+
+O `Icon=utilities-terminal` é um **nome de tema**, não um caminho: o `barra-apps`
+o resolve em `/usr/share/icons`, converte para os 1200 bytes crus e guarda. Sai
+exato (conferido: `1200`), o que quer dizer que a barra desenha o ícone e não cai
+no plano B do rótulo de texto.
+
+Medido no mesmo dia, e serve de teste de que a barra **relê o `apps.conf`
+sozinha**: a janela dela tinha 702 px sem o Terminal e 734 px com ele — 32 px a
+mais, um botão de app, sem reiniciar nada. A barra compara o `mtime` do
+`apps.conf` a cada tique e remonta quando ele muda.
 
 **Por que `.desktop` e não uma lista de comandos.** O `.desktop` já traz o nome
 bonito, o comando certo com caminho absoluto e o nome do ícone. Fixar um app é
@@ -658,7 +707,7 @@ gerenciador de janelas ainda nem viu a janela.
 ### Ela se reposiciona sozinha — e por que isso é obrigatório
 
 A barra escuta `RRScreenChangeNotify` e se move quando o layout de monitores
-muda. Sem isso, o `jogo-windows` (que encolhe a sessão para um monitor) a
+muda. Sem isso, o `abrir-windows` (que encolhe a sessão para um monitor) a
 deixaria fora da tela até o próximo login.
 
 No tratamento do evento, o `XRRUpdateConfiguration` **não é enfeite**: sem ele o
@@ -677,7 +726,7 @@ velha.
 > Como a ordem em que o xrdp cria as saídas também não é estável, cair no
 > "índice 0" punha a barra no monitor errado de forma imprevisível. O desempate
 > é por **posição**: o monitor que contém a origem `(0,0)` — o mesmo critério
-> que o `jogo-windows` usa para numerar monitores.
+> que o `abrir-windows` usa para numerar monitores.
 
 ### As janelas param em cima dela: `_NET_WM_STRUT_PARTIAL` (31/07/2026)
 
@@ -705,7 +754,7 @@ lado a tela X é a caixa que envolve os dois, então o valor certo é
 `altura_da_tela - (monitor_y + monitor_altura) + ALTURA`. Dá exatamente `ALTURA`
 quando o monitor da barra encosta no fundo, e compensa a diferença quando ele é
 mais baixo que o vizinho. Como o strut é recalculado dentro de `reposicionar()`,
-ele acompanha o `jogo-windows` encolhendo a sessão.
+ele acompanha o `abrir-windows` encolhendo a sessão.
 
 Medido em 31/07/2026, tela `4480x1080`, barra no monitor da esquerda
 (`rdp1 2560x1080+0+0`):
@@ -777,7 +826,7 @@ tela. Depois do conserto, os três arranjos medidos:
 > medidos dentro da sessão em uso. **Armadilha medida no mesmo dia:** essa troca
 > **não** gera `RRScreenChangeNotify` — a barra não percebe e é preciso
 > reiniciá-la à mão para ver o efeito. As trocas de verdade (reconectar o mstsc
-> com outro `.rdp`, que é o que o `jogo-windows` faz) mudam o tamanho da tela e
+> com outro `.rdp`, que é o que o `abrir-windows` faz) mudam o tamanho da tela e
 > aí o evento sai.
 
 ## Fluidez
@@ -1127,7 +1176,7 @@ Dois obstáculos, e o primeiro sozinho já basta:
 
 O lugar do jogo é o Windows, onde a 4060 é dona do display. `Ctrl+Alt+Break`
 devolve o Windows com a sessão Linux intacta rodando por trás — e o
-`jogo-windows` (veja "Jogar no Windows cedendo um monitor") automatiza isso
+`abrir-windows` (veja "Jogar no Windows cedendo um monitor") automatiza isso
 sem precisar sair do ecrã cheio inteiro.
 
 ## Som
@@ -1269,7 +1318,7 @@ Linux, com `:0` o mstsc não abre o canal e não existe microfone nenhum para o
 Firefox enxergar.
 
 > **Mexer no `.rdp` invalida a assinatura.** Depois de editar, re-assine — é o
-> mesmo caminho que o `jogo-windows` usa a cada partida, e roda de dentro da
+> mesmo caminho que o `abrir-windows` usa a cada partida, e roda de dentro da
 > sessão:
 >
 > ```bash
@@ -1596,7 +1645,7 @@ valores no proprio script  ->  audio-detectado.conf  ->  dispositivos.conf
    (chute inicial)              (automatico)             (sua escolha, ganha)
 ```
 
-**Não há assinatura de ambiente** como o `jogo-windows` faz com monitores, e foi
+**Não há assinatura de ambiente** como o `abrir-windows` faz com monitores, e foi
 decisão deliberada: aqui a *presença* do aparelho já é o discriminador, e se
 corrige sozinha ao trocar de mesa — sem precisar reconhecer "que ambiente é
 este".
@@ -1759,7 +1808,7 @@ fecha a janela do Windows, a espera é indefinida.
 > herdado, não a espera por um filho. Conselho diferente: não adianta trocar
 > como o processo é bifurcado se a saída continuar sendo herdada.
 
-> **O mesmo padrão está no `jogo-windows`** (`abrir_mstsc`, linha 254). Lá não
+> **O mesmo padrão está no `abrir-windows`** (`abrir_mstsc`, linha 254). Lá não
 > incomoda **porque ninguém lê a saída dele**: é chamado pelo appfinder ou por um
 > terminal interativo. Passa a incomodar no dia em que alguém o chamar de um
 > script com `$( )` ou com pipe — aí trava até a janela do jogo fechar.
@@ -1816,13 +1865,18 @@ cd /tmp && powershell.exe -ExecutionPolicy Bypass \
 O `.ps1` se copia sozinho para o `%LOCALAPPDATA%` quando está mais novo que a
 cópia de lá — editar no repositório basta, não há passo de instalação no Windows.
 
-## Jogar no Windows cedendo um monitor
+## Abrir coisas do Windows cedendo um monitor
 
-O jogo continua sendo do Windows — a seção "Jogos: não" não mudou. O que muda é
+> **Chamava-se "Jogar no Windows cedendo um monitor" e o script, `jogo-windows`,
+> até 02/08/2026.** Generalizou para qualquer coisa do Windows — jogo, Word,
+> PDF. O porquê está em "Por que não VNC, e por que não custou código",
+> logo abaixo. Se você chegou aqui procurando `jogo-windows`, é este arquivo.
+
+A coisa continua sendo do Windows — a seção "Jogos: não" não mudou. O que muda é
 que não é mais preciso abandonar a sessão inteira com `Ctrl+Alt+Break` para
-jogar. O `jogo-windows` (`Alt+F3` → "Jogos (Windows)") **encolhe a sessão para
-um monitor só** enquanto o jogo roda, e devolve o multimonitor quando você
-fecha.
+usá-la. O `abrir-windows` (`Alt+F3` → "Abrir no Windows") **encolhe a sessão
+para um monitor só** enquanto ela está aberta, e devolve o multimonitor quando
+você fecha.
 
 O ganho é estrutural, não de conforto: **nenhum pixel do jogo passa pelo x264 do
 xrdp**. Ele é desenhado pela 4060 direto no painel, como sempre foi. Não há
@@ -1836,6 +1890,58 @@ ecrã cheio de **um** monitor, o cursor atravessa livremente para o monitor
 vizinho, onde está o jogo. Ele só fica preso quando o mstsc está em multimonitor
 cobrindo tudo — aí não há para onde sair. Passar de um lado para o outro é
 arrastar o mouse, como entre duas janelas quaisquer.
+
+### Por que não VNC, e por que não custou código (02/08/2026)
+
+A pergunta que abriu esta mudança foi outra: *editar `.docx` no Word de verdade,
+e o VNC não seria o caminho?* No começo do projeto o VNC tinha sido cogitado
+para trazer ferramentas do Windows para cá, e como protocolo ele é de fato
+melhor escolha que o Sunshine+Moonlight de "Moonlight, adiado": manda retângulo
+sujo em vez de vídeo, e a tela do Word fica parada quase o tempo todo.
+
+**Foi recusado assim mesmo**, por três motivos que não se resolvem trocando de
+software:
+
+- **A recursão é a mesma que adiou o Moonlight.** O servidor VNC no Windows
+  captura a área de trabalho, que neste momento é o mstsc em ecrã cheio
+  mostrando a sessão Linux. A janela mostraria a si mesma. A saída seria um
+  display virtual no Windows — o mesmo trabalho de antes, só que agora com um
+  serviço VNC a mais rodando como SYSTEM.
+- **Word é aplicativo de digitar, e é o pior caso para caminho aninhado.** O eco
+  de cada tecla atravessaria Linux → VNC → Windows → renderiza → captura → VNC →
+  Linux → x264 do xrdp → mstsc. A análise de 29/07/2026 mediu ~60–100 ms para
+  dois encodes em série e concluiu *"inviável para jogo; aceitável para app
+  comum"*. Word não é app comum nesse critério: ler um `.docx` assim é
+  tranquilo, escrever um é cansativo.
+- **Não economiza RAM, que é a premissa permanente.** A WSL2 não tem memória
+  própria — é recortada da mesma RAM física do Windows. Rodar o Word "no
+  Windows" não move o custo para fora: soma o Word, mais o servidor VNC, mais o
+  cliente segurando um framebuffer da área de trabalho remota inteira.
+
+**E o mecanismo já existia.** Lendo o então `jogo-windows` atrás do que faltava,
+não faltava nada: o `lancar()` entrega o caminho ao `start ""` do Windows, e
+quem resolve executável, atalho e associação de arquivo é o shell de lá. Medido
+com `ftype` em 02/08/2026:
+
+```
+.docx=Word.Document.12
+Word.Document.12="C:\Program Files\Microsoft Office\Root\Office16\WINWORD.EXE" /n "%1" /o "%u"
+```
+
+Ou seja, um `.docx` largado na pasta abre no Word nativo, no monitor cedido, com
+fidelidade total, latência nativa e zero pedágio de transporte — que é
+exatamente o que se queria do VNC, e melhor. O trabalho todo foi **mudar nome e
+filtro**: a pasta virou `Coisas`, o filtro de extensões virou filtro de lixo, e
+o script virou `abrir-windows`.
+
+> **O filtro passou de lista branca para lista negra, e isso é deliberado.** Até
+> aqui ele só aceitava `.lnk/.url/.exe/.bat/.cmd`, o que fazia sentido numa
+> pasta chamada `Jogos` — tudo ali era lançador. Numa pasta chamada `Coisas` a
+> lista branca decide por você que `.docx` não é coisa, e o arquivo largado lá
+> **some do menu sem dizer nada**, que é o pior modo de falhar. Agora passa
+> qualquer arquivo e só o lixo do próprio Windows fica de fora: `desktop.ini`,
+> `Thumbs.db` e ocultos. Verificado em 02/08/2026 — um `desktop.ini` posto na
+> pasta de propósito não apareceu na listagem.
 
 ### Como ele escolhe o monitor — e por que não usa `selectedmonitors`
 
@@ -1873,7 +1979,7 @@ Como saber qual é qual num ambiente estranho, a lista tem um item
 mesmo que o botão "Identificar" das Configurações do Windows. Sozinho:
 
 ```bash
-jogo-windows --identificar
+abrir-windows --identificar
 ```
 
 O que faz isso funcionar é a **numeração por posição**: os monitores são
@@ -1892,36 +1998,49 @@ conjunto de monitores** (todas as geometrias, ordenadas). Casa e trabalho geram
 assinaturas diferentes, então cada um tem a sua memória.
 
 ```bash
-jogo-windows --listar       # o que o Windows está reportando agora
-jogo-windows --perfil       # gera o .rdp e mostra, sem mexer na sessão
+abrir-windows --listar       # o que o Windows está reportando agora
+abrir-windows --perfil       # gera o .rdp e mostra, sem mexer na sessão
 ```
 
-### A lista de jogos é uma pasta de atalhos (31/07/2026)
+### A lista é uma pasta (31/07/2026, generalizada em 02/08/2026)
 
-A fonte da verdade é uma pasta `Jogos` na área de trabalho do Windows. **Instalou
-um jogo, arrasta o atalho para lá** — ele aparece no menu do `jogo-windows` e no
-botão "Jogos" da barra, sem editar arquivo nenhum e sem reiniciar nada.
+A fonte da verdade é uma pasta `Coisas` na área de trabalho do Windows. **Arrasta
+para lá o que você quer abrir** — atalho de jogo ou o próprio documento — e ele
+aparece no menu do `abrir-windows` e no botão "Coisas" da barra, sem editar
+arquivo nenhum e sem reiniciar nada.
 
 ```
-C:\Users\<você>\Desktop\Jogos\
+C:\Users\<você>\Desktop\Coisas\
     Hollow Knight Silksong.url      <- atalho de Steam
     League of Legends.lnk           <- atalho do instalador
+    TCC.docx                        <- o arquivo mesmo; abre no Word
+    Contrato.pdf                    <- abre no leitor de PDF padrão
 ```
 
-**Por que atalho, e não a linha de comando.** Vários jogos só sobem pelo atalho
-que o instalador criou: ele carrega o diretório de trabalho e os argumentos
+> **A pasta chamava-se `Jogos` até 02/08/2026.** O nome antigo continua sendo
+> procurado logo depois do novo, para a renomeação no Windows não ser obrigatória
+> no mesmo minuto em que o script muda; se as duas existirem, `Coisas` ganha por
+> vir primeiro na busca. Isso **dobrou o custo do glob** — medido no mesmo dia:
+> 580 ms com um nome só, 1150 ms com os dois, pelo mesmo motivo de sempre
+> (dobrou a travessia de diretório no drvfs). É preço pago só quando o cache
+> falha; o caminho normal continua sendo um teste de diretório, medido em 5 ms.
+
+**Por que atalho serve, e não só a linha de comando.** Vários jogos só sobem pelo
+atalho que o instalador criou: ele carrega o diretório de trabalho e os argumentos
 certos, e reproduzir isso à mão é um jeito de errar. Entregando o `.lnk` ao shell
 do Windows (`start "" "...lnk"`), quem resolve tudo é o próprio Windows. Por isso
 **não há parser de `.lnk` aqui** — o formato é binário e não precisamos dele. O
-`.url` do Steam passa pelo mesmo caminho.
+`.url` do Steam passa pelo mesmo caminho, e o `.docx` também: é a mesma chamada.
 
-O nome do jogo é o nome do arquivo sem a extensão. Renomear o atalho renomeia o
-jogo, e nada quebra: o `monitores.conf` é indexado por ambiente, não por jogo.
+O nome é o nome do arquivo sem a última extensão — inclusive para arquivo de
+verdade, para que `TCC.docx` e um atalho chamado `TCC` apareçam igual na lista.
+Renomear o arquivo renomeia o item, e nada quebra: o `monitores.conf` é indexado
+por ambiente, não por item.
 
-**Como a pasta é encontrada, sem interop.** A barra chama `jogo-windows
---listar-jogos` toda vez que o menu abre, e uma chamada de PowerShell custa quase
+**Como a pasta é encontrada, sem interop.** A barra chama `abrir-windows
+--listar-coisas` toda vez que o menu abre, e uma chamada de PowerShell custa quase
 um segundo — então essa rota não fala com o Windows. Ela procura em
-`Desktop/Jogos` e nas duas variantes do OneDrive (`Desktop` e `Área de
+`Desktop/Coisas` e nas duas variantes do OneDrive (`Desktop` e `Área de
 Trabalho`), pulando os perfis de sistema. Medido em 31/07/2026:
 
 | | custo |
@@ -1930,15 +2049,17 @@ Trabalho`), pulando os perfis de sistema. Medido em 31/07/2026:
 | listar a pasta já conhecida | **38 ms** |
 
 Meio segundo para abrir um menu é inaceitável, então o caminho resolvido fica em
-`~/.config/linux-fullscreen/pasta-jogos.cache` e o normal passa a ser um único
-teste de diretório: o `--listar-jogos` inteiro caiu de **481 ms para 48 ms**. O
+`~/.config/linux-fullscreen/pasta-coisas.cache` e o normal passa a ser um único
+teste de diretório: o `--listar-coisas` inteiro caiu de **481 ms para 48 ms**. O
 cache se invalida sozinho — se a pasta sumiu (outra máquina, outro perfil, o
 OneDrive assumiu a área de trabalho), o teste falha e o glob roda de novo. Para
-manter a pasta noutro lugar, escreva o caminho em `pasta-jogos.conf`.
+manter a pasta noutro lugar, escreva o caminho em `pasta-coisas.conf`.
 
 O `jogos.conf` antigo (`Nome|linha de comando`) **continua valendo** e é o que
 manda quando não há pasta. Com pasta no lugar, ele nem é semeado — apareceriam
-jogos que você nunca pôs ali.
+jogos que você nunca pôs ali. **O nome desse arquivo não mudou junto com o do
+script, de propósito**: é arquivo do usuário, escrito por ele, e renomear dado de
+usuário calado é um jeito de fazer trabalho sumir.
 
 ### Armadilha: as aspas não sobrevivem à interop (31/07/2026)
 
@@ -1980,7 +2101,7 @@ chama transforma em array com `eval "comando=($linha)"`. As duas fontes — past
 Mover os atalhos do desktop para uma subpasta (`Tudo/`) é uma coisa banal de se
 fazer. Levou o `.rdp` base junto, e **duas coisas independentes quebraram**:
 
-**1. O `jogo-windows` parava com "não achei o perfil base".** O caminho era
+**1. O `abrir-windows` parava com "não achei o perfil base".** O caminho era
 chumbado em `$WINHOME/Desktop/Linux Fullscreen.rdp`. Agora ele procura: ao lado,
 e um nível de subpasta abaixo, nas três variantes de área de trabalho (`Desktop`,
 OneDrive `Desktop`, OneDrive `Área de Trabalho`). Um nível basta — é assim que se
@@ -1994,6 +2115,90 @@ lado de si mesmo. Sem achar, conectava com `mstsc /v:localhost:3390 /multimon /f
 a sessão **subia normalmente**, só que sem nenhum dos ajustes de fluidez, e nada
 avisava. Esse é o pior tipo de falha deste projeto — a que parece sucesso. Agora
 o `.vbs` também olha um nível de subpasta.
+
+**3. E, em 02/08/2026, uma terceira: o `transferir-usb`.** A mesma armadilha,
+no mesmo `.rdp`, escondida por dois dias — ela não apareceu em 31/07 porque este
+arquivo não foi olhado junto com os outros dois. O sintoma: **trocar o áudio
+para o Linux matou o mstsc e não conseguiu reabri-lo**, deixando a sessão
+desconectada e o usuário no desktop do Windows, tendo que achar o `.vbs` na mão.
+
+O `perfil_rdp_windows()` montava `%USERPROFILE%\Desktop\Linux Fullscreen.rdp` com
+um `printf` e só falhava se o `%USERPROFILE%` viesse vazio — **nunca conferia se
+o arquivo existia**. Devolvia um caminho inválido com código de sucesso, e o
+`mstsc` abria um diálogo de erro em vez da sessão. Fechar o mstsc é obrigatório
+ali (ver "O vaivém do mstsc"), então falhar em reabrir é a falha mais cara das
+três: as outras duas degradavam, esta deixa sem tela.
+
+Agora ele procura nos mesmos seis lugares do `abrir-windows`, guarda o achado em
+`~/.config/linux-fullscreen/perfil-rdp.cache` (o teste é I/O no drvfs e isto roda
+a cada clique no botão de áudio da barra) e, se mesmo assim não achar, cai no
+**plano B do `.vbs`** — `mstsc /v:localhost:3390 /multimon /f`, com aviso. Volta
+sem os ajustes de fluidez, mas volta; e continua casando a sessão existente,
+porque o `Policy=Default` casa por usuário e bpp, e o padrão do mstsc é 32 bits
+como o `session bpp:i:32` do perfil.
+
+Conferido em 02/08/2026, com o `.rdp` em `Desktop\Tudo\`: a função devolveu
+`C:\Users\Yosef\Desktop\Tudo\Linux Fullscreen.rdp`. A lição que se repete —
+**quando um caminho chumbado quebra, procure os outros no mesmo dia**; três
+arquivos diferentes tinham a mesma linha, e consertar dois deixou o terceiro
+esperando dois dias para morder.
+
+**Teste ao vivo, 02/08/2026.** O ciclo completo, com o `.rdp` na subpasta:
+`transferir-usb audio windows` (7 s) e `audio linux` (8 s), cada um matando e
+reabrindo o mstsc. Nas duas vezes o cliente voltou sozinho, e a linha de comando
+dele — lida com `Get-CimInstance Win32_Process` — mostrou
+`mstsc.exe "C:\Users\Yosef\Desktop\Tudo\Linux Fullscreen.rdp"`: o perfil certo,
+não o plano B. O headset terminou onde estava (`audio=linux`).
+
+### A varredura: o que mais dependia de caminho chumbado (02/08/2026)
+
+Se a mesma linha estava em três arquivos, valia procurar o resto. O que a
+varredura achou, e o que virou:
+
+**`abrir-windows`, a pasta `Jogos`.** Procurava em `Desktop/Jogos` e nas duas
+variantes do OneDrive, sem subpasta — a `Jogos` está hoje na raiz da Área de
+Trabalho, ao lado da `Tudo/`, e teria quebrado no dia em que fosse arrumada
+junto. Agora olha um nível abaixo também. **O preço, medido:** o glob passou de
+473 ms para 971 ms, porque dobrou o número de padrões a expandir no drvfs. Ele
+só roda quando o cache falha; com cache, listar a pasta conhecida custa 14 ms, e
+foi o que o `--listar-coisas` gastou (53 ms com cache, 1,03 s sem).
+
+> Ainda no mesmo dia essa pasta foi renomeada para `Coisas` e o script para
+> `abrir-windows` — veja "A lista é uma pasta". O glob dobrou **de novo** pelo
+> mesmo motivo, agora por procurar os dois nomes.
+
+**`windows/assinar-rdp.ps1`.** `Join-Path $env:USERPROFILE 'Desktop\Linux
+Fullscreen.rdp'`, chumbado. Falha barulhenta ("não achei o perfil"), mas na hora
+errada: assinar é justamente o que se faz **depois** de editar o `.rdp`, porque
+editar invalida a assinatura. Agora procura ao lado do próprio script
+(`$PSScriptRoot` — quem move o `.rdp` para uma pasta costuma levar o `.ps1`
+junto), depois na Área de Trabalho e um nível de subpasta, nas três variantes; e
+aceita `-Perfil <caminho>` como escape. Conferido: devolveu
+`C:\Users\Yosef\Desktop\Tudo\Linux Fullscreen.rdp`.
+
+**Três caminhos chumbados do lado Linux, e um deles era falha silenciosa.** O
+`transferir-usb` e o `audio-dispositivos` liam o `audio-padrao.ps1` de
+`$HOME/linux-fullscreen/windows/`, e o `startwm.sh` chamava o `xfwm-atalhos.sh`
+de `$HOME/linux-fullscreen/`. Renomear ou mover a pasta do repositório —
+exatamente o que a invariante do `perfil.sh` já previa — derrubaria a troca de
+áudio do lado Windows (com um aviso vago) e, pior, **os atalhos de janela no
+login sem aviso nenhum**: a sessão sobe igual, só o `Super+seta` é que morre.
+Os dois arquivos passaram a ser instalados em `/usr/local/share/linux-fullscreen/`
+como o `perfil.sh`, e os três consumidores procuram lá primeiro, mantendo o
+repositório como plano B para quem quiser rodar sem instalar.
+
+**`/home/yosef/prints` nos atalhos de print.** Chumbado no `xfwm-atalhos.sh` —
+errado para qualquer outro usuário, e o flameshot não avisa: só não salva. Agora
+sai de `$HOME`, expandido **na hora de gravar** e não no valor do atalho: quem
+executa esses comandos é o `xfsettingsd`, que não passa a string por shell
+nenhum, então um `$HOME` literal chegaria ao flameshot como o nome de uma pasta
+chamada `$HOME`. A pasta também passou a ser criada (`mkdir -p`).
+
+**O que ficou como estava, de propósito:** o `Documentation=file:/home/yosef/...`
+dos dois `.service` (é texto de documentação, não caminho executado); o
+`trabalho`, que já tem o escape `TRABALHO_DIR`; e tudo que pergunta o caminho ao
+Windows em vez de chumbá-lo (`%LOCALAPPDATA%`, `%USERPROFILE%` via `cmd.exe`),
+que é o padrão certo e já estava sendo seguido nesses lugares.
 
 ### Assinar o `.rdp` o converte para UTF-16 — e isso quebrava o perfil do jogo
 
@@ -2093,7 +2298,7 @@ leva a conselho errado.
 > necessárias:
 >
 > 1. `cmdkey /generic:TERMSRV/localhost` — mata a tela de login do xrdp;
-> 2. `assinar-rdp.ps1` — assina o `.rdp` (e o `jogo-windows` re-assina o perfil
+> 2. `assinar-rdp.ps1` — assina o `.rdp` (e o `abrir-windows` re-assina o perfil
 >    que gera);
 > 3. a **política `TrustedCertThumbprints`**, que só o mesmo script rodando
 >    **como administrador** grava — é ela que cala o aviso de distribuidor.
@@ -2139,7 +2344,7 @@ O `windows/assinar-rdp.ps1` cria um certificado autoassinado, instala nos
 armazenamentos `Root` e `TrustedPublisher` **do seu usuário** (não da máquina —
 menos invasivo e dispensa UAC; há `-Maquina` se não bastar) e assina o perfil.
 Ele guarda o thumbprint em `%LOCALAPPDATA%\linux-fullscreen\thumbprint.txt`,
-porque o `jogo-windows` **re-assina o perfil que gera** a cada partida — as
+porque o `abrir-windows` **re-assina o perfil que gera** a cada partida — as
 coordenadas do monitor mudam, e qualquer mudança invalida a assinatura.
 
 **Assinar não cala o aviso — troca ele por um que pode ser calado.** O vermelho
@@ -2150,7 +2355,7 @@ com a caixa **"Lembrar minhas opções de conexões remotas deste editor"**.
 Marcar essa caixa **funciona, e cola** — mas por *identidade de conexão*, não por
 publicador. A memória vive em `HKCU\Software\Microsoft\Terminal Server
 Client\LocalDevices`, com nome de GUID por identidade. Como neste setup existem
-**dois** perfis (o da Área de Trabalho e o gerado pelo `jogo-windows`), são
+**dois** perfis (o da Área de Trabalho e o gerado pelo `abrir-windows`), são
 **duas** marcações — uma em cada aviso, na ida e na volta. Depois disso silencia.
 
 Medido em 29/07/2026, e é o que garante que colar: **o `rdpsign` é
@@ -2213,6 +2418,56 @@ O outro pré-requisito é o **xrdp 0.10**: o redimensionamento da sessão viva
 para o xrdp da distribuição, como descreve "O caminho de volta", desliga este
 recurso junto.
 
+#### Mas o `Policy=Default` não protege contra o *sesman* reiniciar (02/08/2026)
+
+O que está escrito acima continua valendo, e é fácil ler mais do que ele diz. O
+`Policy=Default` preserva a sessão contra **o mstsc fechar**. Ele não preserva
+nada contra o **sesman reiniciar** — e é exatamente isso que o `install.sh` faz.
+
+A tabela de sessões do sesman vive na memória do processo. Reiniciar o serviço a
+apaga; os processos da sessão antiga, que não são filhos dele, continuam de pé.
+No reconnect o sesman até enxerga o X que sobrou, e mesmo assim abre outro:
+
+```
+[13:05:11] sesman_main_loop: sesman asked to terminate
+[13:05:12] starting xrdp-sesman with pid 225079
+[13:05:29] Found X server running at /tmp/.X11-unix/X10
+[13:05:30] Starting X server on display 11
+```
+
+Ele não está errado: sem a tabela, aquele `X10` é um servidor X qualquer, não uma
+sessão dele. O resultado é uma sessão **órfã** — viva, sem `sesexec` que a
+recolha (o único vivo era o do `:11`) e sem ninguém conectado. Medido no dia: a
+sessão de 01:49 ficou de pé até as 13:32 segurando **1,66 GB** (`used` caiu de
+3316 MB para 1655 MB ao encerrá-la). Numa VM de 7,9 GB com `available` em 4,6 GB,
+isso é a diferença entre caber e não caber.
+
+Nada avisa. A sessão nova sobe bonita, com o código recém-instalado, e a antiga
+só aparece se você for procurar — `ps -eo pid,lstart,cmd | grep Xorg` mostrando
+dois displays é o sintoma.
+
+**Como limpar, sem reiniciar nada:** derrube o `xfwm4` e o `Xorg` do display
+antigo e pare por aí. Os clientes X morrem sozinhos ao perder a conexão — foi o
+caso de xfsettingsd, barra, bancada, Brave, três terminais e o xclip, nenhum
+precisou de sinal. Só o `xrdp-chansrv` sobrou, porque não é cliente X nesse
+sentido:
+
+```bash
+ps -eo pid,lstart,cmd | grep -E 'Xorg :|xfwm4'   # achar o display velho
+kill -TERM <pid-do-xfwm4> <pid-do-Xorg>          # o resto cai junto
+kill -TERM <pid-do-xrdp-chansrv>                 # este precisa de empurrão
+```
+
+**O que sobrevive a isso** — e a razão de dar para limpar com um trabalho pesado
+rodando: processo já desligado da sessão não sente. Um `gmx mdrun` lançado por
+`conda run` estava com `PPID 1`, sessão própria (`SID` igual ao próprio PID) e
+`tty ?`; o watcher dele tinha sido `nohup` + `disown`. Os dois atravessaram a
+limpeza sem piscar — o `mdrun` seguiu a 407% de CPU e avançou 410 mil passos
+durante ela. Confira o trio `PPID`/`SID`/`tty` antes, com
+`ps -o pid,ppid,pgid,sid,tty,cmd -p <pid>`: é ele que diz se algo depende da
+sessão gráfica ou não. `DISPLAY` no ambiente **não** quer dizer dependência —
+o `mdrun` tinha `DISPLAY=:10` herdado e nunca abriu o display.
+
 ### Três coisas que enganam
 
 - **Os números não batem com as Configurações do Windows.** O `--listar` mostra
@@ -2238,18 +2493,45 @@ retoma o multimonitor.
 | `fix-x11-unix` | `/usr/local/bin/fix-x11-unix` |
 | `linux-desktop-up` | `/usr/local/bin/linux-desktop-up` |
 | `linux-desktop-down` | `/usr/local/bin/linux-desktop-down` |
-| `jogo-windows` | `/usr/local/bin/jogo-windows` |
+| `abrir-windows` | `/usr/local/bin/abrir-windows` |
 | `transferir-usb` | `/usr/local/bin/transferir-usb` |
 | `audio-dispositivos` | `/usr/local/bin/audio-dispositivos` |
+| `camera-rede` | `/usr/local/bin/camera-rede` |
+| `barra-apps` | `/usr/local/bin/barra-apps` |
 | `barra-tarefas.c` | **compilado** para `/usr/local/bin/barra-tarefas` |
+| `bancada.c` | **compilado** para `/usr/local/bin/bancada` |
+| `terminal.c` | **compilado** para `/usr/local/bin/terminal` |
+| `perfil.sh` | `/usr/local/share/linux-fullscreen/perfil.sh` (+ uma linha no `.bashrc`) |
+| `windows/audio-padrao.ps1` | `/usr/local/share/linux-fullscreen/audio-padrao.ps1` |
+| `xfwm-atalhos.sh` | `/usr/local/share/linux-fullscreen/xfwm-atalhos.sh` |
 | `desktop/*.desktop` | `/usr/share/applications/` (itens do appfinder) |
 | `x11-unix-writable.service` | `/etc/systemd/system/` |
+| `v4l2loopback.service` | `/etc/systemd/system/` |
 | `i3.config` | `~/.config/i3/config` (só serve se voltar ao i3) |
 
-A `barra-tarefas` é o **único item compilado**: o `install.sh` roda
-`gcc -O2 -Wall -o barra-tarefas barra-tarefas.c -lX11 -lXrandr` no passo 2 (por
-isso `gcc`, `libx11-dev`, `libxrandr-dev` e `xfonts-base` na lista de pacotes).
-O binário está no `.gitignore` — o que se versiona é o `.c`.
+São **três itens compilados**, todos no passo 2 e todos C com Xlib cru:
+
+```bash
+gcc -O2 -Wall -o barra-tarefas barra-tarefas.c -lX11 -lXrandr
+gcc -O2 -Wall -o bancada  bancada.c  $(pkg-config --cflags xft) -lX11 -lXft
+gcc -O2 -Wall -o terminal terminal.c $(pkg-config --cflags xft) -lX11 -lXft -lfontconfig
+```
+
+Daí `gcc`, `libx11-dev`, `libxrandr-dev`, `libxft-dev` e `xfonts-base` na lista
+de pacotes — o `-lfontconfig` do terminal não pede pacote novo, porque o
+`libxft-dev` já depende do `libfontconfig1-dev`.
+
+O que se versiona é o `.c`: binário é derivado e vai para o `.gitignore`.
+**`barra-tarefas` e `terminal` estão lá; o `bancada` não** — ele foi commitado
+junto com o `bancada.c` e continua rastreado, o que faz cada recompilação
+aparecer como alteração no `git status`. Acertar isso é um
+`git rm --cached bancada` mais a linha no `.gitignore`.
+
+Nenhum dos três é necessário para a sessão subir, então cada um falha sozinho e
+com aviso em vez de derrubar a instalação. Só a barra entra na sessão pelo
+`startwm.sh`; a bancada e o terminal são por demanda. O `terminal` é instalado
+por ser um programa que se abre, **não** porque algo passe a depender dele: a
+bancada continua usando o xterm na aba do Claude.
 
 Do lado Windows, `Linux Fullscreen.vbs` e `Linux Fullscreen.rdp` (de `windows/`)
 vão **juntos** para a Área de Trabalho: o `.vbs` é o que se clica, e o `.rdp` ao
@@ -2931,11 +3213,152 @@ lembrado e devolvido como estava.
 
 ### O que ela não tem, de propósito
 
-Sem realce de sintaxe, busca, seleção de mouse, área de transferência ou
-auto-completar. Para editar a sério, `nvim` e `vim` estão no disco. Isto é para
-abrir, olhar, corrigir uma linha e salvar. O desfazer agrupa a digitação: uma
-sequência de teclas é **um** passo, senão os 32 instantâneos não alcançariam nem
-uma frase.
+Sem realce de sintaxe, busca ou auto-completar. Para editar a sério, `nvim` e
+`vim` estão no disco. Isto é para abrir, olhar, corrigir uma linha e salvar. O
+desfazer agrupa a digitação: uma sequência de teclas é **um** passo, senão os 32
+instantâneos não alcançariam nem uma frase.
+
+> **"Seleção de mouse" e "área de transferência" estavam nesta lista até
+> 02/08/2026** — e saíram dela: hoje há seleção com mouse e teclado, copiar,
+> recortar, colar, selecionar tudo e mover linha. Ver *[Selecionar e copiar
+> (02/08/2026)](#selecionar-e-copiar-02082026)* e *[O resto do editor: colar,
+> recortar, mover (02/08/2026)](#o-resto-do-editor-colar-recortar-mover-02082026)*.
+
+### Selecionar e copiar (02/08/2026)
+
+O pedido veio assim: *"não consigo ver o que estou selecionando no bancada e dar
+Copiar"*. Não era regressão — a seleção nunca existiu, e a ausência estava
+escrita no cabeçalho do `bancada.c`. Passou a existir:
+
+| Gesto | O que faz |
+|---|---|
+| arrastar com o botão esquerdo | marca, com realce azul e texto branco |
+| duplo clique | a palavra sob o ponteiro |
+| triplo clique | a linha inteira, **com** o `\n` |
+| `Ctrl+C` | copia; **sem nada marcado, copia a linha do cursor** |
+| arrastar para fora da janela | rola enquanto marca |
+
+**No X não existe "área de transferência".** Existe um *dono vivo*: quem copiou
+fica com o texto e responde ao `SelectionRequest` de quem for colar. Por isso o
+texto copiado mora dentro do processo, e **fechar a bancada leva junto o que foi
+copiado** — igual a qualquer aplicativo X sem gerenciador de área de
+transferência. A bancada vira dona das **duas** seleções, porque elas são coisas
+diferentes e as duas são usadas aqui:
+
+- `PRIMARY` — a do X de sempre: marcou, já está lá; cola com o **botão do meio**;
+- `CLIPBOARD` — a do `Ctrl+C` / `Ctrl+V`, que é o que os aplicativos de hoje
+  esperam.
+
+Três decisões que não são óbvias:
+
+- **`Ctrl+C` não entra no `XGrabKey`.** Só o `Ctrl+Tab` é capturado por grab.
+  Com grab, o `Ctrl+C` deixaria de chegar ao Claude da aba 0 — onde ele é o
+  "interrompe isso" — e a bancada estaria roubando a tecla mais importante do
+  terminal. Sem grab, ele só chega quando a janela da bancada tem o foco.
+- **Digitar apaga a marca, não o texto.** Não há "digitar por cima da seleção":
+  o realce some e o caractere entra onde o cursor está. Num editor que existe
+  para corrigir *uma* linha, um apagar que ninguém pediu é pior do que um gesto
+  a menos.
+- **A seleção morre na troca de aba.** Ela vive nos globais do editor, como o
+  cursor; depois da troca esses globais apontam para o buffer de outro arquivo,
+  e um intervalo guardado não quer dizer nada lá. É o mesmo cuidado que já
+  governa o `globais_zerar()`.
+
+O `w_ed` passou a pedir `ButtonReleaseMask` e `Button1MotionMask` — e **continua
+sem `KeyPressMask`**, que é a invariante do acento morto do ABNT2.
+
+#### Medido com eventos sintéticos, e o que o teste ensinou
+
+Não há `xdotool` nesta máquina, então o teste é um cliente X de 130 linhas que
+manda `ButtonPress`/`MotionNotify`/`ButtonRelease` para o painel do editor e
+**pede a seleção de volta** — que é exatamente o que um "colar" de verdade faz.
+Resultados, com o arquivo `linha um com acentuacao: funcao / linha dois / linha
+tres`:
+
+| Gesto | O que voltou pela seleção |
+|---|---|
+| arraste de (0,0) a (1,10) | `ha um com acentuacao: funcao⏎linha dois` |
+| duplo clique na coluna 26 | `funcao` |
+| duplo clique na coluna 10 da linha 1 | `dois` |
+| triplo clique na linha 1 | `linha dois⏎` |
+| `Ctrl+C` depois do duplo clique | `funcao`, **no CLIPBOARD** |
+
+Duas armadilhas, e as duas eram do teste, não do editor:
+
+- **`CurrentTime` (0) nos eventos sintéticos quebra o duplo clique.** A bancada
+  separa clique de duplo por `time - t_clique < 400`; com tudo em zero, *todo*
+  clique parecia o segundo do anterior, e um arraste virava seleção de linha. O
+  teste passou a carregar um relógio próprio. Evento de verdade sempre traz o
+  relógio do servidor — o sintético tem de imitar.
+- **A sessão gravada guarda a rolagem**, e o teste começou com `topo=2` de uma
+  rodada anterior. As três primeiras medições disseram `linha tres` para tudo, e
+  pareciam bug de coordenada. Não eram: a tela estava rolada, e a instrumentação
+  (`fprintf` com `l`, `c` e `topo`) mostrou isso na primeira linha de log. Vale a
+  regra da casa — **meça o estado, não olhe a tela**.
+
+E uma confirmação que veio de graça: no meio do teste um arraste **de verdade**,
+com a mão, apareceu no log e devolveu `ha um com acentuacao: funcao⏎linha dois`.
+Evento sintético prova o caminho; o de verdade prova o gesto.
+
+### O resto do editor: colar, recortar, mover (02/08/2026)
+
+No mesmo dia, o pedido seguinte: *"temos que ter as funções de um editor de
+texto, copiar, colar, mover"*. O conjunto ficou assim:
+
+| Tecla | O que faz |
+|---|---|
+| `Ctrl+C` | copia (sem marca, a linha do cursor) |
+| `Ctrl+X` | recorta |
+| `Ctrl+V` | cola |
+| `Ctrl+A` | seleciona tudo |
+| `Shift`+setas/`Home`/`End` | estende a marca pelo teclado |
+| digitar sobre a marca | substitui |
+| `Backspace` / `Delete` sobre a marca | apaga o marcado |
+| `Alt+↑` / `Alt+↓` | move a linha do cursor |
+
+Quatro decisões que valem registro:
+
+**Colar são duas funções, e é o X que obriga.** `XConvertSelection()` não
+devolve texto nenhum — ele apenas avisa ao dono que alguém quer. O texto chega
+depois, num `SelectionNotify`, e é o laço de eventos que termina o serviço. Por
+isso `Ctrl+V` só dispara o pedido, e a inserção mora no laço.
+
+**Pede o `CLIPBOARD` e, se não houver dono, o `PRIMARY`.** Sem esse plano B,
+colar o que foi selecionado num xterm — que só povoa o `PRIMARY` — não
+funcionaria, e pareceria bug em vez de decisão.
+
+**O texto que chega passa por um filtro, e o `\r` é o motivo.** Texto vindo do
+Windows chega como `\r\n`, e o `inserir_texto()` trata os dois como quebra de
+linha: uma linha viraria duas. O `\r` sai na cola; quem decide se o arquivo
+grava `\r\n` é a flag `crlf`, na hora de salvar. Byte de controle abaixo de 32
+que não seja `\n` ou `\t` também sai — deixaria lixo invisível no meio do
+código. UTF-8 passa inteiro.
+
+**Apagar-e-escrever é UM passo do desfazer.** Colar ou digitar por cima de uma
+marca são duas operações no buffer, e um `Ctrl+Z` que desfizesse só metade
+seria pior do que não ter. O `apagar_selecao()` de propósito **não** guarda
+instantâneo — quem chama é que sabe se aquilo é um passo sozinho ou a primeira
+metade de um par.
+
+#### Medido, tudo por evento sintético
+
+Mesmo arnês da seleção, agora mandando teclas. Arquivo de partida: `linha um` /
+`linha dois` / `linha tres`. Cada gesto termina em `Ctrl+S`, e o teste lê o
+**arquivo em disco** — não o que a tela mostra:
+
+| Gesto | Resultado |
+|---|---|
+| `Shift+End`, `Ctrl+X` | linha 0 vazia; CLIPBOARD = `linha um` |
+| `Ctrl+V` com `AAA\r\nBBB` na área | virou `AAA` + `BBBlinha um` — **uma** quebra, não duas |
+| `Shift+End`, digitar `Z` | linha 0 virou `Z` |
+| `↓`, `Alt+↑` | `linha dois` e `linha um` trocaram de lugar |
+| `Ctrl+A` → PRIMARY | as três linhas, com os `\n` |
+| `Shift+→` ×5 → PRIMARY | `linha` |
+| marcar sem editar | arquivo intacto |
+| marcar, colar por cima, **um** `Ctrl+Z` | arquivo de volta ao original |
+
+O último é o que prova a decisão do desfazer: um único `Ctrl+Z` devolveu o
+texto apagado *e* removeu o colado.
 
 ## Abas, e o Claude como uma delas (01/08/2026)
 
@@ -3079,13 +3502,25 @@ ela, dentro da própria aba.
 
 A aba do Claude existe desde o início — ela é a aba `[0]`, não fecha e não tem
 arquivo. O **processo**, não: a bancada abre sem xterm nenhum. Quem levanta o
-Claude é o botão `[Claude]` da barra ou um clique no painel vazio da aba, que
-enquanto isso mostra o convite:
+Claude é o botão `[Claude]` da barra ou um clique no painel vazio da aba.
 
-```
-                     O Claude nao sobe sozinho.
-       Clique aqui, ou no botao Claude da barra, para abrir.
-```
+> **O convite escrito saiu em 02/08/2026.** Até então o painel vazio trazia duas
+> linhas centralizadas — *"O Claude nao sobe sozinho."* e *"Clique aqui, ou no
+> botao Claude da barra, para abrir."* — pelo argumento de que quem caísse na aba
+> pelo `Ctrl+Tab` não teria como adivinhar o clique. Removido a pedido de quem
+> usa: o argumento vale para quem chega de fora, e aqui não chega ninguém de
+> fora. As duas portas de entrada continuam as mesmas; o painel é só preto agora.
+>
+> Com isso o `w_term` **deixou de pedir `ExposureMask`** — não há mais nada nosso
+> para desenhar ali, e o preto vem do `background_pixel` da janela, que o próprio
+> servidor X repinta na área exposta sem passar pelo cliente. O `ButtonPressMask`
+> fica, que é o clique.
+>
+> **Não economizou memória, e foi medido para não ficar a suspeita.** Os dois
+> binários abertos no mesmo projeto, sem Claude: 1.929 kB de PSS antes, 1.934 kB
+> depois (`smaps_rollup`) — diferença dentro do ruído. Era esperado: sai texto
+> desenhado, não estrutura alocada. A mudança é de gosto visual, e o ganho é a
+> tela limpa.
 
 Antes ele subia junto com a janela. Abrir a bancada para olhar um arquivo
 custava os **490 MB** do Claude Code sem ninguém ter pedido — e numa premissa de
@@ -3094,19 +3529,21 @@ RAM baixa isso é o oposto do que se quer. Medido hoje, a bancada aberta com a
 2417 kB`).
 
 O que **não** levanta o Claude, de propósito: a abertura, a restauração da
-sessão, e o `Ctrl+Tab` que passa pela aba. Cair na aba pelo teclado mostra o
-convite — daí o convite existir, senão a aba seria um retângulo preto e mudo.
-Trocar de projeto pelo botão `[Projeto]` também não: se o Claude **já** estava
+sessão, e o `Ctrl+Tab` que passa pela aba — cair nela pelo teclado dá o painel
+preto, e só. Trocar de projeto pelo botão `[Projeto]` também não: se o Claude **já** estava
 de pé, ele reabre na pasta nova, como antes; se não estava, continua não
 estando, e a primeira abertura já nasce na pasta certa, que é a de agora.
 
 Quatro detalhes de X11 que isso exigiu:
 
-- o `w_term` passou a pedir `ExposureMask`. Enquanto não há xterm, aquele painel
-  é **nosso** e precisa saber quando repintar.
-- de brinde, o convite **volta sozinho** quando o Claude sai: destruir a janela
-  filha gera um Expose no pai, o `kill(pid, 0)` falha e o painel se redesenha.
-  Antes, sair do Claude deixava um retângulo preto até o próximo redesenho.
+- ~~o `w_term` passou a pedir `ExposureMask`. Enquanto não há xterm, aquele
+  painel é **nosso** e precisa saber quando repintar.~~ **Desfeito em
+  02/08/2026**, junto com o convite: sem nada nosso para desenhar ali, o
+  `background_pixel` da janela dá conta, e o repintar vira trabalho do servidor.
+- ~~de brinde, o convite **volta sozinho** quando o Claude sai: destruir a janela
+  filha gera um Expose no pai, o `kill(pid, 0)` falha e o painel se redesenha.~~
+  Sem convite, o que volta é o preto — e volta pelo mesmo caminho, só que sem
+  cliente nenhum envolvido.
 - sem processo não há xterm para receber foco, então o `mostrar_painel()` devolve
   o foco à janela-mãe — que é quem tem o XIC e o teclado. Sem isso a aba comeria
   as teclas sem ninguém para tratá-las.
@@ -3132,6 +3569,15 @@ quem só queria abrir um terminal. E não é `/etc/profile.d`: terminal interati
 
 Para ver as mensagens de erro dela, `command bancada` foge da função e roda o
 binário em primeiro plano.
+
+**Ela já vale em qualquer pasta, e isso foi conferido em 02/08/2026**: de
+`~/Documents`, `bancada .` devolveu o prompt e o processo nasceu com
+`/proc/<pid>/cwd -> /home/yosef/Documents`, ou seja, a árvore abriu no projeto
+certo. Se num terminal específico o comando não existir, o caso é sempre o
+mesmo e não é a instalação: **aquele shell é anterior ao `install.sh`**. O
+`.bashrc` é lido no arranque do shell, então terminal já aberto não enxerga a
+função — abra um novo (ou `. ~/.bashrc`). Vale em qualquer shell interativo
+desta sessão, incluindo o do `terminal.c`, que roda `$SHELL -i`.
 
 ### Binário e imagem: a bancada deixou de recusar (01/08/2026)
 
@@ -3243,22 +3689,30 @@ RDP sobrevive a fechar o mstsc: fechar a janela não pode custar o trabalho. O
 tmux guarda o ranger e o Claude vivos, e reabrir reconecta no ponto exato —
 testado fechando a janela e clicando de novo, mesma sessão, mesmos processos.
 
-### Armadilha: o Claude Code aqui vem dentro do VS Code
+### Armadilha: o Claude Code vinha dentro do VS Code — **resolvido em 02/08/2026**
+
+> **Esta seção descreve um estado que não vale mais.** Conferido em 02/08/2026:
+> `trabalho onde` responde `/home/yosef/.local/bin/claude`, um link para
+> `~/.local/share/claude/versions/2.1.220` (263 MB) — o CLI **está** instalado
+> sozinho agora. O `command -v claude` acha, então o bloco de busca na extensão
+> nem chega a rodar, e **desinstalar o VS Code não leva mais o Claude junto**.
+> Fica registrado porque o `onde_claude()` continua com o plano B da extensão,
+> que é o que salva numa máquina onde só ela exista.
 
 ```
 ~/.vscode/extensions/anthropic.claude-code-2.1.220-linux-x64/resources/
     native-binary/claude
 ```
 
-O CLI **não está instalado sozinho** nesta máquina. O binário roda perfeitamente
-fora do VS Code (`claude --version` responde `2.1.220`), mas:
+Era esse o único lugar do binário até então. Ele roda perfeitamente fora do VS
+Code (`claude --version` responde `2.1.220`), mas:
 
 - o caminho carrega a **versão**, então muda a cada atualização da extensão — por
   isso o `onde_claude()` procura e pega o maior por ordem de versão, em vez de
   chumbar;
-- **desinstalar o VS Code levaria o Claude junto.** Para se livrar mesmo dele,
-  instale antes o CLI pelo instalador oficial; aí `command -v claude` acha e o
-  bloco de busca nem roda.
+- **desinstalar o VS Code levaria o Claude junto.** Era a razão de instalar o CLI
+  pelo instalador oficial antes de mexer no VS Code — que é exatamente o que
+  aconteceu aqui, e o que desarmou a armadilha.
 
 E há a perda de integração, que é real: rodando como extensão do VS Code, o
 Claude enxerga a **seleção** do editor, mostra **diff** das edições e transforma
@@ -3550,6 +4004,161 @@ Lembre também que a WSL sobe vários serviços sem sentido numa VM — `bluetoo
 `cups`, `ModemManager`, `nvidia-suspend`, `tlp`, `thermald`, `cloud-init`.
 Somam pouco (~100 MB), mas atrasam o boot; `systemctl disable` neles é seguro.
 
+## Um emulador de terminal escrito aqui (01/08/2026)
+
+O `terminal.c` é um emulador de terminal completo em C + Xlib + Xft: 1.740
+linhas, do pty ao pixel. Ele **não substitui nada**. A aba 0 da bancada
+continua sendo o xterm com `-into`, que funciona e está resolvido; este é um
+binário à parte, que abre a própria janela e roda o próprio shell. Existe por
+gosto de ter o próprio.
+
+Isso não é detalhe de gosto, é o que define o tamanho do trabalho. Não havendo
+o compromisso de aguentar a TUI do Claude Code, o alvo passa a ser o que se
+usa num terminal — shell, `ls`, `git`, `vim`, `htop`, `less` — e o parser cabe
+num fim de semana em vez de num mês.
+
+### O custo, medido
+
+Os dois rodando `bash --norc -i` parado, numa janela 80×24, mesma fonte
+(DejaVu Sans Mono 10), medido em 01/08/2026:
+
+| | RSS | PSS | bibliotecas ligadas |
+|---|---|---|---|
+| `terminal` | 9,0 MB | **2,66 MB** | 20 |
+| `xterm` | 16,0 MB | 8,12 MB | 31 |
+
+Um terço do PSS do xterm. A diferença não é mérito de esperteza nenhuma: é o
+xterm carregando Xaw, Xmu, Xt e Xpm — um toolkit inteiro dos anos 90 — para
+desenhar retângulos e texto.
+
+O maior gasto do programa é o histórico de rolagem, e é por escolha: cada
+célula são 16 bytes, então as 1000 linhas padrão numa janela de 200 colunas
+custam 1000 × 200 × 16 = 3,2 MB, que ele só paga conforme rola. `-sl 0`
+desliga.
+
+A reserva de fonte cobra à parte e só quando aparece o caractere: uma tela com
+japonês subiu o PSS de 3,1 para 6,0 MB, porque a `NotoSansCJK-Regular.ttc`
+entrou no processo. Sessão que nunca vê CJK nunca paga.
+
+### O que o parser cobre
+
+Medido pelo despejo da grade (ver abaixo), não por olhar a tela: CUP/CUU/CUD/
+CUF/CUB/CHA/VPA, ED/EL, IL/DL, ICH/DCH/ECH, SU/SD, DECSTBM, IRM, DECAWM,
+DECCKM, tela alternativa (`?1049`, `?47`, `?1047`), colagem marcada (`?2004`),
+relato de mouse (`?1000/1002/1003` e SGR `?1006`), DSR, tabulações, ESC 7/8,
+IND/NEL/RI, RIS, OSC 0/2 para o título, SGR inteiro — inclusive `38;5;n` e
+`38;2;r;g;b` — e o conjunto gráfico DEC (`ESC ( 0`), sem o qual as molduras do
+ncurses saem como `lqqqk`.
+
+Rodando de verdade: `vim` com realce de sintaxe, `htop` com medidores e barra
+de teclas, `less`, `ls --color`. O acento morto do ABNT2 compõe (`´`+`a` → `á`,
+`~`+`a` → `ã`, `^`+`e` → `ê`), o que exige XIM com XIC e `XFilterEvent` antes
+de qualquer tratamento — testado injetando teclas reais pelo XTEST.
+
+### Três armadilhas que custaram tempo
+
+**A reserva de fonte não pode partir de uma fonte já aberta.** O jeito óbvio de
+achar uma fonte que tenha o caractere que falta é duplicar o pattern da fonte
+atual e acrescentar um `FC_CHARSET` com ele. Não funciona, e não avisa: o
+pattern de uma fonte **já aberta** é o *resolvido*, e traz `FC_FILE` e
+`FC_FONTVERSION` dentro. Os dois são critérios de prioridade **maior** que o
+charset dentro do fontconfig, então o `FcFontMatch` devolve a própria DejaVu
+por mais que se peça um charset que ela não tem. O sintoma é japonês e emoji
+saindo como caixa vazia *com as fontes Noto instaladas e funcionando* — o que
+manda investigar o sistema, que está certo. A correção é guardar o pedido
+**cru** (`FcNameParse("DejaVu Sans Mono:size=10")`) na abertura e partir dele.
+Feito isso, o fontconfig ainda escolhe sozinho a variante monoespaçada:
+`Noto Sans Mono CJK JP`.
+
+**`setsid()` antes do `TIOCSCTTY`, sempre.** Sem virar líder de sessão primeiro,
+o pty não vira o terminal de *controle* do filho. Tudo parece funcionar — o
+shell roda, o texto aparece — e só o `Ctrl+C` não faz nada, porque não há
+terminal de controle para gerar o SIGINT.
+
+**Encolher a janela é onde mora o `free` duplo.** A primeira versão liberava as
+linhas que sobravam depois de já ter movido o vetor de ponteiros, e liberava
+de novo o intervalo antigo. E enquanto o vim está na tela alternativa, a tela
+principal fica guardada **parada**: esquecer de reajustar a largura dela
+também faz o estouro aparecer só na hora de fechar o vim, longe da causa.
+As duas coisas foram achadas com `-fsanitize=address,undefined`, que passa
+limpo por 60 linhas de rolagem, região de rolagem, cinco redimensionamentos
+(inclusive 180×90 pixels) e entrada de teclado.
+
+### Medir sem acreditar em screenshot
+
+Um `SIGUSR1` despeja a grade inteira em texto — tamanho, cursor, tela ativa,
+região de rolagem, modos, o conteúdo linha a linha, os trechos de atributo com
+as cores em hexadecimal e o histórico:
+
+```bash
+TERMINAL_DESPEJO=/tmp/grade.txt ./terminal -e vim arquivo.c &
+kill -USR1 $!
+cat /tmp/grade.txt
+```
+
+Isso existe porque, como já está registrado neste README, `import -window` de
+uma janela coberta devolve os pixels de quem está por cima — e neste projeto
+já se perseguiu um bug que não existia por causa disso. O despejo é o estado
+real; o print serve só para o que ele não alcança, que é o desenho.
+
+### Compilar e usar
+
+```bash
+gcc -O2 -Wall -o terminal terminal.c -lX11 -lXft -lfontconfig $(pkg-config --cflags xft)
+./terminal                       # o $SHELL, 80x24
+./terminal -g 100x30 -fs 12      # geometria e corpo da fonte
+./terminal -sl 5000 -e htop      # historico maior, comando direto
+```
+
+`-fa` troca a fonte, `-T` o título. Dentro: `Ctrl+Shift+C` / `Ctrl+Shift+V`
+para a área de transferência (`Ctrl+C` continua sendo do programa que roda,
+como tem de ser), seleção com o botão esquerdo — duplo clique pega a palavra,
+triplo a linha —, botão do meio cola a seleção, roda do mouse e
+`Shift+PgUp/PgDn` rolam o histórico.
+
+### O que ele não tem, de propósito
+
+Abas e divisão de painel, que é o que o tmux já faz melhor; transparência, que
+pediria um compositor que esta sessão não tem; `utmp`, que traria a
+libutempter só para o `who` enxergar a janela; e **reflow** — mudar a largura
+recorta ou preenche as linhas, não as redobra. O xterm e o `st` também não
+redobram: para redobrar seria preciso saber onde cada linha lógica termina, e
+essa informação se perde no instante em que o texto entra pelo pty.
+
+### Ctrl+Alt+T abre este terminal — e a sessão nasce sem nenhum (02/08/2026)
+
+Duas mudanças que só fazem sentido juntas:
+
+- saiu o `xfce4-terminal &` do `startwm.sh`. A sessão passou a nascer **sem
+  janela nenhuma**: quem entra só para abrir a bancada, ou para jogar, não
+  ganha mais um terminal para fechar. São ~9 MB de RSS e uma janela a menos por
+  login;
+- `Ctrl+Alt+T` deixou de ser `exo-open --launch TerminalEmulator` e passou a
+  apontar direto para `/usr/local/bin/terminal` — o `terminal.c` deste
+  repositório. A tecla continua sendo do `xfsettingsd`, no *namespace*
+  `/commands`, então **não** há a migração de grab entre namespaces que já
+  matou o `Super+→` (ver "A regra que faltava").
+
+Com a sessão nascendo vazia, essa tecla virou o único caminho normal para um
+shell — o que muda o peso de ela falhar. Por isso o `xfwm-atalhos.sh` **testa o
+binário na hora de gravar** e cai no `exo-open` se ele não existir, em vez de
+gravar um `sh -c "if [ -x ... ]"` como valor do atalho. O motivo é o executor:
+o `xfsettingsd` passa a string pelo `g_shell_parse_argv` antes de rodar, então
+aspas dentro do valor são mais uma camada de citação para errar — e o sintoma
+de erro é a tecla **não fazer nada, calada**. Valor sem aspa nenhuma não tem
+como quebrar. Se o binário aparecer depois, o `startwm.sh` roda o script a cada
+login e a tecla se corrige sozinha.
+
+O helper do exo (`~/.config/xfce4/helpers.rc`) continua apontando para o
+`xfce4-terminal` de propósito: ele é quem atende o appfinder e qualquer app que
+peça "abrir um terminal", e o exo só aceita helper **registrado** (um `.desktop`
+em `share/xfce4/helpers`, com `X-XFCE-Binaries`). Registrar o `terminal.c` ali
+seria mais um arquivo para manter por um caminho que quase não se usa aqui.
+
+Nada disso muda a aba 0 da bancada, que segue no xterm com `-into` — a
+invariante continua de pé. O `terminal.c` virou o terminal **da sessão**, não o
+terminal **da bancada**.
+
 ## O grafo do projeto (graphify, 31/07/2026)
 
 O código tem um grafo de conhecimento gerado pelo
@@ -3639,15 +4248,16 @@ O mesmo vale para o som: o `instalar-som.sh` refaz tudo — inclusive as máscar
 do PipeWire em `~/.config/systemd/user/`, que também não estão aqui.
 
 E há `~/.config/linux-fullscreen/`. Só parte importa: o `monitores.conf` é
-descartável (o `jogo-windows` repergunta uma vez por ambiente e refaz), e o
+descartável (o `abrir-windows` repergunta uma vez por ambiente e refaz), e o
 `dispositivos.conf` só existe se você tiver sobrescrito os VID:PID do
-`transferir-usb` — sem ele valem os padrões do script. O `pasta-jogos.cache` é
-puro cache (se apagar, o próximo `--listar-jogos` o refaz em meio segundo).
+`transferir-usb` — sem ele valem os padrões do script. O `pasta-coisas.cache` é
+puro cache (se apagar, o próximo `--listar-coisas` o refaz em cerca de um
+segundo).
 
-Desde 31/07/2026 o **`jogos.conf` deixou de ser insubstituível**: a lista de
-jogos mora na pasta `Jogos` da área de trabalho do Windows, que já vai junto no
-backup do Windows. Só copie o `jogos.conf` se você tiver linhas curadas à mão
-que não viraram atalho.
+Desde 31/07/2026 o **`jogos.conf` deixou de ser insubstituível**: a lista mora na
+pasta `Coisas` da área de trabalho do Windows, que já vai junto no backup do
+Windows. Só copie o `jogos.conf` se você tiver linhas curadas à mão que não
+viraram atalho.
 
 Do lado Windows, o `usbipd bind` é persistente e **se perde na formatação**:
 numa máquina nova é preciso reinstalar o `usbipd-win` e refazer os `bind` (veja

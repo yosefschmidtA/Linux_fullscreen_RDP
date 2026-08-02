@@ -22,7 +22,9 @@
 set -u
 
 PS_EXE="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-PS1_FONTE="$HOME/linux-fullscreen/windows/audio-padrao.ps1"
+# Instalado fora do repositorio pelo install.sh; ver a nota no transferir-usb.
+PS1_FONTE=/usr/local/share/linux-fullscreen/audio-padrao.ps1
+[ -r "$PS1_FONTE" ] || PS1_FONTE="$HOME/linux-fullscreen/windows/audio-padrao.ps1"
 
 msg() { echo "$*" >&2; }
 

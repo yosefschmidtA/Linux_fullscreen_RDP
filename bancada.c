@@ -47,9 +47,10 @@
  *
  * A aba existe desde o inicio, mas o PROCESSO nao: a bancada sobe sem xterm e
  * sem Claude nenhum. Quem o levanta e o botao "Claude" da barra, ou um clique
- * no painel vazio da aba - que enquanto isso mostra o convite para faze-lo. A
- * bancada abre em segundos e sem os 490 MB do Claude para quem so ia olhar um
- * arquivo; e quando ele nasce, nasce no projeto que estiver aberto na hora.
+ * no painel vazio da aba - que ate 02/08/2026 anunciava isso por escrito e
+ * hoje e so preto, a pedido de quem usa. A bancada abre em segundos e sem os
+ * 490 MB do Claude para quem so ia olhar um arquivo; e quando ele nasce, nasce
+ * no projeto que estiver aberto na hora.
  *
  * Uma aba guarda o ESTADO INTEIRO de um arquivo (buffer, cursor, rolagem,
  * desfazer). O editor todo continua mexendo nos mesmos globais de sempre - a
@@ -68,11 +69,24 @@
  *
  * O QUE ESTE EDITOR NAO TEM, DE PROPOSITO
  *
- * Sem realce de sintaxe, sem busca, sem selecao de mouse, sem area de
- * transferencia, sem auto-completar. Para editar a serio, nvim e vim estao no
- * disco. Isto aqui e para abrir, olhar, corrigir uma linha e salvar.
+ * Sem realce de sintaxe, sem busca, sem auto-completar. Para editar a serio,
+ * nvim e vim estao no disco. Isto aqui e para abrir, olhar, corrigir uma linha
+ * e salvar.
  * O que ele TEM de ter, e tem: UTF-8 correto, acento morto do teclado ABNT2,
  * desfazer, e aviso antes de perder alteracao.
+ *
+ * "Sem selecao de mouse, sem area de transferencia" estava nesta lista ate
+ * 02/08/2026, e saiu dela. Hoje ele tem o que se espera de um editor:
+ *
+ *   mouse ....... arrastar marca, duplo clique pega a palavra, triplo a linha
+ *   teclado ..... Shift+setas/Home/End estende a marca, Ctrl+A pega tudo
+ *   Ctrl+C ...... copia (sem nada marcado, copia a linha do cursor)
+ *   Ctrl+X ...... recorta
+ *   Ctrl+V ...... cola do CLIPBOARD e, se nao houver dono, do PRIMARY
+ *   digitar ..... sobre a marca, substitui; Backspace/Delete apagam a marca
+ *   Alt+Cima/Baixo  move a linha do cursor
+ *
+ * Ver os blocos "Selecao de texto e area de transferencia" e "Colar".
  *
  * O QUE NAO E TEXTO: HEX E IMAGEM
  *
@@ -140,12 +154,14 @@ static Window    raiz, win, w_arv, w_ed, w_term;
 static GC        gc;
 static XftFont  *fonte;
 static XftDraw  *dr_barra, *dr_arv, *dr_ed, *dr_term;
-static XftColor  c_ink, c_fraco, c_sel, c_aberto, c_dica;
+static XftColor  c_ink, c_fraco, c_sel, c_aberto;
 static XIM       xim;
 static XIC       xic;
 static Atom      A_DELETE;
+static Atom      A_AREA, A_UTF8, A_ALVOS, A_TEXTO;   /* selecao/area de transf. */
+static Atom      A_COLA;                             /* onde a cola aterrissa */
 
-static unsigned long FACE, FACE_ESC, HI, SH, INK, PAPEL;
+static unsigned long FACE, FACE_ESC, HI, SH, INK, PAPEL, SEL_FUNDO;
 
 static int larg = 1100, alt = 700;   /* tamanho da janela */
 static int avanco, altura_lin, base_lin;   /* metrica da fonte monoespacada */
@@ -539,7 +555,7 @@ static int linhas_hex(void)
 }
 
 /* zenity, como no resto do projeto: e a escada de dialogo ja usada pelo
- * jogo-windows e pelo barra-apps, e escrever um seletor de arquivos em Xlib
+ * abrir-windows e pelo barra-apps, e escrever um seletor de arquivos em Xlib
  * seria mais codigo do que o editor inteiro.
  *
  * O texto vai pelo AMBIENTE, nao interpolado no comando: assim um caminho com
@@ -1056,6 +1072,296 @@ static void desenhar_arvore(void)
     }
 }
 
+/* =========================================================================
+ * Selecao de texto e area de transferencia
+ *
+ * Ate 02/08/2026 este editor nao tinha nem uma coisa nem outra, e o cabecalho
+ * dizia isso com todas as letras. Passou a ter a pedido de quem usa - "nao
+ * consigo ver o que estou selecionando e dar copiar". O resto da lista de
+ * ausencias continua valendo: sem realce de sintaxe, sem busca, sem completar.
+ *
+ * A selecao mora nos globais do editor, como o cursor - e por isso e APAGADA em
+ * toda troca de aba. Depois de trocar, os globais apontam para o buffer de outra
+ * aba, e um intervalo guardado do arquivo anterior nao quer dizer nada no novo.
+ * E o mesmo cuidado que ja governa o `globais_zerar()`.
+ *
+ * NAO EXISTE "area de transferencia" no X. O que existe e um DONO vivo: quem
+ * copiou fica com o texto e responde ao SelectionRequest de quem colar. Por isso
+ * o texto copiado tem de ficar guardado aqui, e por isso fechar a bancada leva o
+ * que foi copiado junto - igual a qualquer app X sem gerenciador de area de
+ * transferencia. Sao duas selecoes, e viramos donos das duas:
+ *
+ *   PRIMARY    a do X de sempre: marcou, ja esta la; cola com o botao do meio.
+ *   CLIPBOARD  a do Ctrl+C / Ctrl+V, que e o que os apps de hoje esperam.
+ * ========================================================================= */
+static int   sel_on;                 /* ha intervalo marcado */
+static int   sel_la, sel_ca;         /* ancora: onde o arraste comecou */
+static int   sel_lb, sel_cb;         /* ponta: onde o mouse esta agora */
+static int   arrastando;
+static char *txt_pri, *txt_cli;      /* o texto que servimos em cada selecao */
+static Time  t_clique;               /* para separar clique de duplo e triplo */
+static int   l_clique, n_cliques;
+
+static void sel_limpar(void) { sel_on = 0; arrastando = 0; }
+
+/* A ancora pode estar DEPOIS da ponta (arraste para tras), entao ninguem le
+ * sel_la/sel_lb direto: esta funcao devolve o par em ordem de leitura e ja preso
+ * aos limites do buffer de AGORA. O preso nao e zelo excessivo - desfazer encurta
+ * linhas debaixo de um intervalo ja marcado, e a alternativa e ler fora do
+ * malloc. Devolve 0 quando nao ha nada selecionado de verdade. */
+static int sel_ordem(int *la, int *ca, int *lb, int *cb)
+{
+    int n;
+
+    if (!sel_on || carregada < 0 || modo != MODO_TEXTO || n_linhas == 0) return 0;
+
+    if (sel_la < sel_lb || (sel_la == sel_lb && sel_ca <= sel_cb)) {
+        *la = sel_la; *ca = sel_ca; *lb = sel_lb; *cb = sel_cb;
+    } else {
+        *la = sel_lb; *ca = sel_cb; *lb = sel_la; *cb = sel_ca;
+    }
+    if (*la < 0) { *la = 0; *ca = 0; }
+    if (*lb >= n_linhas) { *lb = n_linhas - 1; *cb = (int) strlen(linhas[*lb]); }
+    if (*la > *lb) return 0;
+    n = (int) strlen(linhas[*la]); if (*ca > n) *ca = n;
+    n = (int) strlen(linhas[*lb]); if (*cb > n) *cb = n;
+    return !(*la == *lb && *ca == *cb);
+}
+
+/* O texto do intervalo, com \n entre as linhas. Devolve malloc ou NULL. */
+static char *sel_texto(void)
+{
+    int la, ca, lb, cb, l;
+    size_t n = 0;
+    char *r, *p;
+
+    if (!sel_ordem(&la, &ca, &lb, &cb)) return NULL;
+
+    for (l = la; l <= lb; l++) {
+        int i0 = (l == la) ? ca : 0;
+        int i1 = (l == lb) ? cb : (int) strlen(linhas[l]);
+        n += (size_t) (i1 - i0) + (l < lb ? 1u : 0u);
+    }
+    r = malloc(n + 1);
+    if (!r) return NULL;
+    p = r;
+    for (l = la; l <= lb; l++) {
+        int i0 = (l == la) ? ca : 0;
+        int i1 = (l == lb) ? cb : (int) strlen(linhas[l]);
+        memcpy(p, linhas[l] + i0, (size_t) (i1 - i0));
+        p += i1 - i0;
+        if (l < lb) *p++ = '\n';
+    }
+    *p = '\0';
+    return r;
+}
+
+/* Tira o intervalo marcado do buffer e deixa o cursor onde ele comecava.
+ *
+ * NAO guarda instantaneo de desfazer, de proposito: quem chama e que sabe se
+ * isto e um passo sozinho (Delete) ou a primeira metade de um par (recortar,
+ * digitar por cima). Guardar aqui faria o Ctrl+Z andar meio passo de cada vez.
+ *
+ * A conta e uma so: a linha que sobra e o COMECO da primeira linha marcada
+ * colado com o FIM da ultima. Tudo entre as duas some. Vale para marca dentro
+ * de uma linha e para marca de vinte linhas - o caso de uma linha e o mesmo com
+ * la == lb. */
+static int apagar_selecao(void)
+{
+    int la, ca, lb, cb, l;
+    char *nova;
+    size_t n1, n2;
+
+    if (!sel_ordem(&la, &ca, &lb, &cb)) return 0;
+
+    n1 = (size_t) ca;                              /* comeco da primeira */
+    n2 = strlen(linhas[lb]) - (size_t) cb;         /* fim da ultima */
+    nova = malloc(n1 + n2 + 1);
+    if (!nova) return 0;
+    memcpy(nova, linhas[la], n1);
+    memcpy(nova + n1, linhas[lb] + cb, n2 + 1);    /* leva o \0 junto */
+
+    for (l = lb; l > la; l--) remover_linha(l);    /* de tras para frente */
+    free(linhas[la]);
+    linhas[la] = nova;
+
+    cur_l = la; cur_c = ca;
+    sel_limpar();
+    sujo = 1;
+    return 1;
+}
+
+/* Ctrl+A. */
+static void sel_tudo(void)
+{
+    if (carregada < 0 || modo != MODO_TEXTO || n_linhas == 0) return;
+    sel_la = 0; sel_ca = 0;
+    sel_lb = n_linhas - 1;
+    sel_cb = (int) strlen(linhas[sel_lb]);
+    sel_on = !(sel_la == sel_lb && sel_ca == sel_cb);
+}
+
+/* Vira dono de uma selecao. CONSOME o texto: quem chama entrega e esquece. */
+static void virar_dono(Atom qual, char *texto)
+{
+    char **guardado = (qual == A_AREA) ? &txt_cli : &txt_pri;
+
+    if (!texto) return;
+    free(*guardado);
+    *guardado = texto;
+    XSetSelectionOwner(dpy, qual, win, CurrentTime);
+}
+
+/* Ctrl+C. Sem intervalo marcado, copia a LINHA do cursor inteira, com o \n - e
+ * o gesto mais comum aqui (pegar uma linha para levar embora) e o que o VS Code
+ * tambem faz. Vai para as DUAS selecoes: o Ctrl+V de outro app le CLIPBOARD, o
+ * botao do meio le PRIMARY. */
+static void copiar(void)
+{
+    char *t = sel_texto();
+
+    if (!t) {
+        size_t n;
+        if (carregada < 0 || modo != MODO_TEXTO || n_linhas == 0) return;
+        n = strlen(linhas[cur_l]);
+        t = malloc(n + 2);
+        if (!t) return;
+        memcpy(t, linhas[cur_l], n);
+        t[n] = '\n';
+        t[n + 1] = '\0';
+    }
+    virar_dono(A_AREA, t);
+    virar_dono(XA_PRIMARY, strdup(t));   /* cada selecao guarda a SUA copia */
+}
+
+/* Alguem esta colando o que copiamos aqui. */
+static void responder_selecao(XSelectionRequestEvent *r)
+{
+    XSelectionEvent aviso;
+    const char *t = (r->selection == A_AREA) ? txt_cli : txt_pri;
+
+    memset(&aviso, 0, sizeof aviso);
+    aviso.type      = SelectionNotify;
+    aviso.display   = r->display;
+    aviso.requestor = r->requestor;
+    aviso.selection = r->selection;
+    aviso.target    = r->target;
+    aviso.time      = r->time;
+    aviso.property  = None;               /* None = recusado, e o padrao */
+
+    if (t && r->property != None) {
+        if (r->target == A_ALVOS) {
+            Atom lista[] = { A_ALVOS, A_UTF8, XA_STRING, A_TEXTO };
+            XChangeProperty(dpy, r->requestor, r->property, XA_ATOM, 32,
+                            PropModeReplace, (unsigned char *) lista,
+                            (int) (sizeof lista / sizeof lista[0]));
+            aviso.property = r->property;
+        } else if (r->target == A_UTF8 || r->target == XA_STRING ||
+                   r->target == A_TEXTO) {
+            /* STRING e, pela ICCCM, latin-1 - e mesmo assim devolvemos UTF-8,
+             * porque e o que todo mundo faz e o que todo mundo espera. Quem se
+             * importa pede UTF8_STRING, que e o caminho certo e o primeiro da
+             * lista de alvos acima. */
+            XChangeProperty(dpy, r->requestor, r->property, r->target, 8,
+                            PropModeReplace, (const unsigned char *) t,
+                            (int) strlen(t));
+            aviso.property = r->property;
+        }
+    }
+    XSendEvent(dpy, r->requestor, False, 0, (XEvent *) &aviso);
+}
+
+/* Onde um clique caiu, em linha e byte. O byte vem do byte_da_coluna(), que e
+ * quem sabe de UTF-8: clicar no meio de um "a" com acento nao pode devolver o
+ * segundo byte dele. */
+static void pos_do_clique(int px, int py, int *l, int *c)
+{
+    int ln = (py < MARGEM) ? topo : topo + (py - MARGEM) / altura_lin;
+    int cl = col0 + (px - MARGEM) / avanco;
+
+    if (ln < 0) ln = 0;
+    if (ln >= n_linhas) ln = n_linhas - 1;
+    if (cl < 0) cl = 0;
+    *l = ln;
+    *c = byte_da_coluna(linhas[ln], cl);
+}
+
+/* Byte >= 0x80 conta como letra: assim o duplo clique pega "funcao" inteiro, e
+ * nao "fun" + "cao". Nada de <ctype.h> aqui - isalnum() depende do locale, e
+ * este teste nao pode mudar de comportamento com a variavel de ambiente. */
+static int e_palavra(unsigned char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z') || c == '_' || c >= 0x80;
+}
+
+/* Duplo clique: a palavra sob o ponteiro. */
+static void sel_palavra(int l, int c)
+{
+    const char *s = linhas[l];
+    int n = (int) strlen(s), i = c, f = c;
+
+    if (n == 0) return;
+    if (i >= n) i = f = n - 1;
+    if (!e_palavra((unsigned char) s[i])) return;    /* clicou no espaco: nada */
+    while (i > 0 && e_palavra((unsigned char) s[i - 1])) i--;
+    while (f < n && e_palavra((unsigned char) s[f]))   f++;
+    sel_la = sel_lb = l;
+    sel_ca = i; sel_cb = f;
+    sel_on = 1;
+}
+
+/* Triplo clique: a linha inteira, com o \n - por isso a ponta cai na coluna 0
+ * da linha seguinte, quando ela existe. */
+static void sel_linha(int l)
+{
+    sel_la = l; sel_ca = 0;
+    if (l + 1 < n_linhas) { sel_lb = l + 1; sel_cb = 0; }
+    else                  { sel_lb = l; sel_cb = (int) strlen(linhas[l]); }
+    sel_on = 1;
+}
+
+/* O realce, desenhado DEPOIS do texto: preenche o retangulo por cima do preto e
+ * redesenha so o trecho selecionado em branco. Sai mais barato do que quebrar o
+ * laco de baixo em tres pedacos por linha, e o cursor, que vem depois, continua
+ * aparecendo por cima de tudo. */
+static void desenhar_selecao(void)
+{
+    int la, ca, lb, cb, i;
+    int vis = (cont_h() - 2 * MARGEM) / altura_lin;
+
+    if (!sel_ordem(&la, &ca, &lb, &cb)) return;
+
+    for (i = 0; i < vis && topo + i < n_linhas; i++) {
+        int l = topo + i, corte, b0, b1, x0, x1, y;
+        char *s, guardado;
+
+        if (l < la || l > lb) continue;
+        s     = linhas[l];
+        corte = byte_da_coluna(s, col0);          /* primeiro byte visivel */
+        b0    = (l == la) ? ca : 0;
+        b1    = (l == lb) ? cb : (int) strlen(s);
+        if (b0 < corte) b0 = corte;               /* rolado para fora, a esquerda */
+        if (b1 < b0) continue;
+
+        x0 = MARGEM + (colunas_ate(s, b0) - col0) * avanco;
+        x1 = MARGEM + (colunas_ate(s, b1) - col0) * avanco;
+        /* meia coluna a mais quando a selecao segue para a linha de baixo: e
+         * assim que se ve que o \n entrou junto */
+        if (l < lb) x1 += avanco / 2;
+        y = MARGEM + i * altura_lin;
+
+        XSetForeground(dpy, gc, SEL_FUNDO);
+        XFillRectangle(dpy, w_ed, gc, x0, y,
+                       (unsigned) (x1 - x0 > 0 ? x1 - x0 : 1), (unsigned) altura_lin);
+
+        guardado = s[b1];                          /* corta, desenha, devolve */
+        s[b1] = '\0';
+        texto(dr_ed, x0, y + base_lin, s + b0, &c_sel);
+        s[b1] = guardado;
+    }
+}
+
 static void desenhar_editor(void)
 {
     int w = cont_w(), h = cont_h();
@@ -1070,6 +1376,8 @@ static void desenhar_editor(void)
         int y = MARGEM + i * altura_lin + base_lin;
         texto(dr_ed, MARGEM, y, s + corte, &c_ink);
     }
+
+    desenhar_selecao();
 
     /* cursor: barra vertical de 2px, sem piscar (piscar exigiria acordar o
      * processo duas vezes por segundo so para isso) */
@@ -1275,30 +1583,19 @@ static void desenhar_imagem(void)
           h - MARGEM - altura_lin + base_lin, legenda, &c_fraco);
 }
 
-/* O painel da aba do Claude ENQUANTO ele nao subiu. Sem isto a aba seria um
- * retangulo preto e mudo, e quem chegasse nela pelo Ctrl+Tab nao teria como
- * saber que basta um clique. Some assim que o xterm nasce: ele cobre a janela
- * inteira, e nao ha Expose por baixo de janela filha. */
-static void desenhar_convite(void)
-{
-    static const char *linhas_c[] = {
-        "O Claude nao sobe sozinho.",
-        "Clique aqui, ou no botao Claude da barra, para abrir."
-    };
-    int w = cont_w(), h = cont_h();
-    int y = h / 2 - altura_lin, i;
-
-    XSetForeground(dpy, gc, INK);
-    XFillRectangle(dpy, w_term, gc, 0, 0, (unsigned) w, (unsigned) h);
-
-    for (i = 0; i < 2; i++) {
-        const char *s = linhas_c[i];
-        int lw = colunas_ate(s, (int) strlen(s)) * avanco;
-        int x = (w - lw) / 2;
-        if (x < MARGEM) x = MARGEM;
-        texto(dr_term, x, y + i * altura_lin + base_lin, s, i ? &c_dica : &c_sel);
-    }
-}
+/* O painel da aba do Claude, enquanto ele nao subiu, e um retangulo preto e
+ * mudo — e isso e o pedido, nao um esquecimento.
+ *
+ * Ate 02/08/2026 ele trazia um convite em duas linhas ("O Claude nao sobe
+ * sozinho." / "Clique aqui, ou no botao Claude da barra, para abrir."), pela
+ * razao de que quem caisse na aba pelo Ctrl+Tab nao teria como adivinhar o
+ * clique. Saiu a pedido de quem usa: quem mora aqui ja sabe, e a frase so
+ * ocupava a tela. As duas portas de entrada continuam iguais — o botao
+ * [Claude] da barra e o clique no painel.
+ *
+ * Nada nosso desenha mais nesta janela, e por isso o w_term deixou de pedir
+ * ExposureMask: o preto vem do background_pixel dela, que o proprio servidor X
+ * repinta na area exposta, sem cliente nenhum no caminho. */
 
 static void desenhar(void)
 {
@@ -1309,7 +1606,6 @@ static void desenhar(void)
     /* Na aba do Claude quem desenha o painel e o xterm, e o w_ed nem esta
      * mapeado. Sem esta guarda, a aba do Claude sem arquivo nenhum carregado
      * cairia num linhas[cur_l] com linhas == NULL. */
-    if (abas[atual].claude && !claude_vivo()) desenhar_convite();
     if (!abas[atual].claude && carregada >= 0) {
         if (modo == MODO_HEX)      desenhar_hex();
         else if (modo == MODO_IMG) desenhar_imagem();
@@ -1413,6 +1709,88 @@ static void apagar_frente(void)
         remover_linha(cur_l + 1);
     } else return;
     sujo = 1;
+}
+
+/* Alt+Cima / Alt+Baixo: leva a linha do cursor uma casa para cima ou para
+ * baixo. Nao ha texto novo nem apagado - so duas linhas trocando de lugar -,
+ * entao o buffer se resolve com uma troca de ponteiros. */
+static void mover_linha(int d)
+{
+    int destino = cur_l + d;
+    char *tmp;
+
+    if (carregada < 0 || modo != MODO_TEXTO) return;
+    if (destino < 0 || destino >= n_linhas) return;
+
+    guardar_instante();
+    grupo = G_NENHUM;
+    tmp = linhas[cur_l];
+    linhas[cur_l] = linhas[destino];
+    linhas[destino] = tmp;
+    cur_l = destino;
+    if (cur_c > (int) strlen(linhas[cur_l])) cur_c = (int) strlen(linhas[cur_l]);
+    sel_limpar();
+    sujo = 1;
+}
+
+/* =========================================================================
+ * Colar
+ *
+ * Pedir uma selecao no X e ASSINCRONO, e essa e a unica coisa dificil aqui:
+ * o XConvertSelection() nao devolve texto nenhum, so avisa ao dono que alguem
+ * quer. O texto chega depois, num SelectionNotify, e e o laco de eventos que
+ * termina o servico. Por isso colar sao duas funcoes e nao uma.
+ *
+ * Pede-se primeiro o CLIPBOARD (o Ctrl+C dos aplicativos de hoje) e, se nao
+ * houver dono, o PRIMARY (o "marcou, ja esta la" do X de sempre). Assim tanto
+ * faz de onde veio o texto: do Ctrl+C de um navegador ou de um arraste no
+ * xterm. Sem esse plano B, colar do terminal - que so povoa o PRIMARY - nao
+ * funcionaria e pareceria bug.
+ * ========================================================================= */
+static void pedir_cola(Atom de)
+{
+    if (carregada < 0 || modo != MODO_TEXTO) return;
+    XConvertSelection(dpy, de, A_UTF8, A_COLA, win, CurrentTime);
+}
+
+/* O texto chegou. Ele vem do mundo la fora, entao passa por um filtro antes de
+ * entrar no arquivo:
+ *
+ *   \r sai   - texto do Windows vem com \r\n, e o inserir_texto() trata os dois
+ *              como quebra de linha: uma linha viraria duas. Quem decide se o
+ *              arquivo grava \r\n e a flag "crlf", na hora de salvar, nao a cola.
+ *   controle sai - byte abaixo de 32 que nao seja \n ou \t nao tem como ser
+ *              visto nem salvo de forma util; deixaria lixo invisivel no meio
+ *              do codigo.
+ *
+ * O UTF-8 passa inteiro: byte >= 0x80 nao e tocado. */
+static void receber_cola(const unsigned char *bruto_t, size_t n)
+{
+    char *limpo;
+    size_t i, j = 0;
+
+    if (n == 0 || carregada < 0 || modo != MODO_TEXTO) return;
+    limpo = malloc(n + 1);
+    if (!limpo) return;
+
+    for (i = 0; i < n; i++) {
+        unsigned char c = bruto_t[i];
+        if (c == '\r') continue;
+        if (c < 32 && c != '\n' && c != '\t') continue;
+        limpo[j++] = (char) c;
+    }
+    limpo[j] = '\0';
+
+    if (j > 0) {
+        /* UM instantaneo para o par apagar+inserir: colar por cima de uma marca
+         * tem de voltar de uma vez so no Ctrl+Z. */
+        talvez_guardar(G_NENHUM);
+        if (sel_on) apagar_selecao();
+        inserir_texto(limpo, (int) j);
+        grupo = G_NENHUM;
+        seguir_cursor();
+    }
+    free(limpo);
 }
 
 /* =========================================================================
@@ -1539,6 +1917,9 @@ static void ativar(int i)
     if (i < 0 || i >= n_abas) return;
 
     sincronizar();
+    /* A selecao vive nos globais e vale para o buffer que estava neles - depois
+     * da troca ela apontaria para dentro do texto de outro arquivo. */
+    sel_limpar();
     if (!abas[i].claude) { aba_para_globais(&abas[i]); carregada = i; }
     atual = i;
     mostrar_painel();
@@ -1667,6 +2048,7 @@ static void tecla(XKeyEvent *ev)
     Status st;
     int n = 0;
     int ctrl = (ev->state & ControlMask) != 0;
+    int estendendo = 0;             /* Shift+movimento: a marca acompanha */
 
     if (xic) n = Xutf8LookupString(xic, ev, buf, sizeof buf - 1, &ks, &st);
     else     n = XLookupString(ev, buf, sizeof buf - 1, &ks, NULL);
@@ -1690,7 +2072,28 @@ static void tecla(XKeyEvent *ev)
     if (ctrl) {
         switch (ks) {
         case XK_s: case XK_S: salvar(); desenhar(); return;
-        case XK_z: case XK_Z: grupo = G_NENHUM; desfazer(); seguir_cursor(); desenhar(); return;
+        /* Ctrl+C NAO passa por XGrabKey de proposito: com grab, ele deixaria de
+         * chegar ao Claude da aba 0 - onde e o "interrompe isso" - e a bancada
+         * ficaria roubando a tecla mais importante do terminal. Sem grab, ele so
+         * chega quando a janela da bancada tem o foco, que e quando faz sentido. */
+        case XK_c: case XK_C: copiar(); return;
+        case XK_v: case XK_V: pedir_cola(A_AREA); return;   /* o resto e no laco */
+        case XK_x: case XK_X:
+            if (carregada < 0 || modo != MODO_TEXTO) return;
+            copiar();                       /* sem marca, copia a linha... */
+            if (sel_on) {                   /* ...e ai nao ha o que recortar */
+                talvez_guardar(G_NENHUM);
+                apagar_selecao();
+                seguir_cursor();
+            }
+            desenhar();
+            return;
+        case XK_a: case XK_A:
+            sel_tudo();
+            if (sel_on) virar_dono(XA_PRIMARY, sel_texto());
+            desenhar();
+            return;
+        case XK_z: case XK_Z: grupo = G_NENHUM; desfazer(); sel_limpar(); seguir_cursor(); desenhar(); return;
         case XK_q: case XK_Q:
             if (!algum_sujo() || perguntar("Ha alteracoes nao salvas. Sair mesmo assim?")) {
                 salvar_sessao();
@@ -1724,6 +2127,55 @@ static void tecla(XKeyEvent *ev)
         if (topo < 0) topo = 0;
         desenhar();
         return;
+    }
+
+    /* Alt+Cima / Alt+Baixo movem a linha. Vem antes de tudo porque nao e nem
+     * movimento de cursor nem digitacao: as duas setas ja tem outro dono logo
+     * abaixo, e sem esta saida antecipada elas so andariam com o cursor. */
+    if ((ev->state & Mod1Mask) && (ks == XK_Up || ks == XK_Down)) {
+        mover_linha(ks == XK_Up ? -1 : 1);
+        seguir_cursor();
+        desenhar();
+        return;
+    }
+
+    /* O QUE A TECLA FAZ COM A MARCA. Tres caminhos, e a ordem importa:
+     *
+     *  1. Shift + movimento ESTENDE. Sem ancora ainda, o cursor de agora vira a
+     *     ancora - e por isso a marca do teclado comeca de onde se estava, nao
+     *     do inicio do arquivo.
+     *  2. Uma tecla que ESCREVE, com marca de pe, apaga o marcado primeiro.
+     *     Ate 02/08/2026 este editor nao fazia isso, e o comentario aqui dizia
+     *     que era de proposito; virou o comportamento normal a pedido de quem
+     *     usa, que e tambem o de qualquer editor.
+     *  3. Qualquer outra tecla so apaga a marca.
+     *
+     * O par apagar+escrever guarda UM instantaneo: o `grupo` e forcado logo
+     * depois para o `talvez_guardar()` do switch nao gravar o segundo. */
+    {
+        int shift = (ev->state & ShiftMask) != 0;
+        int movimento = (ks == XK_Left || ks == XK_Right || ks == XK_Up ||
+                         ks == XK_Down || ks == XK_Home  || ks == XK_End ||
+                         ks == XK_Prior || ks == XK_Next);
+        int escreve = (ks == XK_BackSpace || ks == XK_Delete ||
+                       ks == XK_Return || ks == XK_KP_Enter || ks == XK_Tab ||
+                       (n > 0 && (unsigned char) buf[0] >= 32));
+
+        if (shift && movimento) {
+            estendendo = 1;
+            if (!sel_on) { sel_la = cur_l; sel_ca = cur_c; }
+        } else if (sel_on && escreve) {
+            talvez_guardar(G_NENHUM);
+            apagar_selecao();
+            grupo = G_DIGITANDO;
+            if (ks == XK_BackSpace || ks == XK_Delete) {   /* apagar ja acabou */
+                seguir_cursor();
+                desenhar();
+                return;
+            }
+        } else {
+            sel_limpar();
+        }
     }
 
     switch (ks) {
@@ -1772,6 +2224,16 @@ static void tecla(XKeyEvent *ev)
         }
         break;
     }
+
+    /* A ponta segue o cursor que a tecla acabou de mover. O PRIMARY se atualiza
+     * a cada tecla de proposito: e o "marcou, ja esta la" do X - quem estende
+     * com Shift e cola com o botao do meio nao aperta mais nada. */
+    if (estendendo) {
+        sel_lb = cur_l; sel_cb = cur_c;
+        sel_on = !(sel_la == sel_lb && sel_ca == sel_cb);
+        if (sel_on) virar_dono(XA_PRIMARY, sel_texto());
+    }
+
     seguir_cursor();
     desenhar();
 }
@@ -1839,6 +2301,7 @@ int main(int argc, char **argv)
     SH    = COR("#808080");
     INK   = COR("#000000");
     PAPEL = COR("#FFFFFF");
+    SEL_FUNDO = COR("#000080");        /* o azul de selecao dos anos 90 */
 #undef COR
 
     /* A pasta inicial: o argumento, ou de onde a bancada foi chamada. */
@@ -1855,6 +2318,13 @@ int main(int argc, char **argv)
     XStoreName(dpy, win, "bancada");
     { XClassHint ch = { "bancada", "Bancada" }; XSetClassHint(dpy, win, &ch); }
     A_DELETE = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+    /* PRIMARY nao precisa de XInternAtom: e um atomo fixo do protocolo
+     * (XA_PRIMARY, do Xatom.h). Os outros tres sao convencao, nao protocolo. */
+    A_AREA   = XInternAtom(dpy, "CLIPBOARD",   False);
+    A_UTF8   = XInternAtom(dpy, "UTF8_STRING", False);
+    A_ALVOS  = XInternAtom(dpy, "TARGETS",     False);
+    A_TEXTO  = XInternAtom(dpy, "TEXT",        False);
+    A_COLA   = XInternAtom(dpy, "BANCADA_COLA", False);
     XSetWMProtocols(dpy, win, &A_DELETE, 1);
 
     at.event_mask = ExposureMask | ButtonPressMask;
@@ -1870,7 +2340,11 @@ int main(int argc, char **argv)
      * acento. Medido em 01/08/2026 contra o xterm, que no mesmo ambiente
      * compunha certo. Deixando so a mae pedir teclado, o evento sobe ate ela e
      * o XIM funciona. */
-    at.event_mask = ExposureMask | ButtonPressMask;
+    /* ButtonRelease e Button1Motion sao a selecao com o mouse: o arraste so
+     * existe se os tres eventos chegarem. Continua SEM KeyPressMask, pelo motivo
+     * do paragrafo acima - o acento morto depende disso. */
+    at.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
+                    Button1MotionMask;
     w_ed = XCreateWindow(dpy, win, CONT_X, CONT_Y,
                          (unsigned) (larg - ARVORE_W), (unsigned) (alt - BARRA_H - ABAS_H), 0,
                          CopyFromParent, InputOutput, CopyFromParent,
@@ -1879,9 +2353,12 @@ int main(int argc, char **argv)
     /* SubstructureNotifyMask: o xterm nasce depois, de forma assincrona, e com
      * "-into" ele mantem a geometria de 80x24 com que veio ao mundo. E este
      * aviso que diz a hora certa de estica-lo para o painel inteiro. */
-    /* ExposureMask: enquanto o Claude nao subiu, o painel e NOSSO - e nele que
-     * o convite ao clique e desenhado, e ele precisa saber quando repintar. */
-    at.event_mask = ExposureMask | ButtonPressMask | SubstructureNotifyMask;
+    /* SEM ExposureMask, desde que o convite ao clique saiu (02/08/2026): nao ha
+     * mais nada nosso para desenhar aqui, e o preto do painel vazio vem do
+     * background_pixel abaixo - o servidor X repinta a area exposta sozinho.
+     * ButtonPressMask fica: o clique no painel vazio e uma das duas portas de
+     * entrada do Claude. */
+    at.event_mask = ButtonPressMask | SubstructureNotifyMask;
     w_term = XCreateWindow(dpy, win, CONT_X, CONT_Y,
                            (unsigned) (larg - ARVORE_W), (unsigned) (alt - BARRA_H - ABAS_H), 0,
                            CopyFromParent, InputOutput, CopyFromParent,
@@ -1908,7 +2385,6 @@ int main(int argc, char **argv)
     XCOR(&c_fraco,  0x5000, 0x5000, 0x5000);
     XCOR(&c_sel,    0xffff, 0xffff, 0xffff);
     XCOR(&c_aberto, 0x1000, 0x3000, 0x9000);   /* na arvore: aberto em outra aba */
-    XCOR(&c_dica,   0x9000, 0x9000, 0x9000);   /* convite do painel: fundo preto */
 #undef XCOR
 
     xim = XOpenIM(dpy, NULL, NULL, NULL);
@@ -1937,9 +2413,9 @@ int main(int argc, char **argv)
     XSync(dpy, False);
     pegar_teclas();
     /* SEM abrir_claude() aqui, e isso NAO e esquecimento. A bancada nao levanta
-     * o Claude por conta propria: a aba dele sobe com o convite ao clique. Ela
-     * serve de arvore e de editor sem custar os 490 MB do Claude Code para quem
-     * abriu so para olhar um arquivo. */
+     * o Claude por conta propria: a aba dele sobe com o painel vazio, esperando
+     * o clique. Ela serve de arvore e de editor sem custar os 490 MB do Claude
+     * Code para quem abriu so para olhar um arquivo. */
     mostrar_painel();
     /* Depois de mapear: restaurar abre abas, e abrir aba mapeia e move o foco. */
     restaurar_sessao();
@@ -1970,6 +2446,68 @@ int main(int argc, char **argv)
             break;
         case KeyPress:
             tecla(&ev.xkey);
+            break;
+        /* O arraste. Redesenhar a cada pixel de movimento seria caro numa sessao
+         * remota - cada quadro e comprimido em CPU e vai por TCP -, entao so se
+         * redesenha quando a PONTA muda de lugar de verdade. */
+        case MotionNotify:
+            if (arrastando && ev.xmotion.window == w_ed &&
+                carregada >= 0 && modo == MODO_TEXTO && n_linhas > 0) {
+                int l, c, antes_l = sel_lb, antes_c = sel_cb, antes_topo = topo;
+
+                /* arrastar para fora da janela rola, como em qualquer editor */
+                if (ev.xmotion.y < MARGEM && topo > 0) topo--;
+                else if (ev.xmotion.y > cont_h() - MARGEM && topo < n_linhas - 1) topo++;
+
+                pos_do_clique(ev.xmotion.x, ev.xmotion.y, &l, &c);
+                sel_lb = l; sel_cb = c;
+                cur_l  = l; cur_c  = c;
+                sel_on = !(sel_la == sel_lb && sel_ca == sel_cb);
+                if (l != antes_l || c != antes_c || topo != antes_topo) desenhar();
+            }
+            break;
+        case ButtonRelease:
+            if (arrastando && ev.xbutton.window == w_ed) {
+                arrastando = 0;
+                /* PRIMARY e "marcou, ja esta la": quem quiser colar com o botao
+                 * do meio nao aperta mais nada. O CLIPBOARD e do Ctrl+C. */
+                if (sel_on) virar_dono(XA_PRIMARY, sel_texto());
+            }
+            break;
+        /* Alguem esta colando o que copiamos daqui. */
+        case SelectionRequest:
+            responder_selecao(&ev.xselectionrequest);
+            break;
+        /* A outra ponta do colar: o dono respondeu ao nosso pedido. */
+        case SelectionNotify:
+            if (ev.xselection.property == None) {
+                /* Ninguem tem o CLIPBOARD - tenta o PRIMARY, que e onde mora a
+                 * selecao de um xterm ou de um arraste em outro programa. */
+                if (ev.xselection.selection == A_AREA) pedir_cola(XA_PRIMARY);
+            } else {
+                Atom tipo; int fmt; unsigned long n_itens, resto;
+                unsigned char *dados = NULL;
+                if (XGetWindowProperty(dpy, win, A_COLA, 0, 1 << 20, True,
+                                       AnyPropertyType, &tipo, &fmt, &n_itens,
+                                       &resto, &dados) == Success && dados) {
+                    /* fmt != 8 seria uma resposta que nao e texto (lista de
+                     * atomos, por exemplo); nesse caso nao ha o que colar. */
+                    if (fmt == 8) receber_cola(dados, (size_t) n_itens);
+                    XFree(dados);
+                    desenhar();
+                }
+            }
+            break;
+        /* Outro programa virou dono. Perder o PRIMARY apaga o realce, que e o
+         * que todo mundo faz: duas selecoes visiveis ao mesmo tempo, em janelas
+         * diferentes, mentiriam sobre qual delas o botao do meio vai colar. */
+        case SelectionClear:
+            if (ev.xselectionclear.selection == A_AREA) {
+                free(txt_cli); txt_cli = NULL;
+            } else {
+                free(txt_pri); txt_pri = NULL;
+                if (sel_on) { sel_limpar(); desenhar(); }
+            }
             break;
         case FocusIn:
             if (xic) XSetICFocus(xic);
@@ -2007,13 +2545,30 @@ int main(int argc, char **argv)
                     topo += (ev.xbutton.button == Button5 ? 3 : -3);
                     if (topo < 0) topo = 0;
                     if (topo > n_linhas - 1) topo = n_linhas - 1;
+                } else if (ev.xbutton.button == Button1) {
+                    int l, c;
+                    pos_do_clique(ev.xbutton.x, ev.xbutton.y, &l, &c);
+                    cur_l = l; cur_c = c;
+
+                    /* Um, dois ou tres cliques. O tempo vem do proprio evento,
+                     * que e o relogio do servidor - nada de gettimeofday aqui,
+                     * que mediria outra coisa. 400 ms e o intervalo classico. */
+                    if (ev.xbutton.time - t_clique < 400 && l == l_clique) n_cliques++;
+                    else                                                   n_cliques = 1;
+                    t_clique = ev.xbutton.time;
+                    l_clique = l;
+
+                    if (n_cliques == 2)      { sel_palavra(l, c); arrastando = 0; }
+                    else if (n_cliques >= 3) { sel_linha(l);      arrastando = 0; }
+                    else {
+                        sel_la = sel_lb = l;      /* ancora aqui; a ponta segue */
+                        sel_ca = sel_cb = c;      /* o mouse no MotionNotify */
+                        sel_on = 0;
+                        arrastando = 1;
+                    }
+                    if (sel_on) virar_dono(XA_PRIMARY, sel_texto());
+                    XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
                 } else {
-                    int l = topo + (ev.xbutton.y - MARGEM) / altura_lin;
-                    if (l < 0) l = 0;
-                    if (l >= n_linhas) l = n_linhas - 1;
-                    cur_l = l;
-                    cur_c = byte_da_coluna(linhas[cur_l],
-                                           col0 + (ev.xbutton.x - MARGEM) / avanco);
                     XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
                 }
                 desenhar();
