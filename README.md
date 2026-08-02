@@ -2876,7 +2876,8 @@ O Claude Code é um programa de terminal; não há como desenhá-lo com Xlib, e
 escrever um emulador de terminal seria um projeto inteiro. Mas o X11 deixa a
 janela de **outro cliente** virar filha da nossa: o `xterm` aceita `-into <id>` e
 passa a viver dentro do painel. O binário do Claude vem do `trabalho onde`,
-então há um só lugar no projeto que sabe onde ele mora.
+então há um só lugar no projeto que sabe onde ele mora. Esse xterm só nasce
+quando alguém pede — veja *[O Claude não sobe sozinho](#o-claude-não-sobe-sozinho-01082026)*.
 
 > Com `-into` o xterm **não se estica sozinho** — ele nasce com 80x24 e fica
 > assim. Quem o acerta é um `XQueryTree` no painel, redimensionando os filhos.
@@ -3074,6 +3075,48 @@ toda abertura cair na conversa velha, arrastando o contexto anterior junto e
 exigindo `/clear` para começar do zero. Quem quer a conversa anterior pede por
 ela, dentro da própria aba.
 
+### O Claude não sobe sozinho (01/08/2026)
+
+A aba do Claude existe desde o início — ela é a aba `[0]`, não fecha e não tem
+arquivo. O **processo**, não: a bancada abre sem xterm nenhum. Quem levanta o
+Claude é o botão `[Claude]` da barra ou um clique no painel vazio da aba, que
+enquanto isso mostra o convite:
+
+```
+                     O Claude nao sobe sozinho.
+       Clique aqui, ou no botao Claude da barra, para abrir.
+```
+
+Antes ele subia junto com a janela. Abrir a bancada para olhar um arquivo
+custava os **490 MB** do Claude Code sem ninguém ter pedido — e numa premissa de
+RAM baixa isso é o oposto do que se quer. Medido hoje, a bancada aberta com a
+árvore carregada e sem Claude: **2,4 MB de PSS** (`smaps_rollup`, `Pss:
+2417 kB`).
+
+O que **não** levanta o Claude, de propósito: a abertura, a restauração da
+sessão, e o `Ctrl+Tab` que passa pela aba. Cair na aba pelo teclado mostra o
+convite — daí o convite existir, senão a aba seria um retângulo preto e mudo.
+Trocar de projeto pelo botão `[Projeto]` também não: se o Claude **já** estava
+de pé, ele reabre na pasta nova, como antes; se não estava, continua não
+estando, e a primeira abertura já nasce na pasta certa, que é a de agora.
+
+Quatro detalhes de X11 que isso exigiu:
+
+- o `w_term` passou a pedir `ExposureMask`. Enquanto não há xterm, aquele painel
+  é **nosso** e precisa saber quando repintar.
+- de brinde, o convite **volta sozinho** quando o Claude sai: destruir a janela
+  filha gera um Expose no pai, o `kill(pid, 0)` falha e o painel se redesenha.
+  Antes, sair do Claude deixava um retângulo preto até o próximo redesenho.
+- sem processo não há xterm para receber foco, então o `mostrar_painel()` devolve
+  o foco à janela-mãe — que é quem tem o XIC e o teclado. Sem isso a aba comeria
+  as teclas sem ninguém para tratá-las.
+- o xterm nasce **assíncrono**: no instante do clique ele ainda não existe para
+  receber foco. Quem o foca é o `MapNotify`, quando ele passa a existir.
+
+Medido nas duas portas de entrada, com evento sintético de `ButtonPress` (não há
+`xdotool` nesta máquina): abertura → `0` filhos; clique no painel → o `xterm
+-into` aparece; reiniciada, clique no botão da barra → idem.
+
 ### `bancada` no shell, como o `code .`
 
 O `perfil.sh` do repositório instala uma função em
@@ -3089,6 +3132,79 @@ quem só queria abrir um terminal. E não é `/etc/profile.d`: terminal interati
 
 Para ver as mensagens de erro dela, `command bancada` foge da função e roda o
 binário em primeiro plano.
+
+### Binário e imagem: a bancada deixou de recusar (01/08/2026)
+
+Clicar no `Untitled.png` ou no `bancada` compilado, na árvore, dava só um diálogo
+de erro: *"isso parece um arquivo binário; a bancada não abre"*. Um projeto tem
+binário compilado e imagem no meio dos fontes, e o VS Code mostrava os dois — era
+a lacuna mais visível de quem trocou um pelo outro.
+
+Agora abrem, os dois em **somente leitura**, cada um no seu modo:
+
+| Modo | Quando | O que aparece |
+|---|---|---|
+| `MODO_TEXTO` | o de sempre | o editor |
+| `MODO_HEX` | qualquer byte `NUL` no arquivo | deslocamento, 16 bytes, ASCII |
+| `MODO_IMG` | número mágico de PNG, JPEG, GIF, BMP, WEBP ou TIFF | a imagem desenhada, com legenda |
+
+Modo é mais um campo que **dorme na aba** junto com os globais, como o buffer e o
+cursor — nenhuma função de edição precisou de contexto novo. Vale zero de
+propósito: toda aba nascida de um `memset()` continua sendo de texto.
+
+**O `salvar()` recusa na porta o que não é texto.** É a linha mais importante das
+mudanças: hex e imagem não têm buffer de linhas, então um `Ctrl+S` numa aba
+dessas percorreria zero linhas — e o `fopen(…, "wb")` **já teria truncado** o
+arquivo antes disso. Um `.png` de 27 KB viraria 0 byte, calado.
+
+**Detecção pelo número mágico, nunca pela extensão**, e sobre os primeiros 512
+bytes, antes de trazer o arquivo para a RAM: uma foto de 30 MB não é lida aqui
+para ser jogada fora em seguida — da imagem não entra byte nenhum neste processo.
+
+**Mas o `NUL` é decidido sobre o arquivo INTEIRO**, e isso é uma correção de um
+erro que eu já tinha escrito: com o cheiro olhando só o começo, um arquivo de
+texto com um `NUL` no meio abriria como texto, e o `texto_para_buffer()` — que
+varre com `strchr()` — pararia no `NUL`, jogando fora tudo o que vem depois. O
+`Ctrl+S` seguinte gravaria o arquivo truncado. Conferido com um arquivo de 53
+bytes e um `NUL` na terceira linha: abre em hex, e as quatro linhas estão lá.
+
+#### A imagem não trouxe biblioteca de imagem nenhuma
+
+Quem decodifica é o `convert` do imagemagick — que já é dependência declarada do
+projeto, pelo `barra-apps` — chamado **uma vez por abertura** e devolvendo PPM
+cru pelo pipe (`P6`, largura, altura, `255`, pixels). O alfa é achatado sobre o
+`#DEDEDE` da face antes de sair de lá, como nos ícones da barra, então não chega
+canal alfa aqui e não há nada para compor. Medido em 01/08/2026 com o
+`Untitled.png`: **16 MB de pico e 0,03 s**, e o processo morre antes do desenho.
+
+É a mesma divisão de trabalho do `barra-tarefas.c`: pixels crus aqui dentro,
+formato de imagem lá fora. E aqui a comparação é honesta nos dois sentidos — a
+`libpng` **já está no processo** (a freetype, que a Xft usa, a carrega), então
+linká-la não custaria RSS. Custaria o decodificador escrito à mão, e resolveria
+só PNG. Pelo pipe vêm seis formatos por um caminho de código só.
+
+O `identify` vai no mesmo pipe, antes do `convert`, só pela legenda: é o tamanho
+**de verdade** da imagem, que o PPM já reduzido ao painel não conta mais. São
+dois processos em sequência, nunca ao mesmo tempo.
+
+O resultado vira `Pixmap`, do lado do servidor: redesenhar depois é um
+`XCopyArea`. O `convert` só roda de novo se o painel mudar de tamanho — nunca a
+cada `Expose`.
+
+#### O que foi medido, e o que não
+
+Com uma aba de imagem e uma de hex abertas: **PSS 2486 kB**, contra os 2,4 MB de
+antes — a mudança não aparece na conta. Ela não é grátis, só não é deste lado: os
+pixels ficam no servidor X, `largura × altura × 4` bytes (1,8 MB para este PNG),
+e são liberados ao fechar a aba. **O crescimento do Xorg não foi medido.**
+
+Verificado por captura de tela numa segunda instância, com sessão semeada num
+projeto de teste (`~/.config/bancada/sessoes/`) para não encostar na sessão real
+— não há `xdotool` nesta máquina, então abrir a aba pelo clique não era uma
+opção. A instância de teste foi posta numa faixa da tela sem nenhuma janela por
+cima, pelo motivo já registrado aqui: `import` mente quando a janela está coberta.
+A rolagem do hex foi conferida pelo mesmo caminho — sessão com `topo 100`, e a
+tela abriu no deslocamento `0x640`, que é 100 × 16.
 
 ## Trocar o VS Code por 31 MB (01/08/2026)
 

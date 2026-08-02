@@ -27,7 +27,7 @@ só a seção necessária. Ler tudo custa ~35 mil tokens e quase nunca é precis
 | `install.sh` | instalador principal, idempotente. Compila a barra no passo 2 |
 | `startwm.sh` | → `/etc/xrdp/startwm.sh`. Sobe a sessão inteira; limpa vars do WSLg |
 | `barra-tarefas.c` | C + Xlib cru, 3,0 MB de RSS. Fonte **core**, iso8859-1 |
-| `bancada.c` | o "VS Code" próprio: árvore + **abas** + editor + xterm embutido com o Claude (que é a aba 0). C + Xlib + **Xft**, 2,2 MB de PSS. Sessão por projeto em `~/.config/bancada/sessoes/` |
+| `bancada.c` | o "VS Code" próprio: árvore + **abas** + editor + xterm embutido com o Claude (que é a aba 0, **aberta sob demanda**). C + Xlib + **Xft**, 2,4 MB de PSS sem o Claude. Binário abre em **hex** e imagem em **preview**, ambos só-leitura. Sessão por projeto em `~/.config/bancada/sessoes/` |
 | `perfil.sh` | o pedaço do projeto que entra no shell: a função `bancada`, que abre na pasta atual e devolve o prompt, como o `code .` |
 | `barra-apps` | atalhos de aplicativo da barra: lê `.desktop`, converte o ícone e mantém o `apps.conf` |
 | `trabalho` | substitui o VS Code: ranger + Claude Code lado a lado num tmux. `trabalho instalar` cria os `.desktop` |
@@ -115,6 +115,10 @@ entre eles são visíveis ao AST.
 | a bancada precisa de `XSetErrorHandler` | trocar de aba desmapeia uma janela e mapeia outra; `XSetInputFocus` na recém-desmapeada dá `BadMatch`, e o tratador padrão do Xlib **mata o processo** |
 | `globais_zerar()` e `fechar_aba()` **não** usam `limpar_buffer`/`esquecer_undo` | eles mexem nos globais, que apontam para o buffer de outra aba. Liberar ali destrói o texto da aba vizinha, e só aparece ao voltar para ela |
 | nada de `seguir_cursor()` ao ativar aba | ele arrasta a tela até o cursor, que só anda pelo teclado — desfaz a rolagem de quem desceu o arquivo com a roda do mouse. O `topo`/`col0` guardados na aba já são válidos |
+| a bancada **não** levanta o Claude sozinha | subir só com a janela custava 490 MB a quem abriu para olhar um arquivo. Só o botão `[Claude]` e o clique no painel vazio o abrem; abrir a bancada, restaurar sessão e `Ctrl+Tab` não. Trocar de projeto reabre **só** o que já estava de pé |
+| `salvar()` recusa `modo != MODO_TEXTO` | hex e imagem não têm buffer de linhas: o `Ctrl+S` percorreria zero linhas, e o `fopen(…,"wb")` **já truncou** antes disso. Um `.png` de 27 KB viraria 0 byte, calado |
+| qualquer `NUL` no arquivo **inteiro** manda para o hex | o cheiro olha só 512 bytes, mas o `texto_para_buffer()` varre com `strchr()`: um `NUL` no meio faria o resto do arquivo sumir do buffer e o salvar gravá-lo truncado |
+| nenhuma lib de imagem no `bancada.c` também | quem decodifica é o `convert` (16 MB de pico, 0,03 s, e morre), devolvendo PPM cru pelo pipe. A `libpng` até já está no processo pela freetype, mas resolveria só PNG — pelo pipe vêm seis formatos num caminho só |
 | a sessão da bancada **não** guarda texto não salvo | só caminho, cursor e rolagem. Ressuscitar texto que o usuário não mandou gravar tem de acertar sempre; errar uma vez custa o arquivo |
 | o `perfil.sh` é instalado **fora** do repositório | se o `.bashrc` apontasse para a pasta do repositório, mover o repositório quebraria o shell. E não é `/etc/profile.d`: terminal interativo não-login lê o `.bashrc` e ignora o `profile.d` |
 | nenhuma lib de imagem no `barra-tarefas.c` | o ícone é convertido pelo `barra-apps` para pixels crus (1200 bytes) uma vez, ao fixar. A barra só faz `fread` + `XPutImage`. Linkar libpng aqui é o fim da premissa do arquivo |

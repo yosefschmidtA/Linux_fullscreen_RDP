@@ -45,6 +45,12 @@
  * conteudo escolhido ocupa a area inteira. A aba do Claude e a primeira, nao
  * fecha e nao tem arquivo; as outras sao arquivos abertos.
  *
+ * A aba existe desde o inicio, mas o PROCESSO nao: a bancada sobe sem xterm e
+ * sem Claude nenhum. Quem o levanta e o botao "Claude" da barra, ou um clique
+ * no painel vazio da aba - que enquanto isso mostra o convite para faze-lo. A
+ * bancada abre em segundos e sem os 490 MB do Claude para quem so ia olhar um
+ * arquivo; e quando ele nasce, nasce no projeto que estiver aberto na hora.
+ *
  * Uma aba guarda o ESTADO INTEIRO de um arquivo (buffer, cursor, rolagem,
  * desfazer). O editor todo continua mexendo nos mesmos globais de sempre - a
  * troca de aba salva os globais numa struct e carrega os da outra. Sao
@@ -67,6 +73,25 @@
  * disco. Isto aqui e para abrir, olhar, corrigir uma linha e salvar.
  * O que ele TEM de ter, e tem: UTF-8 correto, acento morto do teclado ABNT2,
  * desfazer, e aviso antes de perder alteracao.
+ *
+ * O QUE NAO E TEXTO: HEX E IMAGEM
+ *
+ * Ate aqui a bancada RECUSAVA o resto ("isso parece um arquivo binario") — e um
+ * projeto tem binario compilado e imagem no meio dos fontes; clicar neles na
+ * arvore so dava um dialogo de erro. Agora eles abrem em SOMENTE LEITURA: o
+ * binario vira hex dump, a imagem aparece desenhada. Nenhum dos dois tem cursor,
+ * nenhum dos dois salva — e o salvar recusa os dois na porta, porque gravar um
+ * buffer de texto vazio por cima de um .png seria destruir o arquivo.
+ *
+ * A IMAGEM NAO TROUXE BIBLIOTECA DE IMAGEM NENHUMA. Quem decodifica e o
+ * `convert` do imagemagick — ja dependencia declarada do projeto, pelo
+ * barra-apps — chamado uma vez por abertura e devolvendo PPM cru pelo pipe: 16
+ * MB de pico e 0,03 s para o Untitled.png (medido em 01/08/2026), e some. E a
+ * mesma divisao de trabalho da barra-tarefas.c: pixels crus aqui dentro,
+ * formato de imagem la fora. A libpng ate ja esta no processo (a freetype, que
+ * a Xft usa, a carrega), entao linka-la nao custaria RSS — custaria o decodifi-
+ * cador escrito a mao, e so resolveria PNG. Pelo pipe vem PNG, JPEG, GIF, BMP,
+ * WEBP e TIFF por um caminho de codigo so.
  */
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -95,7 +120,11 @@
 #define ABA_W_MAX 200
 #define ABA_W_MIN  60
 
-#define MAX_ARQ  (8 * 1024 * 1024)   /* teto para abrir um arquivo */
+#define MAX_ARQ  (8 * 1024 * 1024)   /* teto para trazer um arquivo para a RAM */
+/* Imagem tem teto proprio, e maior: dela nao entra byte nenhum aqui. Quem le o
+ * arquivo e o convert, e o que volta pelo pipe ja vem reduzido ao painel. */
+#define MAX_IMG  (64 * 1024 * 1024)
+#define HEX_COLS   16                /* bytes por linha do hex dump */
 #define MAX_ABAS   16                /* incluindo a do Claude */
 #define UNDO_N     32                /* instantaneos guardados, POR ABA */
 /* Teto de memoria do desfazer, POR ABA. Era 8 MB quando havia um buffer so;
@@ -110,8 +139,8 @@ static int       tela;
 static Window    raiz, win, w_arv, w_ed, w_term;
 static GC        gc;
 static XftFont  *fonte;
-static XftDraw  *dr_barra, *dr_arv, *dr_ed;
-static XftColor  c_ink, c_fraco, c_sel, c_aberto;
+static XftDraw  *dr_barra, *dr_arv, *dr_ed, *dr_term;
+static XftColor  c_ink, c_fraco, c_sel, c_aberto, c_dica;
 static XIM       xim;
 static XIC       xic;
 static Atom      A_DELETE;
@@ -130,6 +159,12 @@ static Entrada *entradas;
 static int      n_entradas, cap_entradas;
 static int      arv_topo;            /* primeira linha visivel da arvore */
 
+/* ---- o que a aba mostra ---------------------------------------------------
+ * MODO_TEXTO e o unico que edita. Os outros dois sao janelas de leitura: nao tem
+ * cursor, nao tem desfazer e nao salvam. Vale ZERO de proposito — assim toda aba
+ * nascida de um memset() ja e de texto, como sempre foi. */
+enum { MODO_TEXTO, MODO_HEX, MODO_IMG };
+
 /* ---- buffer de texto ----------------------------------------------------- */
 static char   **linhas;
 static int      n_linhas, cap_linhas;
@@ -139,6 +174,19 @@ static int      sem_nl_final;        /* o arquivo original nao terminava em \n *
 static int      crlf;                /* o arquivo original usava \r\n */
 static int      cur_l, cur_c;        /* cursor: linha, e COLUNA EM BYTES */
 static int      topo, col0;          /* rolagem vertical e horizontal */
+
+/* ---- arquivo que nao e texto ----------------------------------------------
+ * Convivem com os de cima em vez de substitui-los: "topo" continua sendo a
+ * rolagem, tambem no hex, e por isso a roda do mouse e o PageDown nao precisaram
+ * de um segundo caminho. */
+static int             modo;         /* MODO_TEXTO, MODO_HEX ou MODO_IMG */
+static unsigned char  *bruto;        /* MODO_HEX: o arquivo inteiro, cru */
+static size_t          bruto_n;
+static Pixmap          img_pm;       /* MODO_IMG: os pixels, ja no servidor X */
+static int             img_w, img_h;          /* tamanho em que ela foi desenhada */
+static int             img_nat_w, img_nat_h;  /* tamanho de verdade, para a legenda */
+static long            img_bytes;             /* tamanho do arquivo em disco */
+static int             img_para_w, img_para_h;/* painel para o qual ela foi gerada */
 
 /* ---- desfazer ------------------------------------------------------------ */
 typedef struct { char **l; int n; int cur_l, cur_c; size_t bytes; } Instante;
@@ -158,6 +206,7 @@ static void carregar_pasta(const char *p);
 static void seguir_cursor(void);
 static void esticar_terminal(void);
 static void mostrar_painel(void);
+static int  claude_vivo(void);
 static void ativar(int i);
 static void fechar_aba(int i);
 
@@ -364,6 +413,12 @@ typedef struct {
     int      cur_l, cur_c, topo, col0;
     Instante undo[UNDO_N];
     int      undo_n, undo_pos, grupo;
+    int      modo;                    /* hex e imagem dormem aqui do mesmo jeito */
+    unsigned char *bruto;
+    size_t   bruto_n;
+    Pixmap   img_pm;
+    int      img_w, img_h, img_nat_w, img_nat_h, img_para_w, img_para_h;
+    long     img_bytes;
     int      x, w;                    /* onde a aba ficou desenhada */
 } Aba;
 
@@ -380,6 +435,10 @@ static void globais_para_aba(Aba *a)
     a->cur_l = cur_l; a->cur_c = cur_c; a->topo = topo; a->col0 = col0;
     memcpy(a->undo, undo, sizeof undo);
     a->undo_n = undo_n; a->undo_pos = undo_pos; a->grupo = grupo;
+    a->modo = modo; a->bruto = bruto; a->bruto_n = bruto_n;
+    a->img_pm = img_pm; a->img_w = img_w; a->img_h = img_h;
+    a->img_nat_w = img_nat_w; a->img_nat_h = img_nat_h; a->img_bytes = img_bytes;
+    a->img_para_w = img_para_w; a->img_para_h = img_para_h;
 }
 
 static void aba_para_globais(Aba *a)
@@ -390,11 +449,17 @@ static void aba_para_globais(Aba *a)
     cur_l = a->cur_l; cur_c = a->cur_c; topo = a->topo; col0 = a->col0;
     memcpy(undo, a->undo, sizeof undo);
     undo_n = a->undo_n; undo_pos = a->undo_pos; grupo = a->grupo;
+    modo = a->modo; bruto = a->bruto; bruto_n = a->bruto_n;
+    img_pm = a->img_pm; img_w = a->img_w; img_h = a->img_h;
+    img_nat_w = a->img_nat_w; img_nat_h = a->img_nat_h; img_bytes = a->img_bytes;
+    img_para_w = a->img_para_w; img_para_h = a->img_para_h;
 }
 
 /* Larga os globais SEM liberar nada - o que eles apontavam ja pertence a struct
  * de outra aba. Chamar limpar_buffer() ou esquecer_undo() aqui liberaria o
- * texto da aba vizinha, e o estrago so apareceria ao voltar para ela. */
+ * texto da aba vizinha, e o estrago so apareceria ao voltar para ela. Vale
+ * igual para o "bruto" do hex e para o Pixmap da imagem: soltar aqui apagaria a
+ * imagem que a aba do lado esta mostrando. */
 static void globais_zerar(void)
 {
     linhas = NULL; n_linhas = cap_linhas = 0;
@@ -403,6 +468,9 @@ static void globais_zerar(void)
     cur_l = cur_c = topo = col0 = 0;
     memset(undo, 0, sizeof undo);
     undo_n = undo_pos = 0; grupo = G_NENHUM;
+    modo = MODO_TEXTO; bruto = NULL; bruto_n = 0;
+    img_pm = 0; img_w = img_h = img_nat_w = img_nat_h = 0;
+    img_bytes = 0; img_para_w = img_para_h = 0;
 }
 
 /* Antes de olhar qualquer campo das structs, os globais tem de descer para a
@@ -446,6 +514,30 @@ static int e_binario(const char *b, size_t n)
     return 0;
 }
 
+/* Imagem pelo NUMERO MAGICO, nunca pela extensao: um print salvo sem extensao
+ * nenhuma abre igual, e um ".png" que por dentro e JPEG nao vira hex dump. Quem
+ * vai ler os seis formatos e o convert; aqui so se decide para onde o arquivo
+ * vai. Basta o comeco do arquivo - por isso a decisao acontece antes de trazer
+ * qualquer coisa para a RAM. */
+static int e_imagem(const unsigned char *b, size_t n)
+{
+    if (n >= 8  && !memcmp(b, "\x89PNG\r\n\x1a\n", 8))                    return 1;
+    if (n >= 3  && !memcmp(b, "\xff\xd8\xff", 3))                         return 1; /* JPEG */
+    if (n >= 6  && (!memcmp(b, "GIF87a", 6) || !memcmp(b, "GIF89a", 6)))  return 1;
+    if (n >= 2  && !memcmp(b, "BM", 2))                                   return 1; /* BMP */
+    if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "WEBP", 4))    return 1;
+    if (n >= 4  && (!memcmp(b, "II*\0", 4) || !memcmp(b, "MM\0*", 4)))     return 1; /* TIFF */
+    return 0;
+}
+
+/* Quantas linhas o hex dump tem. Nao existe array de linhas por tras disto: o
+ * dump e formatado na hora, so a parte visivel. Guardar o dump do binario da
+ * bancada (51 KB) como texto custaria uns 240 KB de linhas para nada. */
+static int linhas_hex(void)
+{
+    return (int) ((bruto_n + HEX_COLS - 1) / HEX_COLS);
+}
+
 /* zenity, como no resto do projeto: e a escada de dialogo ja usada pelo
  * jogo-windows e pelo barra-apps, e escrever um seletor de arquivos em Xlib
  * seria mais codigo do que o editor inteiro.
@@ -474,11 +566,15 @@ static void avisar(const char *t)
     (void) zenity("error", t);
 }
 
-/* Le e VALIDA o arquivo sem tocar em estado nenhum: devolve o texto inteiro (o
+/* Le o arquivo inteiro sem tocar em estado nenhum: devolve o conteudo (o
  * chamador libera) ou NULL. Ficou separado do resto porque, com abas, uma falha
  * no meio do caminho nao pode mais deixar uma aba vazia e quebrada para tras -
- * a aba so nasce depois que o arquivo passou por aqui. */
-static char *ler_texto(const char *caminho, size_t *fora_n)
+ * a aba so nasce depois que o arquivo passou por aqui.
+ *
+ * Serve texto E hex: quem decide o que fazer com os bytes e o chamador, que ja
+ * cheirou o comeco do arquivo. O terminador vai um byte depois do fim para o
+ * texto poder ser varrido com strchr(); o hex usa o tamanho e ignora isso. */
+static char *ler_todo(const char *caminho, size_t *fora_n)
 {
     FILE *f;
     struct stat st;
@@ -496,11 +592,6 @@ static char *ler_texto(const char *caminho, size_t *fora_n)
     fclose(f);
     todo[n] = '\0';
 
-    if (e_binario(todo, n)) {
-        free(todo);
-        avisar("Isso parece um arquivo binario; a bancada nao abre.");
-        return NULL;
-    }
     *fora_n = n;
     return todo;
 }
@@ -543,9 +634,12 @@ static void texto_para_buffer(char *todo, size_t n)
  * trabalho passa a correr risco de verdade. */
 static void abrir_arquivo(const char *caminho)
 {
-    char *todo;
-    size_t n;
-    int i;
+    unsigned char cheiro[512];
+    struct stat st;
+    char *todo = NULL;
+    size_t n = 0, nc;
+    FILE *f;
+    int i, novo_modo;
 
     sincronizar();
 
@@ -554,8 +648,32 @@ static void abrir_arquivo(const char *caminho)
 
     if (n_abas >= MAX_ABAS) { avisar("Abas demais abertas; feche alguma."); return; }
 
-    todo = ler_texto(caminho, &n);
-    if (!todo) return;
+    /* O CHEIRO PRIMEIRO, e so uns bytes: e ele que diz se este arquivo tem de
+     * caber na RAM (texto, hex) ou se nem precisa entrar aqui (imagem, que o
+     * convert le do disco). Sem isto, uma foto de 30 MB seria lida inteira para
+     * ser jogada fora em seguida. */
+    if (stat(caminho, &st) != 0 || !S_ISREG(st.st_mode)) return;
+    f = fopen(caminho, "rb");
+    if (!f) { avisar("Nao consegui ler o arquivo."); return; }
+    nc = fread(cheiro, 1, sizeof cheiro, f);
+    fclose(f);
+
+    if (e_imagem(cheiro, nc))                     novo_modo = MODO_IMG;
+    else if (e_binario((const char *) cheiro, nc)) novo_modo = MODO_HEX;
+    else                                          novo_modo = MODO_TEXTO;
+
+    if (novo_modo == MODO_IMG) {
+        if (st.st_size > MAX_IMG) { avisar("Imagem grande demais para a bancada."); return; }
+    } else {
+        todo = ler_todo(caminho, &n);
+        if (!todo) return;
+        /* O cheiro viu so o comeco. Um NUL mais adiante ainda pararia o
+         * texto_para_buffer() no meio - ele varre com strchr() - e o Ctrl+S
+         * gravaria o arquivo TRUNCADO. Por isso a palavra final e do arquivo
+         * INTEIRO: qualquer NUL manda para o hex, que nao salva. E a mesma
+         * garantia da recusa antiga, so que agora dando para ver o arquivo. */
+        if (novo_modo == MODO_TEXTO && e_binario(todo, n)) novo_modo = MODO_HEX;
+    }
 
     /* Daqui em diante nada pode falhar: os globais passam a ser da aba nova. */
     globais_zerar();
@@ -563,7 +681,15 @@ static void abrir_arquivo(const char *caminho)
     memset(&abas[n_abas], 0, sizeof abas[0]);
     n_abas++;
 
-    texto_para_buffer(todo, n);
+    modo = novo_modo;
+    if (modo == MODO_TEXTO) {
+        texto_para_buffer(todo, n);
+    } else if (modo == MODO_HEX) {
+        bruto = (unsigned char *) todo;    /* a aba passa a ser a dona destes bytes */
+        bruto_n = n;
+    } else {
+        img_bytes = (long) st.st_size;     /* os pixels so nascem no primeiro desenho */
+    }
     snprintf(arquivo, sizeof arquivo, "%s", caminho);
     cur_l = cur_c = topo = col0 = 0;
     sujo = 0;
@@ -664,12 +790,18 @@ static void restaurar_sessao(void)
          * virado binario ou crescido demais desde a ultima vez. */
         if (carregada < 0 || strcmp(arquivo, arq) != 0) continue;
 
-        if (l >= 0 && l < n_linhas) {
+        /* Cursor so existe no texto; rolagem existe tambem no hex, e ali o
+         * limite e o numero de linhas do DUMP. A imagem nao rola: fica no 0. */
+        if (modo == MODO_TEXTO && l >= 0 && l < n_linhas) {
             cur_l = l;
             cur_c = (c > 0 && c <= (int) strlen(linhas[l])) ? c : 0;
         }
-        topo = (t >= 0 && t < n_linhas) ? t : 0;
-        col0 = c0 > 0 ? c0 : 0;
+        {
+            int lim = (modo == MODO_HEX)   ? linhas_hex()
+                    : (modo == MODO_TEXTO) ? n_linhas : 0;
+            topo = (t >= 0 && t < lim) ? t : 0;
+            col0 = (modo == MODO_TEXTO && c0 > 0) ? c0 : 0;
+        }
         globais_para_aba(&abas[carregada]);
     }
     fclose(f);
@@ -686,6 +818,10 @@ static int salvar(void)
     int i;
 
     if (!arquivo[0]) return 0;
+    /* Hex e imagem nao tem buffer de texto: sem esta guarda, o Ctrl+S numa aba
+     * dessas percorreria zero linhas e o fopen("wb") ja teria TRUNCADO o
+     * arquivo — um .png de 27 KB viraria 0 byte, calado. */
+    if (modo != MODO_TEXTO) return 0;
     f = fopen(arquivo, "wb");
     if (!f) { avisar("Nao consegui gravar o arquivo."); return 0; }
     for (i = 0; i < n_linhas; i++) {
@@ -803,8 +939,13 @@ static void desenhar_barra(void)
         x += botoes[i].w + GAP;
     }
 
+    /* O aviso de leitura fica no titulo, e nao no rotulo da aba: a aba ja e
+     * curta e o nome do arquivo e o que se procura la. */
     snprintf(titulo, sizeof titulo, "%s%s",
-             arquivo[0] ? arquivo : "(nenhum arquivo aberto)", sujo ? "  *" : "");
+             arquivo[0] ? arquivo : "(nenhum arquivo aberto)",
+             modo == MODO_HEX ? "   [binario, somente leitura]" :
+             modo == MODO_IMG ? "   [imagem, somente leitura]"  :
+             sujo             ? "  *" : "");
     texto(dr_barra, x + 12, PAD + base_lin + 3, titulo, &c_fraco);
 }
 
@@ -942,6 +1083,223 @@ static void desenhar_editor(void)
     }
 }
 
+/* =========================================================================
+ * Os dois paineis de LEITURA: hex e imagem
+ * ========================================================================= */
+
+/* O hex dump classico: deslocamento, 16 bytes e as mesmas 16 posicoes em ASCII.
+ * Nao ha buffer de linhas por tras - so as linhas VISIVEIS sao formadas, na
+ * hora, num buffer de pilha. Tres colunas, tres cores: o deslocamento e o ASCII
+ * em cinza, os bytes em preto, que e onde o olho vai. */
+static void desenhar_hex(void)
+{
+    int w = cont_w(), h = cont_h();
+    int vis = (h - 2 * MARGEM) / altura_lin;
+    int total = linhas_hex(), i, j;
+
+    XSetForeground(dpy, gc, PAPEL);
+    XFillRectangle(dpy, w_ed, gc, 0, 0, (unsigned) w, (unsigned) h);
+
+    for (i = 0; i < vis && topo + i < total; i++) {
+        size_t base = (size_t) (topo + i) * HEX_COLS;
+        char desl[24], hexa[4 * HEX_COLS], asc[HEX_COLS + 4];
+        int y = MARGEM + i * altura_lin + base_lin;
+        int p = 0, q = 0;
+
+        snprintf(desl, sizeof desl, "%08lx", (unsigned long) base);
+
+        for (j = 0; j < HEX_COLS; j++) {
+            if (base + j < bruto_n)
+                p += snprintf(hexa + p, sizeof hexa - (size_t) p, "%02x ",
+                              bruto[base + j]);
+            else
+                p += snprintf(hexa + p, sizeof hexa - (size_t) p, "   ");
+            /* o respiro no meio dos 16 e o que deixa contar byte com o dedo */
+            if (j == HEX_COLS / 2 - 1) hexa[p++] = ' ';
+        }
+        hexa[p] = '\0';
+
+        asc[q++] = '|';
+        for (j = 0; j < HEX_COLS && base + j < bruto_n; j++) {
+            unsigned char c = bruto[base + j];
+            asc[q++] = (c >= 32 && c < 127) ? (char) c : '.';
+        }
+        asc[q++] = '|';
+        asc[q] = '\0';
+
+        texto(dr_ed, MARGEM,                     y, desl, &c_fraco);
+        texto(dr_ed, MARGEM + 10 * avanco,       y, hexa, &c_ink);
+        texto(dr_ed, MARGEM + (10 + p) * avanco, y, asc,  &c_fraco);
+    }
+}
+
+/* Poe um componente 0-255 na posicao que ele ocupa na mascara do visual - a
+ * mesma funcao do barra-tarefas.c, pelo mesmo motivo: chumbar "0xRRGGBB" faria a
+ * imagem sair com as cores trocadas num servidor de outro arranjo, sem erro
+ * nenhum para avisar. */
+static unsigned long componente(unsigned long mascara, unsigned v)
+{
+    int desl = 0, bits = 0;
+    unsigned long m = mascara;
+
+    if (!mascara) return 0;
+    while (!(m & 1)) { m >>= 1; desl++; }
+    while (m & 1)    { m >>= 1; bits++; }
+    if (bits < 8) v >>= (8 - bits);
+    return ((unsigned long) v << desl) & mascara;
+}
+
+/* Chama o convert UMA vez e recebe PPM cru pelo pipe: "P6", largura, altura,
+ * 255, e os pixels. O alfa e achatado sobre o #DEDEDE da face ANTES de sair de
+ * la, como o barra-apps ja faz com os icones - assim nao chega canal alfa aqui e
+ * nao ha nada para compor.
+ *
+ * O identify na frente, no mesmo pipe, e so pela legenda: e o tamanho DE VERDADE
+ * da imagem, que o PPM ja reduzido nao conta mais. Sao dois processos em
+ * sequencia, nunca ao mesmo tempo - o pico e o de um convert (16 MB e 0,03 s
+ * para o Untitled.png, medido em 01/08/2026), e ele morre antes do desenho.
+ *
+ * O caminho vai pelo AMBIENTE, como no zenity(): nome de arquivo com aspas ou
+ * cifrao nao pode virar comando, e aqui os nomes sao os do seu disco.
+ *
+ * O resultado vira Pixmap, do lado do servidor: redesenhar depois e um
+ * XCopyArea, sem trafego e sem nada guardado deste lado. */
+static void gerar_imagem(void)
+{
+    Visual *vis = DefaultVisual(dpy, tela);
+    int prof = DefaultDepth(dpy, tela);
+    char cmd[PATH_MAX + 512];
+    int cx, cy, w = 0, h = 0, maxv = 0, x, y;
+    unsigned char *pix;
+    XImage *im;
+    FILE *p;
+
+    if (img_pm) { XFreePixmap(dpy, img_pm); img_pm = 0; }
+    img_w = img_h = 0;
+    img_para_w = cont_w();
+    img_para_h = cont_h();
+
+    cx = img_para_w - 2 * MARGEM;
+    cy = img_para_h - 3 * MARGEM - altura_lin;      /* o resto e da legenda */
+    if (cx < 16 || cy < 16) return;
+
+    setenv("BANCADA_IMG", arquivo, 1);
+    snprintf(cmd, sizeof cmd,
+             "identify -format '%%w %%h\\n' \"$BANCADA_IMG\"'[0]' 2>/dev/null; "
+             "convert \"$BANCADA_IMG\"'[0]' -background '#DEDEDE' -alpha remove "
+             "-alpha off -resize '%dx%d>' -depth 8 ppm:- 2>/dev/null", cx, cy);
+    p = popen(cmd, "r");
+    if (!p) return;
+
+    /* Sem identify (ou com ele falhando) a legenda perde o tamanho natural e o
+     * resto continua: o que importa e a imagem. */
+    if (fscanf(p, "%d %d", &img_nat_w, &img_nat_h) != 2) img_nat_w = img_nat_h = 0;
+
+    /* O cabecalho do PPM: o scanf pula o branco entre os campos, inclusive o
+     * "\n" que sobrou da linha do identify. Depois dele vem UM unico byte de
+     * branco - e a partir do proximo ja e pixel. */
+    if (fscanf(p, " P6 %d %d %d", &w, &h, &maxv) != 3 ||
+        w <= 0 || h <= 0 || w > 10000 || h > 10000 || maxv != 255) {
+        pclose(p);
+        return;
+    }
+    fgetc(p);
+
+    pix = malloc((size_t) w * (size_t) h * 3);
+    if (!pix) { pclose(p); return; }
+    if (fread(pix, 1, (size_t) w * (size_t) h * 3, p) != (size_t) w * (size_t) h * 3) {
+        free(pix); pclose(p); return;                /* truncado: melhor nada */
+    }
+    pclose(p);
+
+    im = XCreateImage(dpy, vis, prof, ZPixmap, 0, NULL, w, h, 32, 0);
+    if (!im) { free(pix); return; }
+    im->data = calloc((size_t) im->bytes_per_line, (size_t) h);
+    if (!im->data) { XDestroyImage(im); free(pix); return; }
+
+    for (y = 0; y < h; y++)
+        for (x = 0; x < w; x++) {
+            const unsigned char *s = pix + ((size_t) y * w + x) * 3;
+            XPutPixel(im, x, y,
+                      componente(vis->red_mask,   s[0]) |
+                      componente(vis->green_mask, s[1]) |
+                      componente(vis->blue_mask,  s[2]));
+        }
+
+    img_pm = XCreatePixmap(dpy, raiz, (unsigned) w, (unsigned) h, (unsigned) prof);
+    XPutImage(dpy, img_pm, gc, im, 0, 0, 0, 0, (unsigned) w, (unsigned) h);
+    XDestroyImage(im);            /* leva o im->data junto */
+    free(pix);
+    img_w = w;
+    img_h = h;
+}
+
+/* Fundo da FACE, e nao do PAPEL branco: e sobre o #DEDEDE que o convert achatou
+ * o alfa, entao a moldura tem de ser a mesma cor, senao a borda de um PNG
+ * transparente aparece como um retangulo cinza dentro do branco. */
+static void desenhar_imagem(void)
+{
+    int w = cont_w(), h = cont_h();
+    char legenda[300];
+    int lw;
+
+    XSetForeground(dpy, gc, FACE);
+    XFillRectangle(dpy, w_ed, gc, 0, 0, (unsigned) w, (unsigned) h);
+
+    /* So gera quando nao ha imagem ou quando o painel mudou de tamanho - o
+     * convert nao pode rodar a cada Expose. */
+    if (!img_pm || img_para_w != w || img_para_h != h) gerar_imagem();
+
+    if (img_pm) {
+        int ix = (w - img_w) / 2;
+        int iy = (h - MARGEM - altura_lin - img_h) / 2;
+        if (ix < 0) ix = 0;
+        if (iy < MARGEM) iy = MARGEM;
+        XCopyArea(dpy, img_pm, w_ed, gc, 0, 0,
+                  (unsigned) img_w, (unsigned) img_h, ix, iy);
+
+        if (img_nat_w > 0 && (img_nat_w != img_w || img_nat_h != img_h))
+            snprintf(legenda, sizeof legenda, "%d x %d  ·  %ld KB  ·  reduzida para caber",
+                     img_nat_w, img_nat_h, (img_bytes + 512) / 1024);
+        else
+            snprintf(legenda, sizeof legenda, "%d x %d  ·  %ld KB",
+                     img_nat_w > 0 ? img_nat_w : img_w,
+                     img_nat_w > 0 ? img_nat_h : img_h, (img_bytes + 512) / 1024);
+    } else {
+        snprintf(legenda, sizeof legenda,
+                 "Nao consegui converter esta imagem (falta o imagemagick?)");
+    }
+
+    lw = colunas_ate(legenda, (int) strlen(legenda)) * avanco;
+    texto(dr_ed, (w - lw) / 2 > 0 ? (w - lw) / 2 : MARGEM,
+          h - MARGEM - altura_lin + base_lin, legenda, &c_fraco);
+}
+
+/* O painel da aba do Claude ENQUANTO ele nao subiu. Sem isto a aba seria um
+ * retangulo preto e mudo, e quem chegasse nela pelo Ctrl+Tab nao teria como
+ * saber que basta um clique. Some assim que o xterm nasce: ele cobre a janela
+ * inteira, e nao ha Expose por baixo de janela filha. */
+static void desenhar_convite(void)
+{
+    static const char *linhas_c[] = {
+        "O Claude nao sobe sozinho.",
+        "Clique aqui, ou no botao Claude da barra, para abrir."
+    };
+    int w = cont_w(), h = cont_h();
+    int y = h / 2 - altura_lin, i;
+
+    XSetForeground(dpy, gc, INK);
+    XFillRectangle(dpy, w_term, gc, 0, 0, (unsigned) w, (unsigned) h);
+
+    for (i = 0; i < 2; i++) {
+        const char *s = linhas_c[i];
+        int lw = colunas_ate(s, (int) strlen(s)) * avanco;
+        int x = (w - lw) / 2;
+        if (x < MARGEM) x = MARGEM;
+        texto(dr_term, x, y + i * altura_lin + base_lin, s, i ? &c_dica : &c_sel);
+    }
+}
+
 static void desenhar(void)
 {
     sincronizar();          /* "sujo" e o cursor vivem nos globais; as abas leem deles */
@@ -951,7 +1309,12 @@ static void desenhar(void)
     /* Na aba do Claude quem desenha o painel e o xterm, e o w_ed nem esta
      * mapeado. Sem esta guarda, a aba do Claude sem arquivo nenhum carregado
      * cairia num linhas[cur_l] com linhas == NULL. */
-    if (!abas[atual].claude && carregada >= 0) desenhar_editor();
+    if (abas[atual].claude && !claude_vivo()) desenhar_convite();
+    if (!abas[atual].claude && carregada >= 0) {
+        if (modo == MODO_HEX)      desenhar_hex();
+        else if (modo == MODO_IMG) desenhar_imagem();
+        else                       desenhar_editor();
+    }
     XFlush(dpy);
 }
 
@@ -963,6 +1326,7 @@ static void seguir_cursor(void)
     int vis, cabe, col;
 
     if (carregada < 0 || n_linhas == 0) return;   /* nenhuma aba de arquivo carregada */
+    if (modo != MODO_TEXTO) return;               /* hex e imagem nao tem cursor */
 
     vis  = (cont_h() - 2 * MARGEM) / altura_lin;
     cabe = (cont_w() - 2 * MARGEM) / avanco;
@@ -1088,12 +1452,21 @@ static void abrir_claude(void)
     }
 }
 
-/* O botao "Claude" da barra so traz a aba para a frente; se o processo tiver
- * morrido (o Claude saiu, o xterm fechou), ressuscita antes. Como o SIGCHLD e
- * SIG_IGN, o filho morto some sozinho e o kill(pid,0) e o teste que sobra. */
+/* Como o SIGCHLD e SIG_IGN, o filho morto some sozinho: nao ha wait() para
+ * colher status, e o kill(pid,0) e o teste que sobra. Serve tanto para o
+ * Claude que nunca subiu (pid_term == 0) quanto para o que saiu. */
+static int claude_vivo(void)
+{
+    return pid_term > 0 && kill(pid_term, 0) == 0;
+}
+
+/* O botao "Claude" da barra traz a aba para a frente e, se o processo nao
+ * estiver de pe, e ELE quem o levanta - na primeira vez como em qualquer
+ * outra. E o unico caminho junto com o clique no painel vazio: nada de subir
+ * Claude por conta propria. */
 static void ir_para_claude(void)
 {
-    if (pid_term <= 0 || kill(pid_term, 0) != 0) abrir_claude();
+    if (!claude_vivo()) abrir_claude();
     ativar(0);
 }
 
@@ -1149,7 +1522,11 @@ static void mostrar_painel(void)
         /* Enquanto esteve escondido o xterm nao soube dos resizes: com "-into"
          * ele so obedece a quem o redimensiona de fora, e isso somos nos. */
         esticar_terminal();
-        focar_terminal();
+        /* Sem processo nao ha xterm para receber foco, e deixa-lo onde estava
+         * daria uma aba que come as teclas sem ninguem para trata-las. O foco
+         * volta para a mae, que e quem tem o XIC e o teclado. */
+        if (claude_vivo()) focar_terminal();
+        else               XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
     } else {
         XUnmapWindow(dpy, w_term);
         XMapWindow(dpy, w_ed);
@@ -1200,6 +1577,8 @@ static void fechar_aba(int i)
     for (k = 0; k < abas[i].n_linhas; k++) free(abas[i].linhas[k]);
     free(abas[i].linhas);
     for (k = 0; k < UNDO_N; k++) soltar_instante(&abas[i].undo[k]);
+    free(abas[i].bruto);                                     /* hex */
+    if (abas[i].img_pm) XFreePixmap(dpy, abas[i].img_pm);    /* imagem */
 
     if (carregada == i) { carregada = -1; globais_zerar(); }
     else if (carregada > i) carregada--;
@@ -1274,7 +1653,10 @@ static void escolher_projeto(void)
     salvar_sessao();                      /* fecha a sessao do projeto que sai */
     snprintf(projeto, sizeof projeto, "%s", linha);
     carregar_pasta(projeto);
-    abrir_claude();                       /* o Claude segue o projeto */
+    /* O Claude segue o projeto - mas so o que JA estava de pe. Trocar de
+     * projeto nao e pedir Claude: se ele nao subiu, continua nao subindo, e a
+     * primeira abertura ja vai nascer na pasta nova, que e a de agora. */
+    if (claude_vivo()) abrir_claude();
     salvar_sessao();                      /* e abre a do que entra */
 }
 
@@ -1321,6 +1703,28 @@ static void tecla(XKeyEvent *ev)
     }
 
     if (carregada < 0) return;             /* nenhuma aba de arquivo carregada */
+
+    /* SOMENTE LEITURA, e a guarda vem antes de tudo: dali para baixo cada ramo
+     * mexe em linhas[cur_l], e no hex e na imagem "linhas" e NULL. Uma tecla
+     * qualquer numa aba dessas nao pode virar segmentation fault. */
+    if (modo != MODO_TEXTO) {
+        int vis = (cont_h() - 2 * MARGEM) / altura_lin;
+        int total = (modo == MODO_HEX) ? linhas_hex() : 0;
+
+        switch (ks) {
+        case XK_Up:    topo--;        break;
+        case XK_Down:  topo++;        break;
+        case XK_Prior: topo -= vis;   break;
+        case XK_Next:  topo += vis;   break;
+        case XK_Home:  topo = 0;      break;
+        case XK_End:   topo = total - vis; break;
+        default: return;
+        }
+        if (topo > total - 1) topo = total - 1;
+        if (topo < 0) topo = 0;
+        desenhar();
+        return;
+    }
 
     switch (ks) {
     case XK_Left: case XK_Right: case XK_Up: case XK_Down:
@@ -1475,7 +1879,9 @@ int main(int argc, char **argv)
     /* SubstructureNotifyMask: o xterm nasce depois, de forma assincrona, e com
      * "-into" ele mantem a geometria de 80x24 com que veio ao mundo. E este
      * aviso que diz a hora certa de estica-lo para o painel inteiro. */
-    at.event_mask = ButtonPressMask | SubstructureNotifyMask;
+    /* ExposureMask: enquanto o Claude nao subiu, o painel e NOSSO - e nele que
+     * o convite ao clique e desenhado, e ele precisa saber quando repintar. */
+    at.event_mask = ExposureMask | ButtonPressMask | SubstructureNotifyMask;
     w_term = XCreateWindow(dpy, win, CONT_X, CONT_Y,
                            (unsigned) (larg - ARVORE_W), (unsigned) (alt - BARRA_H - ABAS_H), 0,
                            CopyFromParent, InputOutput, CopyFromParent,
@@ -1494,6 +1900,7 @@ int main(int argc, char **argv)
     dr_barra = XftDrawCreate(dpy, win,   DefaultVisual(dpy, tela), cm);
     dr_arv   = XftDrawCreate(dpy, w_arv, DefaultVisual(dpy, tela), cm);
     dr_ed    = XftDrawCreate(dpy, w_ed,  DefaultVisual(dpy, tela), cm);
+    dr_term  = XftDrawCreate(dpy, w_term, DefaultVisual(dpy, tela), cm);
 
 #define XCOR(dst, r, g, b) do { rc.red=(r); rc.green=(g); rc.blue=(b); rc.alpha=0xffff; \
         XftColorAllocValue(dpy, DefaultVisual(dpy, tela), cm, &rc, (dst)); } while (0)
@@ -1501,6 +1908,7 @@ int main(int argc, char **argv)
     XCOR(&c_fraco,  0x5000, 0x5000, 0x5000);
     XCOR(&c_sel,    0xffff, 0xffff, 0xffff);
     XCOR(&c_aberto, 0x1000, 0x3000, 0x9000);   /* na arvore: aberto em outra aba */
+    XCOR(&c_dica,   0x9000, 0x9000, 0x9000);   /* convite do painel: fundo preto */
 #undef XCOR
 
     xim = XOpenIM(dpy, NULL, NULL, NULL);
@@ -1528,7 +1936,10 @@ int main(int argc, char **argv)
     XMapWindow(dpy, win);
     XSync(dpy, False);
     pegar_teclas();
-    abrir_claude();
+    /* SEM abrir_claude() aqui, e isso NAO e esquecimento. A bancada nao levanta
+     * o Claude por conta propria: a aba dele sobe com o convite ao clique. Ela
+     * serve de arvore e de editor sem custar os 490 MB do Claude Code para quem
+     * abriu so para olhar um arquivo. */
     mostrar_painel();
     /* Depois de mapear: restaurar abre abas, e abrir aba mapeia e move o foco. */
     restaurar_sessao();
@@ -1553,6 +1964,9 @@ int main(int argc, char **argv)
             break;
         case MapNotify:
             esticar_terminal();
+            /* O xterm nasce assincrono: quando o clique o pediu, ele ainda nao
+             * existia para receber o foco. Este e o momento em que ele existe. */
+            if (abas[atual].claude) focar_terminal();
             break;
         case KeyPress:
             tecla(&ev.xkey);
@@ -1573,6 +1987,21 @@ int main(int argc, char **argv)
                     clique_arvore(ev.xbutton.y);
                 }
                 desenhar();
+            } else if (ev.xbutton.window == w_ed && carregada >= 0 &&
+                       modo != MODO_TEXTO) {
+                /* Leitura: a roda rola o hex, o resto do painel so devolve o
+                 * foco. Nao ha cursor para posicionar, e nem "linhas" para o
+                 * clique cair dentro. */
+                if (modo == MODO_HEX &&
+                    (ev.xbutton.button == Button4 || ev.xbutton.button == Button5)) {
+                    int total = linhas_hex();
+                    topo += (ev.xbutton.button == Button5 ? 3 : -3);
+                    if (topo > total - 1) topo = total - 1;
+                    if (topo < 0) topo = 0;
+                } else if (ev.xbutton.button == Button1) {
+                    XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
+                }
+                desenhar();
             } else if (ev.xbutton.window == w_ed && carregada >= 0) {
                 if (ev.xbutton.button == Button4 || ev.xbutton.button == Button5) {
                     topo += (ev.xbutton.button == Button5 ? 3 : -3);
@@ -1589,7 +2018,12 @@ int main(int argc, char **argv)
                 }
                 desenhar();
             } else if (ev.xbutton.window == w_term) {
-                focar_terminal();
+                /* Chega clique aqui de duas maneiras: no painel vazio, antes de
+                 * o Claude existir - e ai o clique E o pedido de abrir; ou na
+                 * borda de 2px que o xterm deixa de fora, onde so cabe devolver
+                 * o foco a ele. */
+                if (!claude_vivo()) { abrir_claude(); desenhar(); }
+                else                focar_terminal();
             } else if (ev.xbutton.window == win && ev.xbutton.y < BARRA_H) {
                 int i;
                 for (i = 0; i < N_BOTOES; i++)
