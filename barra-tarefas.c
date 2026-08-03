@@ -67,7 +67,7 @@ static Display     *dpy;
 static Window       win;
 static GC           gc;
 static XFontStruct *fonte, *mono;
-static unsigned long FACE, HI, SH, INK;
+static unsigned long FACE, LUZ, SOMBRA, BORDA, TINTA, POCO;
 static int          LARG;
 static time_t       mt_ref;      /* mtime do cache no instante do clique */
 static int          cam_ref;     /* estado da ponte de video no clique */
@@ -161,7 +161,7 @@ static Item fixos_antes[] = {
 };
 static Item fixos_depois[] = {
     { BOTAO_MAIS,  "+",        20, NULL,          NULL,     0, 0 },
-    { RELOGIO,     NULL,       52, NULL,          NULL,     0, 0 },
+    { RELOGIO,     NULL,       58, NULL,          NULL,     0, 0 },
     { BOTAO,       "Desligar", 66, acao_desligar, NULL,     0, 0 },
 };
 
@@ -458,7 +458,7 @@ static void desenhar_popup(void)
         /* O que esta em uso leva um marcador de texto, nao cor nova: a paleta
          * tem cinco cores e nenhuma sobra para "estado". */
         XSetFont(dpy, gc, fonte->fid);
-        XSetForeground(dpy, gc, INK);
+        XSetForeground(dpy, gc, TINTA);
         XDrawString(dpy, alvo, gc, 8, y + POP_LINHA / 2 + 4,
                     pop_atual[i] ? ">" : " ", 1);
         XDrawString(dpy, alvo, gc, 20, y + POP_LINHA / 2 + 4,
@@ -633,26 +633,31 @@ static void levantado(int x, int y, int w, int h)
 
     XSetForeground(dpy, gc, FACE);
     XFillRectangle(dpy, alvo, gc, x, y, w, h);
-    linha(x, y, x1, y, HI);                      /* topo */
-    linha(x, y, x, y1, HI);                      /* esquerda */
-    linha(x, y1, x1, y1, INK);                   /* baixo, externo */
-    linha(x1, y, x1, y1, INK);                   /* direita, externo */
-    linha(x + 1, y1 - 1, x1 - 1, y1 - 1, SH);    /* baixo, interno */
-    linha(x1 - 1, y + 1, x1 - 1, y1 - 1, SH);    /* direita, interno */
+    linha(x, y, x1, y, LUZ);                       /* topo */
+    linha(x, y, x, y1, LUZ);                       /* esquerda */
+    linha(x, y1, x1, y1, BORDA);                   /* baixo, externo */
+    linha(x1, y, x1, y1, BORDA);                   /* direita, externo */
+    linha(x + 1, y1 - 1, x1 - 1, y1 - 1, SOMBRA);  /* baixo, interno */
+    linha(x1 - 1, y + 1, x1 - 1, y1 - 1, SOMBRA);  /* direita, interno */
 }
 
 static void gravado(int x, int y, int w, int h)
 {
     int x1 = x + w - 1, y1 = y + h - 1;
 
-    XSetForeground(dpy, gc, HI);
+    /* O preenchimento e POCO, nao LUZ. Sao papeis diferentes que na paleta
+     * clara calhavam de ser a mesma cor (#FFFFFF): "bisel claro" e "fundo de
+     * campo afundado". No escuro eles se separam - um campo afundado tem de
+     * ficar MAIS ESCURO que a face, e nao mais claro. Era o unico lugar onde a
+     * troca de tema nao era so trocar constante. */
+    XSetForeground(dpy, gc, POCO);
     XFillRectangle(dpy, alvo, gc, x, y, w, h);
-    linha(x, y, x1, y, SH);
-    linha(x, y, x, y1, SH);
-    linha(x + 1, y + 1, x1 - 1, y + 1, INK);
-    linha(x + 1, y + 1, x + 1, y1 - 1, INK);
-    linha(x, y1, x1, y1, HI);
-    linha(x1, y, x1, y1, HI);
+    linha(x, y, x1, y, SOMBRA);
+    linha(x, y, x, y1, SOMBRA);
+    linha(x + 1, y + 1, x1 - 1, y + 1, BORDA);
+    linha(x + 1, y + 1, x + 1, y1 - 1, BORDA);
+    linha(x, y1, x1, y1, LUZ);
+    linha(x1, y, x1, y1, LUZ);
 }
 
 static void texto(int cx, int cy, const char *s, XFontStruct *f)
@@ -660,7 +665,7 @@ static void texto(int cx, int cy, const char *s, XFontStruct *f)
     int w = XTextWidth(f, s, strlen(s));
 
     XSetFont(dpy, gc, f->fid);
-    XSetForeground(dpy, gc, INK);
+    XSetForeground(dpy, gc, TINTA);
     XDrawString(dpy, alvo, gc, cx - w / 2,
                 cy + (f->ascent - f->descent) / 2, s, strlen(s));
 }
@@ -728,7 +733,7 @@ static void desenhar(void)
                 tri[0].x = cxs - 3; tri[0].y = cys - 1;
                 tri[1].x = cxs + 3; tri[1].y = cys - 1;
                 tri[2].x = cxs;     tri[2].y = cys + 3;
-                XSetForeground(dpy, gc, INK);
+                XSetForeground(dpy, gc, TINTA);
                 XFillPolygon(dpy, alvo, gc, tri, 3, Convex, CoordModeOrigin);
             }
         } else if (it->tipo == BOTAO_APP) {
@@ -1242,15 +1247,50 @@ int main(void)
         return 1;
     }
 
-    FACE = cor("#DEDEDE");
-    HI   = cor("#FFFFFF");
-    SH   = cor("#808080");
-    INK  = cor("#000000");
+    /* DUAS PALETAS, seis papeis. O escuro entrou em 03/08/2026, a pedido de quem
+     * usa, depois que o painel do panorama chegou nesse tom: a barra era a
+     * ultima coisa clara numa sessao que ficou escura inteira.
+     *
+     * A paleta clara NAO foi apagada de proposito. Ela nao e gosto: saiu pixel a
+     * pixel do Untitled.png, o dialogo de login do xrdp, para a barra parecer
+     * parte da mesma sessao (ver README, "A paleta e o bisel, amostrados").
+     * Trocar BARRA_ESCURA para 0 devolve aquele visual inteiro.
+     *
+     * O bisel Motif continua o mesmo, e e ele que carrega o "arcaico": borda
+     * assimetrica, sem meio-tom, sem cantos redondos. So os tons mudaram. */
+#define BARRA_ESCURA 1
+#if BARRA_ESCURA
+    FACE   = cor("#333333");   /* face dos botoes; o mesmo tom do cartao do panorama */
+    LUZ    = cor("#4E4E4E");   /* bisel claro */
+    SOMBRA = cor("#1A1A1A");   /* sombra interna */
+    BORDA  = cor("#101010");   /* borda externa */
+    TINTA  = cor("#E8E8E8");   /* texto */
+    POCO   = cor("#1E1E1E");   /* fundo de campo afundado: relogio, calha, mudo */
+#else
+    FACE   = cor("#DEDEDE");
+    LUZ    = cor("#FFFFFF");
+    SOMBRA = cor("#808080");
+    BORDA  = cor("#000000");
+    TINTA  = cor("#000000");
+    POCO   = cor("#FFFFFF");
+#endif
 
     fonte = XLoadQueryFont(dpy,
         "-*-helvetica-medium-r-normal--11-*-*-*-*-*-iso8859-1");
+
+    /* O relogio em NEGRITO e maior (13 em vez de 10), a pedido de quem usa em
+     * 03/08/2026: e a unica coisa da barra que se le de longe e de relance, e no
+     * fundo escuro o traco fino da fixed-medium sumia.
+     *
+     * A -misc-fixed-bold-13 e monoespacada (o "c" no nome), que e o que importa
+     * aqui: com fonte proporcional os digitos mudam de largura e o relogio
+     * DANCA de posicao a cada minuto, porque o texto e centralizado. O plano B
+     * e a fonte antiga - o negrito e um luxo, e uma barra sem relogio nao e. */
     mono  = XLoadQueryFont(dpy,
-        "-*-fixed-medium-r-normal--10-*-*-*-*-*-iso8859-1");
+        "-*-fixed-bold-r-normal--13-*-*-*-*-c-*-iso8859-1");
+    if (!mono)
+        mono = XLoadQueryFont(dpy,
+            "-*-fixed-medium-r-normal--10-*-*-*-*-*-iso8859-1");
     if (!fonte || !mono) {
         fprintf(stderr, "barra: fonte core do X nao encontrada\n");
         return 1;

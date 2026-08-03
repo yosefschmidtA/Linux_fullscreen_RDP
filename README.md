@@ -258,8 +258,13 @@ negro.** Nesse caso, ou devolva o painel (`xfce4-panel &` no `startwm.sh`), ou
 remova o atalho de minimizar.
 
 > **A barra de tarefas não muda isto.** Ela existe desde 30/07/2026, mas **não
-> tem lista de janelas** — de propósito. Então o `cycle_hidden` continua sendo a
-> única rede de segurança do minimizar, com o mesmo peso de antes.
+> tem lista de janelas** — de propósito.
+
+> **Desde 03/08/2026 há uma segunda saída, e ela é a boa:** o `panorama`. Toca a
+> tecla **Win** e aparece a grade de tudo que está aberto, minimizado ou não,
+> cada janela com a própria imagem — escolhe e ela volta. O `cycle_hidden`
+> continua valendo como rede de segurança do `Alt+Tab`, mas deixou de ser a
+> única. Ver "O panorama: aperta Win e vê tudo".
 
 ## Desligar (e a interface)
 
@@ -396,6 +401,59 @@ aquele visual, é Motif/CDE.
 TrueType. O próprio diálogo do xrdp é desenhado com fonte core, então o texto
 fica *idêntico* e não apenas parecido — sem antialiasing nenhum. É por isso que
 o `install.sh` instala `xfonts-base`: sem as fontes core a barra não sobe.
+
+### O tema escuro (03/08/2026), e o papel que a cor branca escondia
+
+Quando o painel do panorama chegou no tom escuro, a barra virou a última coisa
+clara de uma sessão que ficou escura inteira, e quem usa pediu a troca. Ela
+parecia ser "trocar quatro constantes". Não era.
+
+A paleta clara tinha **cinco cores para seis papéis**, e ninguém percebia porque
+dois papéis calhavam de ser a mesma cor:
+
+| Papel | Claro | Escuro |
+|---|---|---|
+| `FACE` — face dos botões | `#DEDEDE` | `#333333` |
+| `LUZ` — bisel claro | `#FFFFFF` | `#4E4E4E` |
+| `SOMBRA` — sombra interna | `#808080` | `#1A1A1A` |
+| `BORDA` — borda externa | `#000000` | `#101010` |
+| `TINTA` — texto | `#000000` | `#E8E8E8` |
+| `POCO` — fundo de campo afundado | `#FFFFFF` | `#1E1E1E` |
+
+`LUZ` e `POCO` eram os dois `#FFFFFF`; `BORDA` e `TINTA` eram os dois `#000000`.
+No escuro cada par se separa, e o que quebra sem isso é o `gravado()`: um campo
+afundado — o relógio, a calha do volume, o botão de mudo apertado — tem de ficar
+**mais escuro** que a face, e não mais claro. Preenchê-lo com o "bisel claro"
+daria um retângulo cinza-claro no meio da barra escura.
+
+O bisel Motif assimétrico não mudou uma linha. É ele que carrega o "arcaico", e
+não os tons.
+
+**A paleta clara não foi apagada**, porque ela não é gosto: saiu pixel a pixel do
+`Untitled.png`. Ela vive atrás de um `#define BARRA_ESCURA 1` — trocar o `1` por
+`0` devolve o visual do diálogo de login inteiro.
+
+**Os ícones dos apps precisaram acompanhar.** Quem os converte é o `barra-apps`,
+que achata o alfa sobre a cor da face (a barra não sabe o que é alfa; ver
+"Atalhos de aplicativo, com ícone"). Achatados sobre `#DEDEDE` e desenhados sobre
+`#333333`, cada ícone ganharia um quadrado claro em volta. A cor agora entra no
+**nome do arquivo de cache**:
+
+```
+~/.cache/linux-fullscreen/apps/brave-browser-333333.rgb
+```
+
+Assim trocar a paleta invalida os ícones **sozinho** — sem passo manual, que é
+regra deste projeto —, e os achatados sobre a cor velha são apagados na primeira
+listagem, para o cache não crescer uma cópia por paleta já usada.
+
+**O relógio ficou em negrito**, a pedido: `-misc-fixed-bold-13` no lugar da
+`fixed-medium-10`. É a única coisa da barra que se lê de longe e de relance, e no
+fundo escuro o traço fino sumia. A fonte tem de ser **monoespaçada** (o `c` no
+nome): o texto é centralizado, e com fonte proporcional os dígitos mudam de
+largura e o relógio *dança* de posição a cada minuto. O campo passou de 52 para
+58 px para o negrito não encostar nas bordas, e o plano B é a fonte antiga — o
+negrito é um luxo, uma barra sem relógio não é.
 
 Consequência a lembrar: os rótulos têm que ser **ASCII**. A fonte está em
 `iso8859-1` e o `.c` em UTF-8, então um rótulo acentuado sai corrompido no
@@ -2657,6 +2715,7 @@ foi desinstalado no mesmo dia.
 | `barra-tarefas.c` | **compilado** para `/usr/local/bin/barra-tarefas` |
 | `bancada.c` | **compilado** para `/usr/local/bin/bancada` |
 | `terminal.c` | **compilado** para `/usr/local/bin/terminal` |
+| `panorama.c` | **compilado** para `/usr/local/bin/panorama` |
 | `perfil.sh` | `/usr/local/share/linux-fullscreen/perfil.sh` (+ uma linha no `.bashrc`) |
 | `windows/audio-padrao.ps1` | `/usr/local/share/linux-fullscreen/audio-padrao.ps1` |
 | `xfwm-atalhos.sh` | `/usr/local/share/linux-fullscreen/xfwm-atalhos.sh` |
@@ -2665,17 +2724,21 @@ foi desinstalado no mesmo dia.
 | `v4l2loopback.service` | `/etc/systemd/system/` |
 | `i3.config` | `~/.config/i3/config` (só serve se voltar ao i3) |
 
-São **três itens compilados**, todos no passo 2 e todos C com Xlib cru:
+São **quatro itens compilados**, todos no passo 2 e todos C com Xlib cru:
 
 ```bash
 gcc -O2 -Wall -o barra-tarefas barra-tarefas.c -lX11 -lXrandr
 gcc -O2 -Wall -o bancada  bancada.c  $(pkg-config --cflags xft) -lX11 -lXft
 gcc -O2 -Wall -o terminal terminal.c $(pkg-config --cflags xft) -lX11 -lXft -lfontconfig
+gcc -O2 -Wall -o panorama panorama.c $(pkg-config --cflags xft) \
+    -lX11 -lXft -lXi -lXrandr -lXcomposite -lXrender -lm
 ```
 
 Daí `gcc`, `libx11-dev`, `libxrandr-dev`, `libxft-dev` e `xfonts-base` na lista
 de pacotes — o `-lfontconfig` do terminal não pede pacote novo, porque o
-`libxft-dev` já depende do `libfontconfig1-dev`.
+`libxft-dev` já depende do `libfontconfig1-dev`. O panorama acrescenta
+`libxi-dev` (eventos crus de teclado), `libxcomposite-dev` e `libxrender-dev`
+(as miniaturas); os três são pacotes pequenos, sem toolkit atrás.
 
 O que se versiona é o `.c`: binário é derivado e vai para o `.gitignore`.
 **`barra-tarefas` e `terminal` estão lá; o `bancada` não** — ele foi commitado
@@ -2683,9 +2746,9 @@ junto com o `bancada.c` e continua rastreado, o que faz cada recompilação
 aparecer como alteração no `git status`. Acertar isso é um
 `git rm --cached bancada` mais a linha no `.gitignore`.
 
-Nenhum dos três é necessário para a sessão subir, então cada um falha sozinho e
-com aviso em vez de derrubar a instalação. Só a barra entra na sessão pelo
-`startwm.sh`; a bancada e o terminal são por demanda. O `terminal` é instalado
+Nenhum dos quatro é necessário para a sessão subir, então cada um falha sozinho
+e com aviso em vez de derrubar a instalação. A barra **e o panorama** entram na
+sessão pelo `startwm.sh`; a bancada e o terminal são por demanda. O `terminal` é instalado
 por ser um programa que se abre, **não** porque algo passe a depender dele: a
 bancada continua usando o xterm na aba do Claude.
 
@@ -4513,10 +4576,12 @@ kill -USR1 $!
 cat /tmp/grade.txt
 ```
 
-Isso existe porque, como já está registrado neste README, `import -window` de
-uma janela coberta devolve os pixels de quem está por cima — e neste projeto
-já se perseguiu um bug que não existia por causa disso. O despejo é o estado
-real; o print serve só para o que ele não alcança, que é o desenho.
+Isso existe porque, como já está registrado neste README, capturar uma janela
+coberta não devolve o conteúdo dela — e neste projeto já se perseguiu um bug que
+não existia por causa disso. (Medido em 03/08/2026, ao escrever o panorama: o
+que volta são **zeros**, não os pixels do vizinho como se dizia aqui. Ver "A
+miniatura: sem Composite não existe".) O despejo é o estado real; o print serve
+só para o que ele não alcança, que é o desenho.
 
 ### Compilar e usar
 
@@ -4575,6 +4640,260 @@ seria mais um arquivo para manter por um caminho que quase não se usa aqui.
 Nada disso muda a aba 0 da bancada, que segue no xterm com `-into` — a
 invariante continua de pé. O `terminal.c` virou o terminal **da sessão**, não o
 terminal **da bancada**.
+
+## O panorama: aperta Win e vê tudo (03/08/2026)
+
+Esta sessão nunca teve lista de janelas. A barra não tem uma **de propósito**
+(ver "A barra de tarefas"), e por isso minimizar dependia inteiramente do
+`Alt+Tab` com `cycle_hidden=true` — que mostra uma janela por vez e não diz o
+que existe. Quem usa pediu o gesto do GNOME: **toca a tecla Win e aparece tudo
+que está aberto**, com a cara de cada janela; escolhe e ela volta.
+
+É o `panorama.c` — um daemon de **0,6 MB de PSS** parado, que só desenha
+enquanto se olha para ele. A barra continua sem lista de janelas: a lista existe
+só durante o gesto.
+
+```
++--------------------------------------------------------------+
+| Janelas abertas                                            4  |
++--------------------------------------------------------------+
+|  +---------------------+   +---------------------+            |
+|  |  [ a miniatura da ] |   |  [ a miniatura da ] |            |
+|  |  [ janela, viva   ] |   |  [ janela, viva   ] |            |
+|  +---------------------+   +---------------------+            |
+|  | [ic] Brave - YouTube|   | [ic] bancada        |            |
+|  +---------------------+   +---------------------+            |
+|  +---------------------+   +---------------------+            |
+|  | ... Terminal        |   | ... Terminal   (min)|            |
+|  +---------------------+   +---------------------+            |
++--------------------------------------------------------------+
+| Enter abre · setas escolhem · digite para filtrar · Esc fecha |
++--------------------------------------------------------------+
+```
+
+| Gesto | O que faz |
+|---|---|
+| tocar **Win** e soltar | abre; tocar de novo fecha |
+| **setas** | andam na grade (↑/↓ pulam uma linha inteira) |
+| **Enter** | traz a janela escolhida — desminimiza, troca de área e dá foco |
+| **digitar** | filtra por título ou classe, e os cartões se reorganizam |
+| **Esc** ou clique fora | fecha sem mexer em nada |
+| clique num cartão | o mesmo que escolher e dar Enter |
+| clique no **×** do cartão | fecha aquela janela; o painel continua aberto |
+| **Del** | o mesmo, pelo teclado |
+| `panorama` no shell | abre o painel do daemon que já está de pé |
+| `pkill -USR1 -x panorama` | idem, para amarrar numa tecla combinada |
+
+### A tecla Win sozinha não pode ser um atalho do xfwm4
+
+Atalho do `xfce4-keyboard-shortcuts` exige uma **combinação**. Uma tecla
+modificadora sozinha não serve, e a razão é a mesma que já custou dias a este
+projeto (ver "A regra que faltava: uma tecla por ação"): um passive grab em
+`Super_L` sem modificador captura a tecla no instante em que ela **desce**, e o
+grab tem um dono só. O `Super+←` do tiling nunca mais chegaria ao xfwm4.
+
+A saída é não pegar grab nenhum. O **XInput2** entrega eventos *crus*
+(`XI_RawKeyPress`/`XI_RawKeyRelease`) a quem pedir, sem tirar a tecla de
+ninguém: o panorama **observa**, não intercepta. Medido em 03/08/2026 nesta
+sessão:
+
+```
+XI version on server: 2.4
+xrdpKeyboard  id=7  [slave keyboard (3)]
+PRESS   keycode=115 keysym=Super_L      <- a tecla Win chega inteira
+RELEASE keycode=115 keysym=Super_L
+```
+
+Duas coisas de uma vez: os eventos crus funcionam sob xrdp, **e o mstsc repassa
+a tecla Win** em vez de engoli-la no Windows.
+
+A regra do gesto: abre no **release** do Super, e só se nenhuma outra tecla nem
+botão do mouse tiver descido no meio, e se o toque durou menos de 800 ms. Assim
+`Super+←`, `Super+D` e `Super+R` continuam intactos, e segurar a tecla não
+dispara nada.
+
+**Armadilha do auto-repeat.** Medido no mesmo dia: o xrdp entrega repetição de
+tecla como pares **RELEASE+PRESS**, não como PRESS seguido —
+
+```
+PRESS   keycode=38 keysym=a
+RELEASE keycode=38 keysym=a
+PRESS   keycode=38 keysym=a      <- isto é uma tecla segurada, não duas batidas
+```
+
+Segurar o Super poderia, então, parecer um toque. Por isso um PRESS do próprio
+Super **estando já armado** desarma o gesto: é repetição, não toque.
+
+### A miniatura: sem Composite não existe
+
+A primeira versão do painel mostrava só ícone e título, porque o compositor está
+desligado de propósito (`use_compositing=false`, +14% de FPS medido em
+28/07/2026) e sem compositor não há pixel de janela minimizada em lugar nenhum.
+Isso valia. O que **não** se sabia era o que exatamente acontece com uma janela
+apenas coberta — o README dizia "o `import` devolve os pixels de quem está por
+cima". Medido em 03/08/2026 com duas janelas controladas, uma 100% em cima da
+outra:
+
+```
+lido da janela de BAIXO, com ela 100% coberta:
+  vermelho     0   verde     0   azul     0   outro 30000   <- tudo zero
+```
+
+**Nem o conteúdo dela, nem o do vizinho: zeros.** A correção da frase antiga
+está em "Problemas conhecidos". Foi o que explicou uma captura anterior em que
+um terminal saiu com a metade de cima certa e o resto preto: a parte preta era
+exatamente a região que a bancada cobria.
+
+A saída é o **Composite**, sem virar compositor:
+
+```c
+XCompositeRedirectSubwindows(dpy, raiz, CompositeRedirectAutomatic);
+```
+
+Com `Automatic`, cada janela de primeiro nível passa a ter o próprio pixmap fora
+da tela **e o servidor continua compondo a tela sozinho**. Ninguém precisa
+desenhar a área de trabalho, o xfwm4 não sabe de nada e o `use_compositing` dele
+continua `false`. A captura passa a sair inteira mesmo coberta.
+
+O medo era o preço, já que este projeto desligou o compositor justamente por
+desempenho. Medido, alternando quatro vezes para o resultado não depender da
+ordem (2000 retângulos 90x70 numa janela 800x600, com `XSync`):
+
+| passada | sem redirect | com redirect |
+|---|---|---|
+| 1 | 27,7 ms | 18,1 ms |
+| 2 | 48,3 ms | 22,3 ms |
+| 3 | 29,5 ms | 28,7 ms |
+| 4 | 26,4 ms | 22,0 ms |
+
+**Nunca ficou mais lento** — e faz sentido: desenhar numa janela parcialmente
+coberta deixa de precisar do recorte contra as vizinhas. O custo aparece na RAM
+do Xorg: **+16 MB** com a sessão inteira redirecionada.
+
+> **O que essa medição não cobre.** Ela mede o caminho cliente→servidor. O
+> caminho servidor→xrdp→rede **não** foi medido isoladamente; o que se sabe é
+> que a sessão seguiu fluida em uso normal. Se um dia a sessão engasgar sem
+> explicação, `pkill -x panorama` desfaz o redirecionamento na hora — ele é por
+> cliente, e o servidor o desmancha sozinho quando o processo sai.
+
+### Escalar no servidor: 0,22 ms contra 15 ms
+
+O caminho ingênuo para uma miniatura é `XGetImage` + reamostrar na CPU. Medido:
+**10 a 20 ms por janela**, e ainda arrasta ~11 MB de pixel pelo socket a cada
+uma. O caminho certo é deixar tudo dentro do servidor, com o XRender fazendo a
+escala:
+
+```c
+t.matrix[0][0] = XDoubleToFixed((double) a.width  / mw);
+t.matrix[1][1] = XDoubleToFixed((double) a.height / mh);
+XRenderSetPictureTransform(dpy, po, &t);
+XRenderSetPictureFilter(dpy, po, "good", NULL, 0);
+XRenderComposite(dpy, PictOpSrc, po, None, pd, 0,0,0,0,0,0, mw, mh);
+```
+
+**0,22 ms por miniatura**, sem trazer um pixel para o processo. É isso que
+permite gerar todas as miniaturas no instante em que o painel abre, e reescalar
+cada cartão a cada quadro da animação sem pensar no custo.
+
+### Quem é a janela: o frame, não o cliente
+
+O `_NET_CLIENT_LIST` dá a janela do **cliente**, que o xfwm4 reparenta para
+dentro de um frame com barra de título. Quem é filho do root — e portanto quem o
+redirecionamento alcança — é o **frame**. Nomear o pixmap da janela do cliente
+dá `BadMatch`. Daí o `ate_o_root()`, que sobe a árvore até o filho do root:
+
+```
+cliente 0x1000002   frame 0xc0021a    1278x1041   -> a miniatura sai daqui
+```
+
+De brinde, a miniatura vem com a barra de título, que é como a janela realmente
+se parece na tela.
+
+### Minimizada não tem pixmap: o cache
+
+Ao desmapear, o servidor libera o pixmap — e minimizada é justamente o caso que
+mais importa aqui. Por isso a miniatura fica **guardada** (um Pixmap de 360 px
+de largura por janela, no servidor), e a da janela **ativa** é refrescada 2
+segundos depois da última atividade de teclado ou mouse — que este programa já
+recebe de graça pelos eventos crus que usa para a tecla Win.
+
+Parado, ele não acorda: sem atividade, o `select` fica **sem timeout nenhum**.
+O resultado é que uma janela minimizada aparece como estava pouco antes de
+sumir, e o custo disso, com o usuário longe do teclado, é zero.
+
+O cache é podado na listagem: janela que fechou perde o Pixmap. Sem isso, uma
+sessão longa acumularia miniaturas de janelas mortas.
+
+### Por que um painel central, e não a tela cheia como o GNOME
+
+Cada pixel repintado aqui é CPU comprimindo e TCP transmitindo. Escurecer os
+dois monitores custaria 4480x1080 = 4,8 Mpx comprimidos **por abertura e por
+fechamento**, toda vez que a tecla fosse tocada. O painel central pinta o que
+precisa e some sem tocar no resto da tela. Escolha de quem usa, em 03/08/2026,
+com os dois desenhos na mão.
+
+O painel tem tamanho **fixo enquanto está aberto**, calculado para caber todas
+as janelas. Filtrar não encolhe a janela: os cartões é que se reorganizam e
+crescem dentro dela — que é de onde vem o movimento que se pediu ("elas se
+reorganizando ali"). A entrada é escalonada, um cartão a cada 22 ms, com
+suavização `1-(1-p)³`; a reorganização inteira dura 190 ms.
+
+Cada quadro é montado num **Pixmap** e entregue à tela com um `XCopyArea` só —
+a tela nunca vê um quadro pela metade, e o link RDP recebe uma região por
+quadro em vez de N retângulos.
+
+### Fechar uma janela pelo painel (03/08/2026)
+
+Cada cartão tem um **×** no canto — só o que está sob o mouse, como no GNOME:
+um × em cada cartão o tempo todo vira campo minado num painel feito para ser
+clicado depressa. Ele fica vermelho quando o ponteiro entra nele.
+
+O que ele manda é um `_NET_CLOSE_WINDOW`, o pedido **educado**: passa pelo
+gerenciador de janelas, que entrega um `WM_DELETE_WINDOW` ao programa. Quem tem
+trabalho por salvar pergunta antes, exatamente como faria no × da barra de
+título. Nada de `XKillClient`, que derruba a conexão do cliente e perde o que
+estiver aberto sem dizer nada.
+
+**O cartão não some no clique.** Quem manda tirá-lo é o `PropertyNotify` do
+`_NET_CLIENT_LIST`, quando o gerenciador confirma que a janela morreu — o
+programa pode demorar, pode perguntar antes e pode até **recusar**, e sumir com
+o cartão na hora seria mentir sobre isso. Do mesmo evento vem de graça o caso
+oposto: janela que **nasce** com o painel aberto entra na grade sozinha.
+
+Essa máscara de eventos é ligada em `abrir()` e desligada em `fechar()`. O root
+muda de propriedade o tempo todo (foco, área de trabalho, lista de janelas) e um
+daemon parado não pode acordar a cada uma delas.
+
+Quando a janela some, as outras **deslizam** para as posições novas em vez de
+saltar: antes de relistar, guarda-se onde cada cartão está, e depois cada
+sobrevivente é reencaixado de onde estava para onde vai. Quem não estava na
+lista antes nasce crescendo. Fechar a última janela fecha o painel junto.
+
+Um detalhe de interação: o diálogo de "salvar?" que aparecer fica **atrás** do
+painel, que está com o teclado e o ponteiro capturados. `Esc` fecha o painel e o
+diálogo está ali.
+
+### Detalhes que custaram tempo
+
+- **`XGetWindowProperty` com formato 32 devolve array de `long`**, que aqui tem
+  8 bytes, não 4. Ler o `_NET_WM_ICON` como `uint32_t` desalinha tudo.
+- **Título pode não ser UTF-8.** A bancada e o terminal deste projeto só
+  publicam `WM_NAME` (tipo `STRING`, latin-1 pelo padrão, UTF-8 na prática). O
+  Xft não perdoa byte inválido: valida-se o UTF-8 e, se falhar, converte-se de
+  latin-1. E corta-se o multibyte pela metade no fim do buffer, senão sobra byte
+  solto virando lixo desenhado.
+- **`sigaction` sem `SA_RESTART`.** O `signal()` da glibc liga o `SA_RESTART`
+  sozinho; com ele, o `read()` de dentro do Xlib é reiniciado após o sinal e o
+  `select` nunca volta — o `SIGUSR1` só teria efeito no próximo evento do X,
+  isto é, tecla morta até alguém mexer o mouse.
+- **`XSetErrorHandler` é obrigatório.** Mexer em janelas de outros programas dá
+  `BadWindow` quando uma delas morre entre a listagem e a consulta, e o Composite
+  dá `BadMatch` para janela que saiu de cena. O tratador padrão do Xlib **mata o
+  processo** — e este é um daemon que precisa atravessar o dia.
+- **Instância única por seleção do X**, não por arquivo de pid: dois daemons
+  escutando a mesma tecla abririam dois painéis, e o de baixo ficaria com o grab
+  preso. Se já há dono, a segunda invocação vira "mostre agora" e sai — é o que
+  faz `panorama` na linha de comando servir de gatilho.
 
 ## O grafo do projeto (graphify, 31/07/2026)
 

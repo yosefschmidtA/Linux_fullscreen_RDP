@@ -60,7 +60,8 @@ apt-get install -y --no-install-recommends \
     xrdp xorgxrdp xfwm4 xfce4-settings exo-utils xfce4-appfinder \
     i3 xfce4-terminal dbus-x11 x11-xserver-utils fonts-dejavu-core \
     zenity x11-utils gcc libx11-dev libxrandr-dev xfonts-base imagemagick \
-    libxft-dev fonts-dejavu-core xterm ranger tmux
+    libxft-dev fonts-dejavu-core xterm ranger tmux \
+    libxi-dev libxcomposite-dev libxrender-dev
 
 echo
 echo "==> [2/7] Scripts auxiliares, servico do X11-unix e itens do menu"
@@ -98,12 +99,12 @@ else
     echo "           rode: bash $SRC/compilar-v4l2loopback"
 fi
 
-# Os TRES componentes compilados deste repositorio, todos C com Xlib cru e sem
-# toolkit. O startwm.sh sobe a barra a cada login; a bancada e o terminal sao
-# por demanda. Ver README, "A barra de tarefas", "Trocar o VS Code" e "Um
-# emulador de terminal escrito aqui".
+# Os QUATRO componentes compilados deste repositorio, todos C com Xlib cru e sem
+# toolkit. O startwm.sh sobe a barra e o panorama a cada login; a bancada e o
+# terminal sao por demanda. Ver README, "A barra de tarefas", "Trocar o VS Code",
+# "Um emulador de terminal escrito aqui" e "O panorama: aperta Win e ve tudo".
 #
-# Nenhum dos tres e obrigatorio para a sessao subir, e por isso cada um falha
+# Nenhum dos quatro e obrigatorio para a sessao subir, e por isso cada um falha
 # sozinho, com aviso, em vez de derrubar a instalacao inteira.
 if gcc -O2 -Wall -o "$SRC/barra-tarefas" "$SRC/barra-tarefas.c" \
         -lX11 -lXrandr 2>/dev/null; then
@@ -144,6 +145,28 @@ if gcc -O2 -Wall -o "$SRC/terminal" "$SRC/terminal.c" \
     echo "    terminal compilado e instalado"
 else
     echo "    AVISO: terminal nao compilou (falta libxft-dev?); segue sem ele"
+fi
+
+# O panorama: toca a tecla Win e aparece a grade das janelas abertas, com a
+# miniatura de cada uma. Entra na sessao pelo startwm.sh, como a barra.
+#
+# Sao tres bibliotecas a mais, e cada uma resolve uma coisa que nao tinha outro
+# jeito (ver README, "O panorama"):
+#   -lXi          eventos CRUS de teclado, que e como se detecta a tecla Win
+#                 sozinha sem roubar o Super do xfwm4 com um grab
+#   -lXcomposite  o redirecionamento que faz a captura de uma janela COBERTA
+#                 sair inteira - sem ele a miniatura volta zerada
+#   -lXrender     a escala da miniatura dentro do servidor: 0,22 ms contra os
+#                 ~15 ms de trazer a imagem inteira para ca e reamostrar na CPU
+# O -lm e do easing da animacao (pow/sqrt/ceil).
+if gcc -O2 -Wall -o "$SRC/panorama" "$SRC/panorama.c" \
+        $(pkg-config --cflags xft 2>/dev/null) \
+        -lX11 -lXft -lXi -lXrandr -lXcomposite -lXrender -lm 2>/dev/null; then
+    install -m 755 "$SRC/panorama" /usr/local/bin/panorama
+    echo "    panorama compilado e instalado"
+else
+    echo "    AVISO: panorama nao compilou (falta libxi-dev/libxcomposite-dev?)"
+    echo "           a sessao sobe sem ele; o Alt+Tab continua valendo"
 fi
 
 # O trecho que entra no shell: a funcao `bancada`, que abre na pasta atual e

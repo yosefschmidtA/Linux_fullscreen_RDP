@@ -168,6 +168,19 @@ exec dbus-launch --exit-with-session sh -c '
     # nao precisa de sleep aqui nem de coordenada chumbada.
     [ -x /usr/local/bin/barra-tarefas ] && /usr/local/bin/barra-tarefas &
 
+    # Panorama: toca a tecla Win e aparece a grade das janelas abertas, cada uma
+    # com a propria miniatura - o caminho de volta para o que se minimizou. Sem
+    # ele, so o Alt+Tab (que depende do cycle_hidden=true no xfwm4.xml).
+    #
+    # Sobe DEPOIS do xfsettingsd e ANTES do xfwm4, e a ordem nao importa: ele
+    # nao pega grab de tecla nenhum. Quem detecta a tecla Win e o XInput2 com
+    # eventos crus, que chegam sem tirar a tecla de ninguem - por isso o
+    # Super+seta do tiling continua inteiro no xfwm4. Ver README, "O panorama".
+    #
+    # Parado ele custa 0,6 MB de PSS e nao acorda a CPU; a fonte so e carregada
+    # na primeira vez que o painel abre.
+    [ -x /usr/local/bin/panorama ] && /usr/local/bin/panorama &
+
     # Som. Nao ha placa de som nesta VM (aplay -l diz "no soundcards found"):
     # o audio sai por um sink falso do PulseAudio que escreve no canal de audio
     # do xrdp, e o mstsc toca do lado do Windows. Quem faz isso e o

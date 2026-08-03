@@ -26,9 +26,10 @@ só a seção necessária. Ler tudo custa ~35 mil tokens e quase nunca é precis
 |---|---|
 | `install.sh` | instalador principal, idempotente. Compila a barra no passo 2 |
 | `startwm.sh` | → `/etc/xrdp/startwm.sh`. Sobe a sessão inteira; limpa vars do WSLg |
-| `barra-tarefas.c` | C + Xlib cru, 3,0 MB de RSS. Fonte **core**, iso8859-1 |
+| `barra-tarefas.c` | C + Xlib cru, 2,9 MB de RSS (387 kB de PSS). Fonte **core**, iso8859-1. **Escura** desde 03/08/2026 (`#define BARRA_ESCURA`; a paleta clara amostrada do `Untitled.png` continua no código, atrás do `#else`), relógio em `fixed-bold-13` |
 | `bancada.c` | o "VS Code" próprio: árvore + **abas** + editor + xterm embutido com o Claude (que é a aba 0, **aberta sob demanda**). C + Xlib + **Xft**, 2,4 MB de PSS sem o Claude. Binário abre em **hex** e imagem em **preview**, ambos só-leitura. Sessão por projeto em `~/.config/bancada/sessoes/`. Desde 02/08/2026 é um editor de texto normal: seleção com mouse e `Shift`+setas, `Ctrl+C/X/V/A`, digitar substitui a marca, `Alt+↑/↓` move a linha, `Ctrl+F` procura (barrinha no lugar do título, `Enter`/`F3`/`Ctrl+G` andam), `Ctrl+Shift+Z`/`Ctrl+Y` refazem, e o painel tem **coluna de números** à esquerda e **barra de rolagem** arrastável à direita. Dona de PRIMARY e CLIPBOARD |
 | `terminal.c` | emulador de terminal próprio, do pty ao pixel. C + Xlib + Xft, 2,66 MB de PSS contra 8,12 do xterm. É o terminal **da sessão** desde 02/08/2026 (`Ctrl+Alt+T`), mas **não** o da bancada: a aba 0 segue no xterm. `SIGUSR1` despeja a grade em texto |
+| `panorama.c` | **aperta Win e vê tudo**: grade das janelas abertas, cada uma com a miniatura viva, em 0,6 MB de PSS parado. Daemon, sobe no `startwm.sh`. Detecta a tecla Win sozinha com **XInput2 cru** (sem grab, senão roubaria o Super do xfwm4); a miniatura vem do **Composite** redirecionado, escalada pelo **XRender** dentro do servidor. Desde 03/08/2026 |
 | `perfil.sh` | o pedaço do projeto que entra no shell: a função `bancada`, que abre na pasta atual e devolve o prompt, como o `code .` |
 | `barra-apps` | atalhos de aplicativo da barra: lê `.desktop`, converte o ícone e mantém o `apps.conf`. Programa nosso só entra na lista do `[+]` se tiver um `.desktop` em `desktop/` |
 | `trabalho` | substitui o VS Code: ranger + Claude Code lado a lado num tmux. `trabalho instalar` cria os `.desktop` |
@@ -106,6 +107,15 @@ entre eles são visíveis ao AST.
 
 | Regra | Por quê |
 |---|---|
+| a barra tem **seis** cores com papel nomeado, não quatro | na paleta clara `LUZ`/`POCO` eram os dois `#FFFFFF` e `BORDA`/`TINTA` os dois `#000000`. No escuro cada par se separa: o `gravado()` preenche com `POCO`, porque campo afundado tem de ficar **mais escuro** que a face, não mais claro |
+| a cor do `-flatten` do `barra-apps` casa com a `FACE` da barra, e vai no **nome** do cache | a barra não sabe o que é alfa: o ícone chega achatado. Achatado sobre claro e desenhado sobre escuro põe um quadrado claro em volta de cada ícone. Com a cor no nome (`brave-browser-333333.rgb`), trocar a paleta invalida o cache sozinho — sem passo manual |
+| a fonte do relógio é **monoespaçada** (o `c` no nome XLFD) | o texto é centralizado; com fonte proporcional os dígitos mudam de largura e o relógio dança de posição a cada minuto |
+| o cartão do panorama **não** some no clique do `×` | quem manda tirá-lo é o `PropertyNotify` do `_NET_CLIENT_LIST`. O `_NET_CLOSE_WINDOW` é um pedido educado: o programa pode perguntar antes de sair e pode recusar. Sumir na hora seria mentir sobre isso — e nada de `XKillClient`, que perde o trabalho aberto sem avisar |
+| a tecla Win do panorama **não** entra em `XGrabKey` nem no `xfce4-keyboard-shortcuts` | atalho do xfsettingsd exige combinação, e um passive grab em `Super_L` sem modificador captura a tecla **na descida**: o `Super+←` do tiling nunca mais chegaria ao xfwm4. É a mesma disputa de grab do `<Super>Right` morto. Quem detecta é o XInput2 com eventos **crus**, que chegam sem tirar a tecla de ninguém — o panorama observa, não intercepta |
+| no panorama, um `PRESS` do Super **estando já armado** desarma o gesto | o xrdp entrega auto-repeat como pares `RELEASE`+`PRESS`, não como `PRESS` seguido (medido 03/08/2026). Sem essa regra, segurar a tecla Win pareceria um toque e o painel abriria sozinho |
+| a miniatura sai do **frame**, não da janela do cliente | o `_NET_CLIENT_LIST` dá a janela do cliente, que o xfwm4 reparenta; quem é filho do root — e quem o redirect do Composite alcança — é o frame. Nomear o pixmap do cliente dá `BadMatch`. É o que o `ate_o_root()` resolve |
+| o redirect do Composite é `Automatic`, nunca `Manual` | com `Automatic` o servidor continua compondo a tela sozinho: não viramos compositor, o xfwm4 não sabe de nada e o `use_compositing` dele continua `false`. Com `Manual` a sessão inteira passaria a depender deste processo para aparecer na tela |
+| `sigaction` sem `SA_RESTART` no `SIGUSR1` do panorama | o `signal()` da glibc liga o `SA_RESTART` sozinho, e aí o `read()` de dentro do Xlib é reiniciado após o sinal: o `select` nunca volta e o sinal só tem efeito no próximo evento do X — tecla morta até alguém mexer o mouse |
 | `max_bpp=32` no `xrdp.ini` | com 24 o servidor **recusa** o GFX/H.264 e cai no NSCodec |
 | `Policy=Default` no `sesman.ini` | é o que faz a sessão sobreviver a fechar o mstsc. Com `UBD`, reconectar abre desktop vazio e **destrói trabalho** |
 | `cycle_hidden=true` no xfwm4 | a barra **não** tem lista de janelas; `Alt+Tab` é o único caminho de volta ao minimizar |
@@ -173,6 +183,17 @@ entre eles são visíveis ao AST.
   até a janela do Windows fechar.
 - ~~**O binário do `claude` mora dentro da extensão do VS Code.**~~ **Não vale mais** (medido em 02/08/2026): o CLI está instalado sozinho em `~/.local/share/claude/versions/`, e `trabalho onde` responde `~/.local/bin/claude`. Desinstalar o VS Code **não** leva o Claude junto. O `onde_claude()` tenta `command -v claude` primeiro e só cai na extensão como plano B — continue usando ele em vez de chumbar caminho.
 - **Opções de janela do `xfce4-terminal` vêm antes das de aba.** `--maximize` depois de `--title` é ignorado **sem erro** — a janela abre no tamanho padrão.
+- **`gcc ... | head` mata o compilador no meio, e o binário ANTIGO fica.** Medido
+  em 03/08/2026: `gcc -O2 -Wall -Wextra -o barra-tarefas barra-tarefas.c 2>&1 |
+  head -10` — o `-Wextra` passou de 10 linhas de aviso, o `head` fechou o pipe, o
+  gcc levou **SIGPIPE** e morreu antes de gravar o binário. O `; echo "compilou"`
+  logo depois imprimiu do mesmo jeito (o `echo` não vê o código de saída de quem
+  veio antes do `;`), então a barra antiga foi instalada e a paleta nova "não
+  teve efeito". O sintoma manda procurar no lugar errado — no código, na
+  instalação, no processo. **Nunca truncar a saída de um compilador**: para
+  encurtar, `2>&1 | tail -20` (o tail lê tudo antes de imprimir) ou `; echo
+  "saida: $?"` para ver o código de verdade. Confirmar pelo artefato também vale:
+  `strings binario | grep '#333333'`.
 - **`pgrep -c` conta zumbi.** Filtre com `grep -v defunct` antes de concluir que
   há duas instâncias.
 - **`signal(SIGCHLD, SIG_IGN)` faz o `system()` devolver sempre `-1`** (medido em
@@ -202,9 +223,10 @@ entre eles são visíveis ao AST.
   o `XGrabPointer` do menu da barra; o clique seguinte vai para a janela da barra
   com coordenadas relativas a ela, o menu fecha sem escolher, e parece bug de
   código. Capture antes ou depois — para conferir o gesto, instrumente.
-- **`import -window <id>` mente quando a janela está coberta.** Sem compositor, o
-  conteúdo obscurecido é indefinido: o `import` devolve os pixels de quem está
-  por cima. Testando a bancada com uma segunda instância que nasceu em `+1280+29`,
+- **Capturar uma janela coberta não devolve o conteúdo dela.** Sem compositor, o
+  conteúdo obscurecido é indefinido — e medido em 03/08/2026, com duas janelas
+  controladas (uma 100% em cima da outra), o que volta são **zeros**: nem o
+  conteúdo dela, nem o de quem está por cima, como este arquivo dizia antes. Testando a bancada com uma segunda instância que nasceu em `+1280+29`,
   quase em cima da que estava em uso (`+1285+29`), a captura mostrou arquivos
   abrindo rolados no meio — um bug que **não existia**: a instrumentação dizia
   `topo=0`. Um navegador aberto num monitor deixou outra captura inteiramente
@@ -240,6 +262,12 @@ entre eles são visíveis ao AST.
 gcc -O2 -Wall -o barra-tarefas barra-tarefas.c -lX11 -lXrandr
 sudo install -m 755 barra-tarefas /usr/local/bin/barra-tarefas
 pkill -x barra-tarefas; setsid --fork /usr/local/bin/barra-tarefas </dev/null >/dev/null 2>&1
+
+# recompilar e reinstalar o panorama
+gcc -O2 -Wall -o panorama panorama.c $(pkg-config --cflags xft) \
+    -lX11 -lXft -lXi -lXrandr -lXcomposite -lXrender -lm
+sudo install -m 755 panorama /usr/local/bin/panorama
+pkill -x panorama; setsid --fork /usr/local/bin/panorama </dev/null >/dev/null 2>&1
 
 # ambiente da sessão gráfica, visto de um shell qualquer
 P=$(pgrep -x xfwm4 | head -1); tr '\0' '\n' < /proc/$P/environ | grep -E 'DISPLAY|XAUTH|DBUS'

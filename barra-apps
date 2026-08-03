@@ -24,9 +24,13 @@
 # icone vira um arquivo de PIXELS CRUS, 20x20 RGB de 8 bits = 1200 bytes exatos,
 # que a barra le com um fread e joga num XImage. Zero decodificacao no C.
 #
-# A transparencia tambem morre aqui: o -flatten achata o alfa sobre o #DEDEDE,
-# que e a cor da face da barra. Assim a barra nao precisa saber o que e alfa —
-# e como o fundo dela e chapado, o resultado e igual ao de compor de verdade.
+# A transparencia tambem morre aqui: o -flatten achata o alfa sobre a cor da
+# FACE da barra (veja $FACE abaixo). Assim a barra nao precisa saber o que e
+# alfa — e como o fundo dela e chapado, o resultado e igual ao de compor de
+# verdade. O preco e que a cor achatada tem de CASAR com a paleta da barra:
+# achatar sobre claro e desenhar sobre escuro poe um quadrado claro em volta de
+# cada icone. Por isso a cor entra no nome do arquivo de cache - trocar a
+# paleta invalida os icones sozinho, sem passo manual nenhum.
 
 set -u
 
@@ -36,6 +40,10 @@ CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/linux-fullscreen/apps"
 
 LADO=20            # o icone e quadrado; a barra tem 28px de altura
 BRUTO=$(( LADO * LADO * 3 ))
+
+# TEM de ser a mesma cor do FACE do barra-tarefas.c (procure BARRA_ESCURA la).
+# Mudou la, muda aqui: o cache se refaz sozinho porque a cor esta no nome.
+FACE='#333333'
 
 DIRS_APP=(
     "$HOME/.local/share/applications"
@@ -122,12 +130,17 @@ gerar_icone() {   # $1 = .desktop  $2 = destino .rgb
     # -flatten sobre a cor da face da barra; -resize com "!" para forcar o
     # quadrado exato (icone nao-quadrado sairia com bytes a menos e a barra
     # rejeitaria o arquivo).
-    convert "$org" -background '#DEDEDE' -alpha remove -alpha off \
+    convert "$org" -background "$FACE" -alpha remove -alpha off \
             -resize "${LADO}x${LADO}!" -depth 8 "rgb:$2" 2>/dev/null || return 1
     [ "$(stat -c %s "$2" 2>/dev/null)" = "$BRUTO" ] || { rm -f "$2"; return 1; }
 }
 
 id_de() { basename "$1" .desktop; }
+
+# O caminho do icone convertido. A cor da FACE entra no nome: assim trocar a
+# paleta da barra invalida o cache sozinho. Ha TRES chamadores (listar, fixar e
+# o "icone" de depuracao) - por isso e funcao, e nao a expressao repetida.
+caminho_rgb() { printf '%s\n' "$CACHE/$(id_de "$1")-${FACE#\#}.rgb"; }
 
 # --- os fixados ------------------------------------------------------------
 fixados() {   # imprime os caminhos .desktop, na ordem do arquivo
@@ -139,10 +152,17 @@ fixados() {   # imprime os caminhos .desktop, na ordem do arquivo
 
 # Formato para a barra:  <caminho .desktop>\t<nome>\t<arquivo .rgb ou vazio>
 cmd_listar() {
-    local p rgb
+    local p rgb velho
     while IFS= read -r p; do
-        rgb="$CACHE/$(id_de "$p").rgb"
-        [ -s "$rgb" ] || gerar_icone "$p" "$rgb" || rgb=""
+        rgb=$(caminho_rgb "$p")
+        if [ ! -s "$rgb" ]; then
+            # sobrou icone achatado sobre outra cor: some com ele, senao o cache
+            # cresceria uma copia por paleta ja usada
+            for velho in "$CACHE/$(id_de "$p")".rgb "$CACHE/$(id_de "$p")"-*.rgb; do
+                [ -e "$velho" ] && [ "$velho" != "$rgb" ] && rm -f "$velho"
+            done
+            gerar_icone "$p" "$rgb" || rgb=""
+        fi
         printf '%s\t%s\t%s\n' "$p" "$(nome_do_app "$p")" "$rgb"
     done < <(fixados)
 }
@@ -221,7 +241,7 @@ Os que ja estao la aparecem com [*]." \
             grep -vxF "$cam" "$LISTA" > "$LISTA.novo" && mv "$LISTA.novo" "$LISTA"
         else
             printf '%s\n' "$cam" >> "$LISTA"
-            gerar_icone "$cam" "$CACHE/$(id_de "$cam").rgb" ||
+            gerar_icone "$cam" "$(caminho_rgb "$cam")" ||
                 msg "aviso: sem icone para $cam; a barra usara o nome"
         fi
         return 0
@@ -236,8 +256,8 @@ case "${1:-listar}" in
     executar) shift; cmd_executar "${1:-}" ;;
     remover)  shift; cmd_remover "${1:-}" ;;
     nome)     shift; nome_do_app "${1:-}" ;;
-    icone)    shift; gerar_icone "${1:-}" "$CACHE/$(id_de "${1:-}").rgb" &&
-                  msg "ok: $CACHE/$(id_de "${1:-}").rgb" ;;
+    icone)    shift; gerar_icone "${1:-}" "$(caminho_rgb "${1:-}")" &&
+                  msg "ok: $(caminho_rgb "${1:-}")" ;;
     *) msg "uso: barra-apps [listar|escolher|executar <desktop>|icone <desktop>]"
        exit 1 ;;
 esac
