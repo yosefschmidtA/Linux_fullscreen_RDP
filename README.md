@@ -3213,7 +3213,7 @@ lembrado e devolvido como estava.
 
 ### O que ela não tem, de propósito
 
-Sem realce de sintaxe, busca ou auto-completar. Para editar a sério, `nvim` e
+Sem realce de sintaxe e sem auto-completar. Para editar a sério, `nvim` e
 `vim` estão no disco. Isto é para abrir, olhar, corrigir uma linha e salvar. O
 desfazer agrupa a digitação: uma sequência de teclas é **um** passo, senão os 32
 instantâneos não alcançariam nem uma frase.
@@ -3223,6 +3223,10 @@ instantâneos não alcançariam nem uma frase.
 > recortar, colar, selecionar tudo e mover linha. Ver *[Selecionar e copiar
 > (02/08/2026)](#selecionar-e-copiar-02082026)* e *[O resto do editor: colar,
 > recortar, mover (02/08/2026)](#o-resto-do-editor-colar-recortar-mover-02082026)*.
+>
+> **"Busca" também estava nesta lista, e saiu no mesmo dia** — junto com o
+> refazer, que faltava fazer par com o `Ctrl+Z`. Ver *[Procurar e refazer
+> (02/08/2026)](#procurar-e-refazer-02082026)*.
 
 ### Selecionar e copiar (02/08/2026)
 
@@ -3359,6 +3363,196 @@ Mesmo arnês da seleção, agora mandando teclas. Arquivo de partida: `linha um`
 
 O último é o que prova a decisão do desfazer: um único `Ctrl+Z` devolveu o
 texto apagado *e* removeu o colado.
+
+### Procurar e refazer (02/08/2026)
+
+As duas últimas faltas de um editor de texto normal. A de procurar era a que
+doía: neste `README.md` de 4291 linhas, achar uma seção só rolando é
+inviável. A de refazer era mais silenciosa — havia `Ctrl+Z` e não havia o par,
+então passar do ponto ao desfazer custava o texto.
+
+#### A barrinha ocupa o lugar do título, e não uma faixa no pé
+
+O primeiro desenho foi o óbvio: uma faixa de uma linha no rodapé do editor,
+como no VS Code. Ela foi recusada **antes** de ser escrita, ao contar o que
+teria de mudar junto. A altura útil do texto é `cont_h()`, e ela é a conta que
+o `desenhar_editor()`, o `desenhar_selecao()`, o `seguir_cursor()`, o
+`pos_do_clique()`, o `PageUp`/`PageDown` e a rolagem do arraste usam — **seis
+lugares**. Roubar altura para a faixa exigiria acertar os seis; esquecer um não
+dá erro nenhum, só põe o cursor debaixo da faixa ou o clique uma linha fora.
+
+O campo foi para a barra de ferramentas, sobre o nome do arquivo. O editor não
+muda de tamanho, nenhuma das seis contas foi tocada, e o nome do arquivo é
+justamente o que se pode dispensar enquanto se procura.
+
+```
+| Projeto | Salvar | Claude |  Procurar: foo|                        2 de 3
+| Projeto | Salvar | Claude |  Procurar: coisa que nao existe|    nao achei
+```
+
+#### O achado é uma seleção, e não um realce próprio
+
+Marcar o achado com a seleção que já existia deu de graça o desenho, o `Ctrl+C`
+do que se achou e o digitar por cima para substituir. E evitou o problema que um
+realce próprio traria: dois intervalos marcados na tela ao mesmo tempo mentiriam
+sobre qual deles o botão do meio cola.
+
+#### Sem distinguir maiúscula, mas só em ASCII
+
+`baixa()` dobra `A-Z` e mais nada. Byte `>= 0x80` — o que forma um caractere
+UTF-8 de vários bytes — compara igual a si mesmo, então `ação` só acha `ação`,
+e não `AÇÃO`. Dobrar caixa em Unicode pediria tabela, e tabela é o contrário da
+premissa deste arquivo.
+
+O que **não** é aproximação: o achado nunca cai no meio de um caractere. O termo
+digitado é sempre UTF-8 bem formado, o UTF-8 se sincroniza sozinho (byte de
+continuação nunca começa uma sequência válida), e por isso a coluna em bytes que
+sai da procura é sempre uma fronteira. Está no banco de provas.
+
+#### As teclas
+
+| Tecla | O que faz |
+|---|---|
+| `Ctrl+F` | abre a barrinha; com marca de uma linha, ela **vira o termo** |
+| digitar | procura a cada tecla, sempre **do ponto onde o `Ctrl+F` foi apertado** |
+| `Enter` / `F3` / `Ctrl+G` | próximo achado, dando a volta no fim |
+| `Shift` + qualquer um dos três | o anterior |
+| `Escape`, ou clicar no texto | fecha; o termo fica guardado para o `F3` |
+| `Ctrl+Z` | desfaz |
+| `Ctrl+Shift+Z` / `Ctrl+Y` | refaz |
+
+Procurar do ponto de partida, e não do achado anterior, é o que impede o texto
+de ir embora rolando enquanto se digita o termo: cada letra a mais só encurta a
+lista, não avança nela.
+
+**A barrinha come o teclado enquanto está aberta** — menos `Ctrl+alguma coisa`,
+que continua valendo, porque o achado está marcado e `Ctrl+C` sobre ele é
+exatamente o que se quer poder fazer sem fechar a procura. As três saídas são
+`Escape`, `Enter` no achado que serve, e o clique no texto. A roda do mouse
+**não** fecha: rolar para olhar em volta não é desistir de procurar.
+
+#### O `Ctrl+Shift+Z` não pode sair do keysym
+
+Com `CapsLock` ligado, `Ctrl+Z` chega como `XK_Z` — maiúsculo — **sem** `Shift`
+apertado. Um `case XK_Z: refazer()` faria o `Ctrl+Z` virar refazer, calado, para
+quem estivesse de `CapsLock`. O teste é `ev->state & ShiftMask`, e é a mesma
+armadilha do `xfwm4` já registrada aqui: o estado do modificador não está no
+símbolo da tecla.
+
+#### Refazer são os mesmos dois anéis, ao contrário
+
+Desfazer não joga o presente fora: empilha-o no anel do refazer antes de tirar o
+passado do outro. Refazer faz o inverso. Como cada passo **tira de um anel e põe
+no outro**, o número de instantâneos guardados não muda — a memória não dobrou,
+e o teto de `UNDO_BYTES` continua valendo para a soma dos dois.
+
+Medido em 02/08/2026, 20 edições num arquivo crescendo:
+
+| Momento | Memória dos dois anéis |
+|---|---|
+| depois das 20 edições | 7 020 bytes |
+| no meio de dez `Ctrl+Z` | 7 380 bytes |
+| de volta, dez `Ctrl+Y` | 7 020 bytes, **exatos** |
+| depois de 200 idas e voltas | 7 020 bytes |
+
+Os 360 bytes a mais no meio do caminho são **um** instantâneo, não um por passo:
+o refazer recebe o estado de agora (grande) enquanto o undo devolve o de vinte
+edições atrás (pequeno). É o mesmo tanto que a poda já tolerava, porque ela
+sempre deixa um instantâneo de pé por maior que ele seja. Com `mallinfo2`, 2000
+ciclos de ida e volta deixaram o heap **byte a byte idêntico**.
+
+O futuro morre na edição nova, e é por isso que `esquecer_refazer()` fica dentro
+do `guardar_instante()` — que só é chamado antes de uma edição. Sem isso o
+`Ctrl+Y` reconstruiria um texto que nunca foi escrito.
+
+#### O que custou
+
+| Medida | Antes | Agora |
+|---|---|---|
+| `.text` | 29 241 B | 33 081 B |
+| `.bss` | 98 304 B | 116 160 B (os anéis de refazer, 16 abas) |
+| binário | 61 136 B | 65 640 B |
+
+O placar `2 de 3` é recontado a cada desenho, de propósito: guardar o número
+exigiria invalidá-lo a cada tecla, que é um jeito conhecido de mostrar placar
+errado. No `README.md` (4291 linhas, 205 KB) isso custa **580 µs por desenho**,
+e o desenho é no ritmo de tecla humana. A procura que varre o arquivo inteiro
+sem achar nada custa 338 µs.
+
+#### Como foi testado, já que é interface gráfica
+
+Não por captura de tela. Havia três bancadas do usuário abertas, e o `xdotool`
+não está instalado — injetar tecla no display vivo iria parar dentro dos
+arquivos dele. Em vez disso, três bancos de provas em `#define main
+bancada_main` + `#include "bancada.c"`, que alcançam os `static` de dentro:
+
+| Banco | O que exercita | Asserções |
+|---|---|---|
+| `teste-busca` | `procurar()`, a volta, UTF-8, o placar | 26 |
+| `teste-undo` | ida e volta, anel cheio, o futuro morrendo, a memória | 30 |
+| `teste-teclas` | o caminho da tecla, com X real e **janela não mapeada** | 32 |
+
+O terceiro monta o display de verdade mas não mapeia janela nenhuma: o desenho
+roda inteiro — e é a prova de que ele não quebra —, só não vira pixel visível,
+e nenhuma outra janela é tocada. Para *ver* a barrinha, ela foi desenhada num
+**Pixmap** e lida de lá: Pixmap não pode ser encoberto, ao contrário do
+`import -window`, que mente quando há algo por cima (registrado neste README).
+
+### Correção: o `Ctrl` sozinho apagava a marca (03/08/2026)
+
+O relato: *"selecionei com o mouse, mas no momento em que aperto Ctrl, bem antes
+do C, já some a seleção"*. É verdade, e a causa é uma coisa que se esquece com
+facilidade: **modificador também é tecla**. Apertar `Ctrl` gera um `KeyPress`
+próprio, e o `state` de um evento X é o de **antes** dele — nesse evento o
+`ControlMask` ainda não está ligado.
+
+Medido com um cliente de 60 linhas, janela `override_redirect` de 1 pixel que
+toma o foco, injeta as teclas por XTest e devolve o foco ao fim (as únicas
+teclas injetadas são `Control_L` e `c`, inofensivas se alguma escapasse):
+
+```
+KeyPress   keysym=Control_L      state=0x0000  ctrl=0  n=0
+KeyPress   keysym=c              state=0x0004  ctrl=1  n=1
+KeyRelease keysym=c              state=0x0004  ctrl=1  n=1
+KeyRelease keysym=Control_L      state=0x0004  ctrl=1  n=0
+```
+
+Com `ctrl=0`, o evento do `Ctrl` atravessava os dois blocos de `if (ctrl)` e
+chegava à decisão da marca — a de três caminhos: estender, escrever por cima, ou
+**apagar**. Ele não é movimento e não escreve (`Xutf8LookupString` devolve
+`n=0`), então caía no terceiro: `sel_limpar()`. O `Ctrl+C` que vinha um
+décimo de segundo depois já não tinha marca nenhuma e copiava a **linha do
+cursor** — o comportamento documentado para "sem nada marcado", disparado sem
+que ninguém tivesse desmarcado nada.
+
+O mesmo valia para o `Shift`: marcar com o mouse e tentar ajustar com
+`Shift+seta` **recomeçava** a marca no cursor em vez de estendê-la, porque o
+`KeyPress` do `Shift` já a tinha apagado. Um sintoma só, duas manifestações.
+
+A correção é uma saída antecipada logo depois do `Xutf8LookupString`:
+modificador sozinho não é tecla e não decide nada sobre a marca. O
+`IsModifierKey()` do Xlib vem com o intervalo `ISO_*` escrito à mão ao lado —
+essa parte do macro só existe se o `<keysym.h>` vier **antes** do `<Xutil.h>`, e
+no `bancada.c` ele vem depois; sem ela ficaria de fora o `AltGr` do ABNT2, que
+neste teclado é o `ISO_Level3_Shift` (`xmodmap -pm`, `mod5`). O `ISO_Left_Tab`
+(`0xfe20`) está fora do intervalo — o `Ctrl+Shift+Tab` continua trocando de aba.
+
+De graça veio um desperdício a menos: cada modificador apertado terminava em
+`seguir_cursor()` + `desenhar()`, ou seja, um quadro inteiro comprimido em CPU e
+mandado pelo RDP para desenhar exatamente o que já estava na tela.
+
+Testado no banco de provas de sempre (`#define main bancada_main` +
+`#include "bancada.c"`, display real, **nenhuma janela mapeada**), com o
+`Escape` de controle negativo — ele passa pela mesma decisão e volta antes do
+`desenhar()`, então se ele apaga e o `Ctrl` não, o caminho exercitado é o certo:
+
+```
+Ctrl sozinho -> sel_on=1  (marca de pe)
+Shift sozinho -> sel_on=1  (marca de pe)
+Alt sozinho  -> sel_on=1  (marca de pe)
+AltGr        -> sel_on=1  (marca de pe)
+Escape       -> sel_on=0  (marca apagada)
+```
 
 ## Abas, e o Claude como uma delas (01/08/2026)
 

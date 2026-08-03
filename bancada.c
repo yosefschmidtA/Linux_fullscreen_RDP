@@ -69,11 +69,18 @@
  *
  * O QUE ESTE EDITOR NAO TEM, DE PROPOSITO
  *
- * Sem realce de sintaxe, sem busca, sem auto-completar. Para editar a serio,
- * nvim e vim estao no disco. Isto aqui e para abrir, olhar, corrigir uma linha
- * e salvar.
+ * Sem realce de sintaxe e sem auto-completar. Para editar a serio, nvim e vim
+ * estao no disco. Isto aqui e para abrir, olhar, corrigir uma linha e salvar.
  * O que ele TEM de ter, e tem: UTF-8 correto, acento morto do teclado ABNT2,
- * desfazer, e aviso antes de perder alteracao.
+ * desfazer, procurar, e aviso antes de perder alteracao.
+ *
+ * ONDE ESTOU: OS NUMEROS E A BARRA DE ROLAGEM
+ *
+ * O procurar leva ao achado e nao diz em que linha ele caiu; o painel nao dizia
+ * quanto do arquivo estava acima ou abaixo da tela. Dai a coluna de numeros a
+ * esquerda (a do cursor em tinta cheia) e a barra de rolagem a direita, com
+ * cursor que se arrasta. As duas comem largura do texto, e por isso a origem do
+ * texto virou UMA funcao - ver o bloco "Geometria do TEXTO dentro do painel".
  *
  * "Sem selecao de mouse, sem area de transferencia" estava nesta lista ate
  * 02/08/2026, e saiu dela. Hoje ele tem o que se espera de um editor:
@@ -133,6 +140,9 @@
 #define FECHAR_W   14          /* caixinha do "x" dentro da aba */
 #define ABA_W_MAX 200
 #define ABA_W_MIN  60
+#define ROL_W      13          /* barra de rolagem, encostada na direita */
+#define ROL_MIN    24          /* altura minima do cursor dela */
+#define NUM_MIN     3          /* digitos que a coluna de numeros sempre reserva */
 
 #define MAX_ARQ  (8 * 1024 * 1024)   /* teto para trazer um arquivo para a RAM */
 /* Imagem tem teto proprio, e maior: dela nao entra byte nenhum aqui. Quem le o
@@ -204,10 +214,18 @@ static int             img_nat_w, img_nat_h;  /* tamanho de verdade, para a lege
 static long            img_bytes;             /* tamanho do arquivo em disco */
 static int             img_para_w, img_para_h;/* painel para o qual ela foi gerada */
 
-/* ---- desfazer ------------------------------------------------------------ */
+/* ---- desfazer e refazer --------------------------------------------------- */
 typedef struct { char **l; int n; int cur_l, cur_c; size_t bytes; } Instante;
 static Instante undo[UNDO_N];
 static int      undo_n, undo_pos;
+static Instante refaz[UNDO_N];       /* o futuro que o Ctrl+Z deixou para tras */
+static int      refaz_n, refaz_pos;
+
+/* ---- procurar ------------------------------------------------------------- */
+static char     busca[128];          /* o termo, como foi digitado */
+static int      busca_on;            /* a barrinha esta aberta e com o teclado */
+static int      achou;               /* a ultima procura deu em alguma coisa */
+static int      anc_l, anc_c;        /* de onde a procura incremental parte */
 
 /* ---- terminal embutido --------------------------------------------------- */
 static pid_t    pid_term;
@@ -225,6 +243,7 @@ static void mostrar_painel(void);
 static int  claude_vivo(void);
 static void ativar(int i);
 static void fechar_aba(int i);
+static void contar_achados(int *total, int *qual);
 
 static void morrer(const char *m) { fprintf(stderr, "bancada: %s\n", m); exit(1); }
 
@@ -307,13 +326,29 @@ static void remover_linha(int em)
 }
 
 /* =========================================================================
- * Desfazer
+ * Desfazer e refazer
  *
  * Instantaneo do buffer inteiro, nao registro de operacoes. E a implementacao
  * mais simples que esta CERTA, e o custo esta limitado nos dois eixos: no
  * maximo UNDO_N instantaneos e UNDO_BYTES de memoria somada; o mais antigo sai
  * quando qualquer um dos dois estoura. Para arquivo de codigo normal isso da
  * dezenas de passos por alguns megabytes.
+ *
+ * REFAZER SAO OS MESMOS DOIS ANEIS, ao contrario. Desfazer nao joga fora o
+ * presente: empilha-o no anel do refazer antes de tirar o passado do outro.
+ * Refazer faz o inverso. Como cada passo TIRA de um anel e POE no outro, o
+ * numero de instantaneos guardados nao muda, e a memoria NAO dobrou: o teto de
+ * UNDO_BYTES vale para a soma dos dois. Medido em 02/08/2026, 20 edicoes num
+ * arquivo crescendo: 7020 bytes; no meio de dez Ctrl+Z, 7380; de volta, 7020
+ * exatos, e 200 idas e voltas nao movem o numero. Os 360 bytes de diferenca no
+ * meio do caminho sao UM instantaneo, nao um por passo - o refazer recebe o
+ * estado de agora (grande) enquanto o undo devolve o de vinte edicoes atras
+ * (pequeno). E o mesmo tanto que a poda ja tolera, que sempre deixa um
+ * instantaneo de pe por maior que ele seja.
+ *
+ * Quem cresce e so a edicao nova, e ela comeca esvaziando o refazer: depois de
+ * digitar, o futuro que havia deixou de existir. E o que todo editor faz, e e o
+ * que impede o Ctrl+Y de reconstruir um texto que nunca foi escrito.
  * ========================================================================= */
 static size_t peso(char **l, int n)
 {
@@ -334,17 +369,17 @@ static void soltar_instante(Instante *in)
 static size_t undo_total(void)
 {
     size_t t = 0; int i;
-    for (i = 0; i < UNDO_N; i++) t += undo[i].bytes;
+    for (i = 0; i < UNDO_N; i++) t += undo[i].bytes + refaz[i].bytes;
     return t;
 }
 
-static void guardar_instante(void)
+/* Poe o buffer de AGORA no topo de um anel. Grava por cima do mais antigo
+ * quando o anel da a volta. */
+static void empilhar(Instante *anel, int *n, int *pos)
 {
-    Instante *in;
+    Instante *in = &anel[*pos];
     int i;
 
-    /* Grava por cima do mais antigo quando o anel da a volta. */
-    in = &undo[undo_pos];
     soltar_instante(in);
 
     in->l = malloc((size_t) (n_linhas + 1) * sizeof *in->l);
@@ -354,25 +389,22 @@ static void guardar_instante(void)
     in->cur_l = cur_l; in->cur_c = cur_c;
     in->bytes = peso(in->l, in->n);
 
-    undo_pos = (undo_pos + 1) % UNDO_N;
-    if (undo_n < UNDO_N) undo_n++;
-
-    while (undo_total() > UNDO_BYTES && undo_n > 1) {
-        int velho = (undo_pos - undo_n + UNDO_N) % UNDO_N;
-        soltar_instante(&undo[velho]);
-        undo_n--;
-    }
+    *pos = (*pos + 1) % UNDO_N;
+    if (*n < UNDO_N) (*n)++;
 }
 
-static void desfazer(void)
+/* Tira o do topo e o devolve ao buffer. */
+static int desempilhar(Instante *anel, int *n, int *pos)
 {
     Instante *in;
     int i, idx;
 
-    if (undo_n == 0) return;
-    idx = (undo_pos - 1 + UNDO_N) % UNDO_N;
-    in = &undo[idx];
-    if (!in->l) return;
+    if (*n == 0) return 0;
+    idx = (*pos - 1 + UNDO_N) % UNDO_N;
+    in = &anel[idx];
+    /* Entrada vazia e a que ficou de um malloc que falhou la atras. Ela sai do
+     * anel do mesmo jeito - deixa-la travaria o Ctrl+Z para sempre. */
+    if (!in->l) { *pos = idx; (*n)--; return 0; }
 
     limpar_buffer();
     linhas_cabe(in->n + 1);
@@ -383,7 +415,44 @@ static void desfazer(void)
     if (n_linhas == 0) { inserir_linha(0, ""); cur_l = cur_c = 0; }
 
     soltar_instante(in);
-    undo_pos = idx; undo_n--;
+    *pos = idx; (*n)--;
+    return 1;
+}
+
+static void esquecer_refazer(void)
+{
+    int i;
+    for (i = 0; i < UNDO_N; i++) soltar_instante(&refaz[i]);
+    refaz_n = refaz_pos = 0;
+}
+
+/* Chamado ANTES de cada edicao, e so por ela - e por isso que e aqui que o
+ * futuro morre. */
+static void guardar_instante(void)
+{
+    esquecer_refazer();
+    empilhar(undo, &undo_n, &undo_pos);
+
+    while (undo_total() > UNDO_BYTES && undo_n > 1) {
+        int velho = (undo_pos - undo_n + UNDO_N) % UNDO_N;
+        soltar_instante(&undo[velho]);
+        undo_n--;
+    }
+}
+
+static void desfazer(void)
+{
+    if (undo_n == 0) return;
+    empilhar(refaz, &refaz_n, &refaz_pos);   /* o presente vira futuro */
+    if (!desempilhar(undo, &undo_n, &undo_pos)) return;
+    sujo = 1;
+}
+
+static void refazer(void)
+{
+    if (refaz_n == 0) return;
+    empilhar(undo, &undo_n, &undo_pos);      /* ...e volta a ser passado */
+    if (!desempilhar(refaz, &refaz_n, &refaz_pos)) return;
     sujo = 1;
 }
 
@@ -429,6 +498,8 @@ typedef struct {
     int      cur_l, cur_c, topo, col0;
     Instante undo[UNDO_N];
     int      undo_n, undo_pos, grupo;
+    Instante refaz[UNDO_N];
+    int      refaz_n, refaz_pos;
     int      modo;                    /* hex e imagem dormem aqui do mesmo jeito */
     unsigned char *bruto;
     size_t   bruto_n;
@@ -451,6 +522,8 @@ static void globais_para_aba(Aba *a)
     a->cur_l = cur_l; a->cur_c = cur_c; a->topo = topo; a->col0 = col0;
     memcpy(a->undo, undo, sizeof undo);
     a->undo_n = undo_n; a->undo_pos = undo_pos; a->grupo = grupo;
+    memcpy(a->refaz, refaz, sizeof refaz);
+    a->refaz_n = refaz_n; a->refaz_pos = refaz_pos;
     a->modo = modo; a->bruto = bruto; a->bruto_n = bruto_n;
     a->img_pm = img_pm; a->img_w = img_w; a->img_h = img_h;
     a->img_nat_w = img_nat_w; a->img_nat_h = img_nat_h; a->img_bytes = img_bytes;
@@ -465,6 +538,8 @@ static void aba_para_globais(Aba *a)
     cur_l = a->cur_l; cur_c = a->cur_c; topo = a->topo; col0 = a->col0;
     memcpy(undo, a->undo, sizeof undo);
     undo_n = a->undo_n; undo_pos = a->undo_pos; grupo = a->grupo;
+    memcpy(refaz, a->refaz, sizeof refaz);
+    refaz_n = a->refaz_n; refaz_pos = a->refaz_pos;
     modo = a->modo; bruto = a->bruto; bruto_n = a->bruto_n;
     img_pm = a->img_pm; img_w = a->img_w; img_h = a->img_h;
     img_nat_w = a->img_nat_w; img_nat_h = a->img_nat_h; img_bytes = a->img_bytes;
@@ -484,6 +559,8 @@ static void globais_zerar(void)
     cur_l = cur_c = topo = col0 = 0;
     memset(undo, 0, sizeof undo);
     undo_n = undo_pos = 0; grupo = G_NENHUM;
+    memset(refaz, 0, sizeof refaz);
+    refaz_n = refaz_pos = 0;
     modo = MODO_TEXTO; bruto = NULL; bruto_n = 0;
     img_pm = 0; img_w = img_h = img_nat_w = img_nat_h = 0;
     img_bytes = 0; img_para_w = img_para_h = 0;
@@ -560,15 +637,43 @@ static int linhas_hex(void)
  *
  * O texto vai pelo AMBIENTE, nao interpolado no comando: assim um caminho com
  * aspas ou cifrao nao vira comando. Aqui isso nao e teoria - os nomes vem de
- * nomes de arquivo, que sao seus e podem ter qualquer coisa. */
+ * nomes de arquivo, que sao seus e podem ter qualquer coisa.
+ *
+ * A RESPOSTA VEM PELO PIPE, NAO PELO CODIGO DE SAIDA - e isso NAO e frescura.
+ * O main() faz signal(SIGCHLD, SIG_IGN) para os filhos (xterm, convert, zenity)
+ * nao virarem zumbi sem ninguem para os recolher. So que com essa disposicao o
+ * kernel recolhe o filho ELE MESMO, na hora, e o wait() que o system() faz por
+ * dentro nao acha mais ninguem: volta -1 com ECHILD, SEMPRE, tenha o comando
+ * dado certo ou errado.
+ *
+ * Ou seja: `system(cmd) == 0` era falso o tempo todo, e TODA pergunta da bancada
+ * respondia "nao" sozinha, por baixo do que o usuario clicava. Fechar uma aba
+ * com alteracao nao salva era impossivel - clicar em "Sim" nao fechava - e
+ * fechar a janela com qualquer aba suja tambem nao saia. Medido em 02/08/2026:
+ * sem SIG_IGN, system("true") = 0; com SIG_IGN, -1 e errno ECHILD.
+ *
+ * O popen nao tem esse problema porque a resposta nao esta no codigo de saida:
+ * ela chega pelo pipe, e o pclose devolvendo -1 nao atrapalha ninguem. E o mesmo
+ * caminho que o escolher_projeto() e o gerar_imagem() ja usavam - eram os dois
+ * unicos que funcionavam. */
 static int zenity(const char *tipo, const char *texto)
 {
-    char cmd[256];
+    char cmd[320], linha[64];
+    FILE *p;
+    int sim = 0;
+
     setenv("BANCADA_TXT", texto, 1);
     snprintf(cmd, sizeof cmd,
-             "zenity --%s --title=bancada --width=380 --text=\"$BANCADA_TXT\" 2>/dev/null",
-             tipo);
-    return system(cmd) == 0;
+             "zenity --%s --title=bancada --width=380 --text=\"$BANCADA_TXT\" 2>/dev/null"
+             " && echo BANCADA_SIM", tipo);
+    p = popen(cmd, "r");
+    if (!p) return 0;
+    /* Le ate o fim, e nao so a primeira linha: se o zenity resolver escrever
+     * alguma coisa no stdout antes, a marca ainda aparece depois dela. */
+    while (fgets(linha, sizeof linha, p))
+        if (!strncmp(linha, "BANCADA_SIM", 11)) sim = 1;
+    pclose(p);
+    return sim;
 }
 
 static int perguntar(const char *t) { return zenity("question", t); }
@@ -907,6 +1012,77 @@ static int cont_w(void) { int w = larg - ARVORE_W;          return w < 80 ? 80 :
 static int cont_h(void) { int h = alt - BARRA_H - ABAS_H;   return h < altura_lin ? altura_lin : h; }
 
 /* =========================================================================
+ * Geometria do TEXTO dentro do painel
+ *
+ * A coluna dos numeros come um pedaco da esquerda e a barra de rolagem um da
+ * direita, e cada uma delas mexe na mesma conta que o desenho, a selecao, o
+ * cursor, o clique e o seguir_cursor() usam. Sao CINCO lugares para o eixo x e
+ * SEIS para o y - e um esquecido nao da erro: so poe o cursor uns pixels fora
+ * de onde o texto esta, ou deixa a ultima coluna debaixo da barra de rolagem.
+ * Por isso ninguem mais escreve "MARGEM" como origem do texto: a origem e o
+ * texto_x0(), a largura util e o cols_cabem(), a altura util e o linhas_vis().
+ * E o mesmo motivo que manteve a barrinha de procurar fora do pe do editor.
+ * ========================================================================= */
+
+/* Larga o bastante para o maior numero do arquivo, e nunca menos que NUM_MIN
+ * digitos: assim o texto nao anda para os lados quando o arquivo passa de 99
+ * para 100 linhas. Vale ZERO fora do MODO_TEXTO - o hex ja tem a propria coluna
+ * de deslocamento, e a imagem nao tem linha nenhuma. */
+static int numeros_w(void)
+{
+    int d = 1, n = n_linhas;
+
+    if (modo != MODO_TEXTO || carregada < 0) return 0;
+    while (n >= 10) { n /= 10; d++; }
+    if (d < NUM_MIN) d = NUM_MIN;
+    return MARGEM + d * avanco + MARGEM;
+}
+
+static int texto_x0(void) { return numeros_w() + MARGEM; }
+
+static int cols_cabem(void)
+{
+    int c = (cont_w() - texto_x0() - MARGEM - ROL_W) / avanco;
+    return c < 1 ? 1 : c;
+}
+
+static int linhas_vis(void)
+{
+    int v = (cont_h() - 2 * MARGEM) / altura_lin;
+    return v < 1 ? 1 : v;
+}
+
+/* Quantas linhas o painel tem ao todo - o buffer no texto, as linhas do dump no
+ * hex. A imagem nao rola, e devolve zero. */
+static int total_linhas(void)
+{
+    if (modo == MODO_TEXTO) return n_linhas;
+    if (modo == MODO_HEX)   return linhas_hex();
+    return 0;
+}
+
+/* O teto da rolagem, e o UNICO: roda do mouse, PageDown, arraste para fora e o
+ * cursor da barra de rolagem passam todos por aqui.
+ *
+ * Ate 02/08/2026 cada um desses lugares prendia o topo em "total - 1", o que
+ * deixava rolar ate a ultima linha sozinha no alto da tela. Ninguem reclamava
+ * porque nao havia nada mostrando a posicao; com a barra de rolagem desenhada
+ * isso vira mentira visivel - o cursor dela desceria ate o fim do trilho com o
+ * arquivo inteiro ja na tela. O teto agora e a ultima TELA, nao a ultima linha. */
+static int topo_max(void)
+{
+    int m = total_linhas() - linhas_vis();
+    return m < 0 ? 0 : m;
+}
+
+static void prender_topo(void)
+{
+    int m = topo_max();
+    if (topo > m) topo = m;
+    if (topo < 0) topo = 0;
+}
+
+/* =========================================================================
  * Desenho — o mesmo bisel Motif da barra-tarefas.c, para as duas ferramentas
  * parecerem a mesma coisa.
  * ========================================================================= */
@@ -953,6 +1129,40 @@ static void desenhar_barra(void)
         bisel(win, x, PAD, botoes[i].w, BARRA_H - 2 * PAD, (int) FACE, 0);
         texto(dr_barra, x + 10, PAD + base_lin + 3, botoes[i].rotulo, &c_ink);
         x += botoes[i].w + GAP;
+    }
+
+    /* A BARRINHA DE PROCURAR OCUPA O LUGAR DO TITULO, e nao uma faixa propria no
+     * pe do editor. Faixa embaixo teria de roubar altura do texto, e a altura do
+     * texto e a conta que a rolagem, o clique e o seguir_cursor() usam em seis
+     * lugares - um deles esquecido poe o cursor debaixo da barrinha. Aqui o
+     * editor nao muda de tamanho, e o nome do arquivo e o que ha de mais
+     * dispensavel enquanto se procura. */
+    if (busca_on) {
+        int bx = x + 6, bw = larg - bx - PAD, cx, t, q;
+        char campo[sizeof busca + 32], placar[48];
+        const char *rotulo = "Procurar: ";
+
+        if (bw > 40) {
+            bisel(win, bx, PAD, bw, BARRA_H - 2 * PAD, (int) PAPEL, 1);
+            snprintf(campo, sizeof campo, "%s%s", rotulo, busca);
+            texto(dr_barra, bx + MARGEM, PAD + base_lin + 3, campo,
+                  achou ? &c_ink : &c_fraco);
+
+            cx = bx + MARGEM + colunas_ate(campo, (int) strlen(campo)) * avanco;
+            XSetForeground(dpy, gc, INK);
+            XFillRectangle(dpy, win, gc, cx, PAD + 3, 2,
+                           (unsigned) (BARRA_H - 2 * PAD - 6));
+
+            contar_achados(&t, &q);
+            if (!busca[0])   placar[0] = '\0';
+            else if (t == 0) snprintf(placar, sizeof placar, "nao achei");
+            else             snprintf(placar, sizeof placar, "%d de %d", q, t);
+            if (placar[0])
+                texto(dr_barra,
+                      bx + bw - MARGEM - colunas_ate(placar, (int) strlen(placar)) * avanco,
+                      PAD + base_lin + 3, placar, &c_fraco);
+        }
+        return;
     }
 
     /* O aviso de leitura fica no titulo, e nao no rotulo da aba: a aba ja e
@@ -1098,6 +1308,8 @@ static int   sel_on;                 /* ha intervalo marcado */
 static int   sel_la, sel_ca;         /* ancora: onde o arraste comecou */
 static int   sel_lb, sel_cb;         /* ponta: onde o mouse esta agora */
 static int   arrastando;
+static int   rolando;                /* arrastando o cursor da barra de rolagem */
+static int   pega_dy;                /* em que altura DELE o ponteiro o pegou */
 static char *txt_pri, *txt_cli;      /* o texto que servimos em cada selecao */
 static Time  t_clique;               /* para separar clique de duplo e triplo */
 static int   l_clique, n_cliques;
@@ -1234,6 +1446,191 @@ static void copiar(void)
     virar_dono(XA_PRIMARY, strdup(t));   /* cada selecao guarda a SUA copia */
 }
 
+/* =========================================================================
+ * Procurar
+ *
+ * O ACHADO E UMA SELECAO, e nao um realce proprio. Sai de graca o desenho, o
+ * Ctrl+C do que se achou, e o digitar por cima para substituir - e nao ha um
+ * segundo intervalo marcado na tela para mentir sobre qual deles o botao do
+ * meio cola.
+ *
+ * SEM DISTINGUIR MAIUSCULA, mas so em ASCII. Byte >= 0x80 - o que forma um
+ * caractere UTF-8 de varios bytes - compara igual a si mesmo, entao "acao" so
+ * acha "acao". Dobrar caixa em Unicode pediria tabela, e a tabela e o contrario
+ * da premissa deste arquivo. Como o termo digitado e sempre UTF-8 bem formado e
+ * o UTF-8 se sincroniza sozinho, um achado nunca cai no meio de um caractere:
+ * a coluna em bytes que sai daqui e sempre uma fronteira valida.
+ * ========================================================================= */
+static int baixa(unsigned char c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
+static int casa_em(const char *s, int p, const char *t, int n)
+{
+    int i;
+    for (i = 0; i < n; i++)
+        if (baixa((unsigned char) s[p + i]) != baixa((unsigned char) t[i])) return 0;
+    return 1;
+}
+
+/* O achado dentro de UMA linha, entre duas colunas em bytes. Devolve -1 quando
+ * nao ha. "ate" e a ultima posicao onde o termo ainda CABE inteiro. */
+static int achar_na_linha(const char *s, int de, int ate, int dir)
+{
+    int n = (int) strlen(busca), len = (int) strlen(s), p;
+
+    if (n == 0 || len < n) return -1;
+    if (ate > len - n) ate = len - n;
+    if (de < 0) de = 0;
+    if (de > ate) return -1;
+
+    if (dir > 0) { for (p = de;  p <= ate; p++) if (casa_em(s, p, busca, n)) return p; }
+    else         { for (p = ate; p >= de;  p--) if (casa_em(s, p, busca, n)) return p; }
+    return -1;
+}
+
+/* Varre o arquivo a partir de (l, c) e DA A VOLTA. Sao n_linhas + 1 passadas
+ * porque a linha de partida entra duas vezes: uma pelo pedaco depois do cursor
+ * e, no fim da volta, outra pelo pedaco antes dele - senao o unico achado do
+ * arquivo, estando atras do cursor na mesma linha, nunca apareceria.
+ * So mexe no cursor quando acha. */
+static int procurar(int dir, int l, int c, int inclusivo)
+{
+    int i, p;
+
+    if (!busca[0] || carregada < 0 || modo != MODO_TEXTO || n_linhas == 0) return 0;
+    if (l < 0 || l >= n_linhas) { l = 0; c = 0; }
+    if (c > (int) strlen(linhas[l])) c = (int) strlen(linhas[l]);
+
+    for (i = 0; i <= n_linhas; i++) {
+        int de = 0, ate = INT_MAX;
+
+        if (i == 0) {                       /* a linha de partida, de um lado so */
+            if (dir > 0) de  = inclusivo ? c : c + 1;
+            else         ate = inclusivo ? c : c - 1;
+        } else if (i == n_linhas) {         /* a volta: o outro lado dela */
+            if (dir > 0) ate = c;
+            else         de  = c;
+        }
+
+        p = achar_na_linha(linhas[l], de, ate, dir);
+        if (p >= 0) { cur_l = l; cur_c = p; return 1; }
+
+        l += dir;
+        if (l >= n_linhas) l = 0;
+        if (l < 0) l = n_linhas - 1;
+    }
+    return 0;
+}
+
+/* O placar da barrinha. Conta tudo a cada desenho de proposito: sao alguns
+ * strcmp por linha num arquivo que ja esta na RAM, e guardar o numero exigiria
+ * invalida-lo a cada tecla digitada - um jeito conhecido de mostrar placar
+ * errado. Achados sobrepostos contam, que e como o Enter tambem anda. */
+static void contar_achados(int *total, int *qual)
+{
+    int l, p, n = (int) strlen(busca);
+
+    *total = 0; *qual = 0;
+    if (n == 0 || carregada < 0 || modo != MODO_TEXTO) return;
+
+    for (l = 0; l < n_linhas; l++) {
+        const char *s = linhas[l];
+        int len = (int) strlen(s);
+        for (p = 0; p + n <= len; p++)
+            if (casa_em(s, p, busca, n)) {
+                (*total)++;
+                if (l < cur_l || (l == cur_l && p <= cur_c)) *qual = *total;
+            }
+    }
+}
+
+static void marcar_achado(void)
+{
+    sel_la = cur_l; sel_ca = cur_c;
+    sel_lb = cur_l; sel_cb = cur_c + (int) strlen(busca);
+    sel_on = 1;
+    virar_dono(XA_PRIMARY, sel_texto());
+    seguir_cursor();
+}
+
+/* do_anc: procura a partir de onde o Ctrl+F foi apertado, e nao de onde o
+ * cursor esta agora. E o que a busca INCREMENTAL precisa - sem isso, cada letra
+ * do termo partiria do achado anterior e o texto iria embora rolando. */
+static int buscar(int dir, int do_anc)
+{
+    if (do_anc) achou = procurar(dir, anc_l, anc_c, 1);
+    else        achou = procurar(dir, cur_l, cur_c, 0);
+
+    if (achou) marcar_achado();
+    else {
+        sel_limpar();
+        /* Termo que ainda nao casa: a tela volta para onde a procura comecou,
+         * em vez de ficar parada no achado de uma letra atras. */
+        if (do_anc && carregada >= 0 && modo == MODO_TEXTO && anc_l < n_linhas) {
+            cur_l = anc_l; cur_c = anc_c;
+            seguir_cursor();
+        }
+    }
+    return achou;
+}
+
+/* Ctrl+F. Com a barrinha ja aberta ele e "proximo": e o gesto de quem apertou
+ * de novo sem olhar. */
+static void abrir_busca(void)
+{
+    int la, ca, lb, cb;
+
+    if (carregada < 0 || modo != MODO_TEXTO) return;   /* hex e imagem nao buscam */
+    if (busca_on) { buscar(1, 0); return; }
+
+    busca_on = 1;
+    anc_l = cur_l; anc_c = cur_c;
+
+    /* Marcou uma palavra e apertou Ctrl+F: ela E o termo. A ancora vai para o
+     * inicio da marca para que a primeira procura ache a propria - o termo
+     * aparece ja com um achado embaixo, e o Enter e que anda. */
+    if (sel_on && sel_ordem(&la, &ca, &lb, &cb) && la == lb &&
+        cb - ca > 0 && cb - ca < (int) sizeof busca) {
+        memcpy(busca, linhas[la] + ca, (size_t) (cb - ca));
+        busca[cb - ca] = '\0';
+        anc_l = la; anc_c = ca;
+    }
+
+    if (busca[0]) buscar(1, 1);
+    else          achou = 1;           /* campo vazio nao e "nao achei" */
+}
+
+/* A barrinha come o teclado enquanto esta aberta: aqui dentro nao ha tecla que
+ * chegue ao texto. Sair e Escape, Enter no achado que serve, ou um clique no
+ * editor - as tres saidas que um campo de uma linha so tem. */
+static void tecla_busca(KeySym ks, const char *buf, int n, int shift)
+{
+    int len = (int) strlen(busca);
+
+    switch (ks) {
+    case XK_Escape:
+        busca_on = 0;
+        break;
+    case XK_Return: case XK_KP_Enter: case XK_F3:
+        buscar(shift ? -1 : 1, 0);
+        break;
+    case XK_BackSpace:
+        if (len > 0) {
+            busca[car_anterior(busca, len)] = '\0';   /* um CARACTERE, nao um byte */
+            buscar(1, 1);
+        }
+        break;
+    default:
+        if (n > 0 && (unsigned char) buf[0] >= 32 &&
+            len + n < (int) sizeof busca) {
+            memcpy(busca + len, buf, (size_t) n);
+            busca[len + n] = '\0';
+            buscar(1, 1);
+        }
+        break;
+    }
+    desenhar();
+}
+
 /* Alguem esta colando o que copiamos aqui. */
 static void responder_selecao(XSelectionRequestEvent *r)
 {
@@ -1277,7 +1674,9 @@ static void responder_selecao(XSelectionRequestEvent *r)
 static void pos_do_clique(int px, int py, int *l, int *c)
 {
     int ln = (py < MARGEM) ? topo : topo + (py - MARGEM) / altura_lin;
-    int cl = col0 + (px - MARGEM) / avanco;
+    /* Clique na coluna dos numeros cai na coluna 0 da linha, pelo cl < 0 preso
+     * logo abaixo - e o que qualquer editor faz com a margem. */
+    int cl = col0 + (px - texto_x0()) / avanco;
 
     if (ln < 0) ln = 0;
     if (ln >= n_linhas) ln = n_linhas - 1;
@@ -1328,7 +1727,7 @@ static void sel_linha(int l)
 static void desenhar_selecao(void)
 {
     int la, ca, lb, cb, i;
-    int vis = (cont_h() - 2 * MARGEM) / altura_lin;
+    int vis = linhas_vis();
 
     if (!sel_ordem(&la, &ca, &lb, &cb)) return;
 
@@ -1344,8 +1743,8 @@ static void desenhar_selecao(void)
         if (b0 < corte) b0 = corte;               /* rolado para fora, a esquerda */
         if (b1 < b0) continue;
 
-        x0 = MARGEM + (colunas_ate(s, b0) - col0) * avanco;
-        x1 = MARGEM + (colunas_ate(s, b1) - col0) * avanco;
+        x0 = texto_x0() + (colunas_ate(s, b0) - col0) * avanco;
+        x1 = texto_x0() + (colunas_ate(s, b1) - col0) * avanco;
         /* meia coluna a mais quando a selecao segue para a linha de baixo: e
          * assim que se ve que o \n entrou junto */
         if (l < lb) x1 += avanco / 2;
@@ -1362,10 +1761,78 @@ static void desenhar_selecao(void)
     }
 }
 
+/* =========================================================================
+ * A moldura do painel: os numeros a esquerda, a barra de rolagem a direita
+ *
+ * As duas sao desenhadas DEPOIS do texto, e nao antes. Linha comprida com o
+ * texto rolado passa por baixo da barra de rolagem, e o jeito barato de nao a
+ * deixar transbordar e pintar a barra por cima - o caro seria cortar cada
+ * XftDrawStringUtf8 na largura util, o que exigiria medir a linha inteira em
+ * caracteres a cada quadro. Pela esquerda nao ha esse risco (o texto comeca no
+ * texto_x0()), mas os numeros vao junto, no fim, pela mesma razao de ordem.
+ * ========================================================================= */
+
+/* Onde esta o cursor da barra, em pixels do painel. Devolve 0 quando nao ha
+ * barra: aba de imagem, ou painel sem arquivo nenhum. */
+static int rolagem_cursor(int *y, int *h)
+{
+    int total = total_linhas(), trilho = cont_h(), th, mx;
+
+    if (total <= 0 || trilho <= 0) return 0;
+    th = (int) ((long) trilho * linhas_vis() / total);
+    if (th < ROL_MIN) th = ROL_MIN;
+    if (th > trilho)  th = trilho;
+    mx = topo_max();
+    *h = th;
+    if (topo > mx) topo = mx;      /* sessao gravada num arquivo que encolheu */
+    if (topo < 0)  topo = 0;
+    /* Com o arquivo inteiro na tela, mx e zero e o cursor ocupa o trilho todo:
+     * a barra fica la, dizendo "nao ha para onde rolar", em vez de sumir e
+     * fazer o texto mudar de largura ao crescer o arquivo. */
+    *y = (mx > 0) ? (int) ((long) (trilho - th) * topo / mx) : 0;
+    return 1;
+}
+
+static void desenhar_rolagem(void)
+{
+    int h = cont_h(), x = cont_w() - ROL_W, ty, th;
+
+    XSetForeground(dpy, gc, FACE_ESC);          /* o trilho */
+    XFillRectangle(dpy, w_ed, gc, x, 0, ROL_W, (unsigned) h);
+    linha_px(w_ed, x, 0, x, h - 1, SH);
+
+    if (rolagem_cursor(&ty, &th))
+        bisel(w_ed, x + 1, ty, ROL_W - 1, th, (int) FACE, 0);
+}
+
+/* A coluna dos numeros, no cinza da FACE para nao competir com o papel branco.
+ * O numero da linha do cursor sai em tinta cheia, e os outros em cinza: e assim
+ * que se sabe "em que linha estou" sem uma barra de estado no pe - que custaria
+ * altura do texto, exatamente o que a barrinha de procurar evitou. */
+static void desenhar_numeros(void)
+{
+    int gw = numeros_w(), h = cont_h(), vis = linhas_vis(), i;
+
+    if (gw <= 0) return;
+    XSetForeground(dpy, gc, FACE);
+    XFillRectangle(dpy, w_ed, gc, 0, 0, (unsigned) gw, (unsigned) h);
+    linha_px(w_ed, gw - 1, 0, gw - 1, h - 1, SH);
+
+    for (i = 0; i < vis && topo + i < n_linhas; i++) {
+        char n[16];
+        int lw;
+
+        snprintf(n, sizeof n, "%d", topo + i + 1);
+        lw = (int) strlen(n) * avanco;                    /* alinhado a direita */
+        texto(dr_ed, gw - MARGEM - lw, MARGEM + i * altura_lin + base_lin, n,
+              topo + i == cur_l ? &c_ink : &c_fraco);
+    }
+}
+
 static void desenhar_editor(void)
 {
     int w = cont_w(), h = cont_h();
-    int vis = (h - 2 * MARGEM) / altura_lin, i;
+    int vis = linhas_vis(), i;
 
     XSetForeground(dpy, gc, PAPEL);
     XFillRectangle(dpy, w_ed, gc, 0, 0, (unsigned) w, (unsigned) h);
@@ -1374,7 +1841,7 @@ static void desenhar_editor(void)
         const char *s = linhas[topo + i];
         int corte = byte_da_coluna(s, col0);
         int y = MARGEM + i * altura_lin + base_lin;
-        texto(dr_ed, MARGEM, y, s + corte, &c_ink);
+        texto(dr_ed, texto_x0(), y, s + corte, &c_ink);
     }
 
     desenhar_selecao();
@@ -1382,13 +1849,16 @@ static void desenhar_editor(void)
     /* cursor: barra vertical de 2px, sem piscar (piscar exigiria acordar o
      * processo duas vezes por segundo so para isso) */
     if (cur_l >= topo && cur_l < topo + vis) {
-        int cx = MARGEM + (colunas_ate(linhas[cur_l], cur_c) - col0) * avanco;
+        int cx = texto_x0() + (colunas_ate(linhas[cur_l], cur_c) - col0) * avanco;
         int cy = MARGEM + (cur_l - topo) * altura_lin;
-        if (cx >= MARGEM - 1) {
+        if (cx >= texto_x0() - 1) {
             XSetForeground(dpy, gc, INK);
             XFillRectangle(dpy, w_ed, gc, cx, cy, 2, (unsigned) altura_lin);
         }
     }
+
+    desenhar_numeros();
+    desenhar_rolagem();
 }
 
 /* =========================================================================
@@ -1402,7 +1872,7 @@ static void desenhar_editor(void)
 static void desenhar_hex(void)
 {
     int w = cont_w(), h = cont_h();
-    int vis = (h - 2 * MARGEM) / altura_lin;
+    int vis = linhas_vis();
     int total = linhas_hex(), i, j;
 
     XSetForeground(dpy, gc, PAPEL);
@@ -1439,6 +1909,12 @@ static void desenhar_hex(void)
         texto(dr_ed, MARGEM + 10 * avanco,       y, hexa, &c_ink);
         texto(dr_ed, MARGEM + (10 + p) * avanco, y, asc,  &c_fraco);
     }
+
+    /* Numeros aqui nao: a coluna de deslocamento ja E a numeracao do dump, e em
+     * hexadecimal, que e o numero que serve para achar o byte. A rolagem sim -
+     * um binario de alguns MB tem centenas de milhares de linhas, e sem ela a
+     * unica forma de andar e a roda do mouse. */
+    desenhar_rolagem();
 }
 
 /* Poe um componente 0-255 na posicao que ele ocupa na mascara do visual - a
@@ -1624,16 +2100,16 @@ static void seguir_cursor(void)
     if (carregada < 0 || n_linhas == 0) return;   /* nenhuma aba de arquivo carregada */
     if (modo != MODO_TEXTO) return;               /* hex e imagem nao tem cursor */
 
-    vis  = (cont_h() - 2 * MARGEM) / altura_lin;
-    cabe = (cont_w() - 2 * MARGEM) / avanco;
+    vis  = linhas_vis();
+    cabe = cols_cabem();
     col  = colunas_ate(linhas[cur_l], cur_c);
 
-    if (vis < 1) vis = 1;
     if (cur_l < topo) topo = cur_l;
     if (cur_l >= topo + vis) topo = cur_l - vis + 1;
     if (col < col0) col0 = col;
     if (col >= col0 + cabe) col0 = col - cabe + 1;
     if (col0 < 0) col0 = 0;
+    prender_topo();               /* apagar o fim do arquivo encurta a rolagem */
 }
 
 /* =========================================================================
@@ -1918,8 +2394,12 @@ static void ativar(int i)
 
     sincronizar();
     /* A selecao vive nos globais e vale para o buffer que estava neles - depois
-     * da troca ela apontaria para dentro do texto de outro arquivo. */
+     * da troca ela apontaria para dentro do texto de outro arquivo. A barrinha
+     * de procurar cai pelo mesmo motivo: a ancora dela e uma posicao no arquivo
+     * que sai de cena. O termo digitado fica - e o unico pedaco que continua
+     * fazendo sentido no arquivo novo, e o F3 o reaproveita la. */
     sel_limpar();
+    busca_on = 0;
     if (!abas[i].claude) { aba_para_globais(&abas[i]); carregada = i; }
     atual = i;
     mostrar_painel();
@@ -1958,6 +2438,7 @@ static void fechar_aba(int i)
     for (k = 0; k < abas[i].n_linhas; k++) free(abas[i].linhas[k]);
     free(abas[i].linhas);
     for (k = 0; k < UNDO_N; k++) soltar_instante(&abas[i].undo[k]);
+    for (k = 0; k < UNDO_N; k++) soltar_instante(&abas[i].refaz[k]);
     free(abas[i].bruto);                                     /* hex */
     if (abas[i].img_pm) XFreePixmap(dpy, abas[i].img_pm);    /* imagem */
 
@@ -2048,11 +2529,34 @@ static void tecla(XKeyEvent *ev)
     Status st;
     int n = 0;
     int ctrl = (ev->state & ControlMask) != 0;
+    /* O Shift sai do "state", e nao do keysym: com CapsLock ligado o XK_Z chega
+     * SEM Shift nenhum apertado, e o Ctrl+Z viraria refazer calado. */
+    int shift = (ev->state & ShiftMask) != 0;
     int estendendo = 0;             /* Shift+movimento: a marca acompanha */
 
     if (xic) n = Xutf8LookupString(xic, ev, buf, sizeof buf - 1, &ks, &st);
     else     n = XLookupString(ev, buf, sizeof buf - 1, &ks, NULL);
     buf[n > 0 ? n : 0] = '\0';
+
+    /* MODIFICADOR SOZINHO NAO E TECLA. Apertar Ctrl gera um KeyPress proprio, e
+     * o "state" de um evento e o de ANTES dele: nesse KeyPress o ControlMask
+     * ainda nao esta ligado (medido em 03/08/2026: keysym=Control_L,
+     * state=0x0000; so o C seguinte chega com 0x0004). Sem esta saida o evento
+     * descia ate a decisao da marca como "qualquer outra tecla" - nem movimento
+     * nem escrita, porque Xutf8LookupString devolve n=0 - e caia no
+     * sel_limpar(). Resultado: a selecao do mouse morria no Ctrl, antes de o C
+     * ser apertado, e o Ctrl+C copiava a linha do cursor em vez do marcado.
+     * Vale para Shift e Alt pelo mesmo motivo (Shift+seta depois de marcar com
+     * o mouse recomecava a marca em vez de estende-la), e de quebra poupa o
+     * seguir_cursor()+desenhar() que cada modificador disparava - quadro
+     * inteiro comprimido e mandado pelo RDP para nada.
+     *
+     * O intervalo ISO_* vai junto com o IsModifierKey a mao de proposito: a
+     * versao do macro que cobre esse intervalo so existe se o <keysym.h> vier
+     * ANTES do <Xutil.h>, e aqui vem depois - ficaria de fora o AltGr do ABNT2,
+     * que neste teclado e o ISO_Level3_Shift (xmodmap, mod5). */
+    if (IsModifierKey(ks) || (ks >= XK_ISO_Lock && ks <= XK_ISO_Level5_Lock))
+        return;
 
     /* As teclas de ABA valem em qualquer aba, inclusive na do Claude - por isso
      * vem antes da guarda logo abaixo. */
@@ -2069,9 +2573,18 @@ static void tecla(XKeyEvent *ev)
      * seria editar as escondidas um arquivo que nem esta na tela. */
     if (abas[atual].claude) return;
 
+    /* Com a barrinha aberta o teclado e dela - menos o Ctrl+alguma coisa, que
+     * continua valendo: o achado esta marcado, e Ctrl+C sobre ele e justamente o
+     * que se quer poder fazer sem fechar a procura. */
+    if (busca_on && !ctrl) { tecla_busca(ks, buf, n, shift); return; }
+
     if (ctrl) {
         switch (ks) {
         case XK_s: case XK_S: salvar(); desenhar(); return;
+        case XK_f: case XK_F: abrir_busca(); desenhar(); return;
+        /* Ctrl+G e o "de novo" classico do X; o F3 faz o mesmo logo abaixo, sem
+         * Ctrl, para quem vem do resto do mundo. */
+        case XK_g: case XK_G: buscar(shift ? -1 : 1, 0); desenhar(); return;
         /* Ctrl+C NAO passa por XGrabKey de proposito: com grab, ele deixaria de
          * chegar ao Claude da aba 0 - onde e o "interrompe isso" - e a bancada
          * ficaria roubando a tecla mais importante do terminal. Sem grab, ele so
@@ -2093,7 +2606,15 @@ static void tecla(XKeyEvent *ev)
             if (sel_on) virar_dono(XA_PRIMARY, sel_texto());
             desenhar();
             return;
-        case XK_z: case XK_Z: grupo = G_NENHUM; desfazer(); sel_limpar(); seguir_cursor(); desenhar(); return;
+        /* Ctrl+Z desfaz, Ctrl+Shift+Z e Ctrl+Y refazem. */
+        case XK_z: case XK_Z:
+            grupo = G_NENHUM;
+            if (shift) refazer(); else desfazer();
+            sel_limpar(); seguir_cursor(); desenhar();
+            return;
+        case XK_y: case XK_Y:
+            grupo = G_NENHUM; refazer(); sel_limpar(); seguir_cursor(); desenhar();
+            return;
         case XK_q: case XK_Q:
             if (!algum_sujo() || perguntar("Ha alteracoes nao salvas. Sair mesmo assim?")) {
                 salvar_sessao();
@@ -2107,24 +2628,32 @@ static void tecla(XKeyEvent *ev)
 
     if (carregada < 0) return;             /* nenhuma aba de arquivo carregada */
 
+    /* F3 com a barrinha fechada repete o ultimo termo, e abre a barrinha quando
+     * ainda nao ha nenhum. Vem antes da guarda de somente-leitura porque
+     * buscar() e abrir_busca() ja recusam hex e imagem sozinhos. */
+    if (ks == XK_F3) {
+        if (busca[0]) buscar(shift ? -1 : 1, 0);
+        else          abrir_busca();
+        desenhar();
+        return;
+    }
+
     /* SOMENTE LEITURA, e a guarda vem antes de tudo: dali para baixo cada ramo
      * mexe em linhas[cur_l], e no hex e na imagem "linhas" e NULL. Uma tecla
      * qualquer numa aba dessas nao pode virar segmentation fault. */
     if (modo != MODO_TEXTO) {
-        int vis = (cont_h() - 2 * MARGEM) / altura_lin;
-        int total = (modo == MODO_HEX) ? linhas_hex() : 0;
+        int vis = linhas_vis();
 
         switch (ks) {
-        case XK_Up:    topo--;        break;
-        case XK_Down:  topo++;        break;
-        case XK_Prior: topo -= vis;   break;
-        case XK_Next:  topo += vis;   break;
-        case XK_Home:  topo = 0;      break;
-        case XK_End:   topo = total - vis; break;
+        case XK_Up:    topo--;          break;
+        case XK_Down:  topo++;          break;
+        case XK_Prior: topo -= vis;     break;
+        case XK_Next:  topo += vis;     break;
+        case XK_Home:  topo = 0;        break;
+        case XK_End:   topo = topo_max(); break;
         default: return;
         }
-        if (topo > total - 1) topo = total - 1;
-        if (topo < 0) topo = 0;
+        prender_topo();
         desenhar();
         return;
     }
@@ -2153,7 +2682,6 @@ static void tecla(XKeyEvent *ev)
      * O par apagar+escrever guarda UM instantaneo: o `grupo` e forcado logo
      * depois para o `talvez_guardar()` do switch nao gravar o segundo. */
     {
-        int shift = (ev->state & ShiftMask) != 0;
         int movimento = (ks == XK_Left || ks == XK_Right || ks == XK_Up ||
                          ks == XK_Down || ks == XK_Home  || ks == XK_End ||
                          ks == XK_Prior || ks == XK_Next);
@@ -2204,7 +2732,7 @@ static void tecla(XKeyEvent *ev)
     case XK_End:   cur_c = (int) strlen(linhas[cur_l]); break;
     case XK_Prior:
     case XK_Next: {
-        int vis = (cont_h() - 2 * MARGEM) / altura_lin;
+        int vis = linhas_vis();
         cur_l += (ks == XK_Next ? vis : -vis);
         if (cur_l < 0) cur_l = 0;
         if (cur_l >= n_linhas) cur_l = n_linhas - 1;
@@ -2451,13 +2979,29 @@ int main(int argc, char **argv)
          * remota - cada quadro e comprimido em CPU e vai por TCP -, entao so se
          * redesenha quando a PONTA muda de lugar de verdade. */
         case MotionNotify:
-            if (arrastando && ev.xmotion.window == w_ed &&
+            /* Arrastar o cursor da barra de rolagem. E o inverso exato da conta
+             * do rolagem_cursor(): la a posicao vira pixel, aqui o pixel vira
+             * posicao. Nao ha "seguir_cursor" nenhum atras disto - rolar com o
+             * mouse move a TELA, e o cursor de texto fica onde estava, como na
+             * roda do mouse. */
+            if (rolando && ev.xmotion.window == w_ed) {
+                int ty, th, trilho = cont_h(), mx = topo_max(), antes = topo;
+
+                if (rolagem_cursor(&ty, &th) && mx > 0 && trilho > th) {
+                    long y = ev.xmotion.y - pega_dy;
+                    if (y < 0) y = 0;
+                    if (y > trilho - th) y = trilho - th;
+                    topo = (int) (y * mx / (trilho - th));
+                    prender_topo();
+                }
+                if (topo != antes) desenhar();
+            } else if (arrastando && ev.xmotion.window == w_ed &&
                 carregada >= 0 && modo == MODO_TEXTO && n_linhas > 0) {
                 int l, c, antes_l = sel_lb, antes_c = sel_cb, antes_topo = topo;
 
                 /* arrastar para fora da janela rola, como em qualquer editor */
                 if (ev.xmotion.y < MARGEM && topo > 0) topo--;
-                else if (ev.xmotion.y > cont_h() - MARGEM && topo < n_linhas - 1) topo++;
+                else if (ev.xmotion.y > cont_h() - MARGEM && topo < topo_max()) topo++;
 
                 pos_do_clique(ev.xmotion.x, ev.xmotion.y, &l, &c);
                 sel_lb = l; sel_cb = c;
@@ -2467,6 +3011,7 @@ int main(int argc, char **argv)
             }
             break;
         case ButtonRelease:
+            rolando = 0;
             if (arrastando && ev.xbutton.window == w_ed) {
                 arrastando = 0;
                 /* PRIMARY e "marcou, ja esta la": quem quiser colar com o botao
@@ -2526,16 +3071,38 @@ int main(int argc, char **argv)
                 }
                 desenhar();
             } else if (ev.xbutton.window == w_ed && carregada >= 0 &&
+                       ev.xbutton.button == Button1 && modo != MODO_IMG &&
+                       ev.xbutton.x >= cont_w() - ROL_W) {
+                /* A BARRA DE ROLAGEM, e ela vem antes de tudo: este x tambem
+                 * cairia dentro do texto, e sem esta saida o clique poria o
+                 * cursor na ultima coluna da linha em vez de rolar. */
+                int ty, th;
+                if (rolagem_cursor(&ty, &th)) {
+                    if (ev.xbutton.y < ty || ev.xbutton.y >= ty + th) {
+                        /* fora do cursor: uma tela para la, como em todo lugar */
+                        topo += (ev.xbutton.y < ty ? -1 : 1) * linhas_vis();
+                        prender_topo();
+                    } else {
+                        /* dentro: guarda ONDE se pegou, senao o cursor pula com
+                         * o proprio meio debaixo do ponteiro no primeiro pixel */
+                        rolando = 1;
+                        pega_dy = ev.xbutton.y - ty;
+                    }
+                }
+                /* Rolar nao mexe no cursor de texto, mas o teclado tem de
+                 * voltar para ca - senao um clique na barra deixaria as setas
+                 * mudas ate o proximo clique no texto. */
+                XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
+                desenhar();
+            } else if (ev.xbutton.window == w_ed && carregada >= 0 &&
                        modo != MODO_TEXTO) {
                 /* Leitura: a roda rola o hex, o resto do painel so devolve o
                  * foco. Nao ha cursor para posicionar, e nem "linhas" para o
                  * clique cair dentro. */
                 if (modo == MODO_HEX &&
                     (ev.xbutton.button == Button4 || ev.xbutton.button == Button5)) {
-                    int total = linhas_hex();
                     topo += (ev.xbutton.button == Button5 ? 3 : -3);
-                    if (topo > total - 1) topo = total - 1;
-                    if (topo < 0) topo = 0;
+                    prender_topo();
                 } else if (ev.xbutton.button == Button1) {
                     XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
                 }
@@ -2543,10 +3110,14 @@ int main(int argc, char **argv)
             } else if (ev.xbutton.window == w_ed && carregada >= 0) {
                 if (ev.xbutton.button == Button4 || ev.xbutton.button == Button5) {
                     topo += (ev.xbutton.button == Button5 ? 3 : -3);
-                    if (topo < 0) topo = 0;
-                    if (topo > n_linhas - 1) topo = n_linhas - 1;
+                    prender_topo();
                 } else if (ev.xbutton.button == Button1) {
                     int l, c;
+                    /* Clicar no texto e a terceira saida da barrinha: o clique
+                     * diz "quero digitar AQUI", e o teclado tem de voltar para o
+                     * editor junto com o cursor. A roda nao fecha - rolar para
+                     * olhar em volta nao e desistir de procurar. */
+                    busca_on = 0;
                     pos_do_clique(ev.xbutton.x, ev.xbutton.y, &l, &c);
                     cur_l = l; cur_c = c;
 

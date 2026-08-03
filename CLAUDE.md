@@ -13,7 +13,7 @@ mstsc.exe /multimon /f  <--RDP-->    xrdp :3390
 
 ## Antes de ler o README
 
-O `README.md` tem ~2500 linhas e é o **caderno de laboratório** do projeto: cada
+O `README.md` tem ~4400 linhas e é o **caderno de laboratório** do projeto: cada
 decisão vem com a medição que a justifica e com correções datadas de conclusões
 anteriores erradas. Ele é a fonte da verdade sobre o *porquê*.
 
@@ -27,7 +27,7 @@ só a seção necessária. Ler tudo custa ~35 mil tokens e quase nunca é precis
 | `install.sh` | instalador principal, idempotente. Compila a barra no passo 2 |
 | `startwm.sh` | → `/etc/xrdp/startwm.sh`. Sobe a sessão inteira; limpa vars do WSLg |
 | `barra-tarefas.c` | C + Xlib cru, 3,0 MB de RSS. Fonte **core**, iso8859-1 |
-| `bancada.c` | o "VS Code" próprio: árvore + **abas** + editor + xterm embutido com o Claude (que é a aba 0, **aberta sob demanda**). C + Xlib + **Xft**, 2,4 MB de PSS sem o Claude. Binário abre em **hex** e imagem em **preview**, ambos só-leitura. Sessão por projeto em `~/.config/bancada/sessoes/`. Desde 02/08/2026 é um editor de texto normal: seleção com mouse e `Shift`+setas, `Ctrl+C/X/V/A`, digitar substitui a marca, `Alt+↑/↓` move a linha. Dona de PRIMARY e CLIPBOARD |
+| `bancada.c` | o "VS Code" próprio: árvore + **abas** + editor + xterm embutido com o Claude (que é a aba 0, **aberta sob demanda**). C + Xlib + **Xft**, 2,4 MB de PSS sem o Claude. Binário abre em **hex** e imagem em **preview**, ambos só-leitura. Sessão por projeto em `~/.config/bancada/sessoes/`. Desde 02/08/2026 é um editor de texto normal: seleção com mouse e `Shift`+setas, `Ctrl+C/X/V/A`, digitar substitui a marca, `Alt+↑/↓` move a linha, `Ctrl+F` procura (barrinha no lugar do título, `Enter`/`F3`/`Ctrl+G` andam), `Ctrl+Shift+Z`/`Ctrl+Y` refazem, e o painel tem **coluna de números** à esquerda e **barra de rolagem** arrastável à direita. Dona de PRIMARY e CLIPBOARD |
 | `terminal.c` | emulador de terminal próprio, do pty ao pixel. C + Xlib + Xft, 2,66 MB de PSS contra 8,12 do xterm. É o terminal **da sessão** desde 02/08/2026 (`Ctrl+Alt+T`), mas **não** o da bancada: a aba 0 segue no xterm. `SIGUSR1` despeja a grade em texto |
 | `perfil.sh` | o pedaço do projeto que entra no shell: a função `bancada`, que abre na pasta atual e devolve o prompt, como o `code .` |
 | `barra-apps` | atalhos de aplicativo da barra: lê `.desktop`, converte o ícone e mantém o `apps.conf`. Programa nosso só entra na lista do `[+]` se tiver um `.desktop` em `desktop/` |
@@ -114,9 +114,20 @@ entre eles são visíveis ao AST.
 | rótulos da barra em ASCII | a fonte core está em `iso8859-1`; acento sai corrompido no `XDrawString` |
 | `bancada.c` usa **Xft**, a barra usa fonte **core** | não unifique: na barra o iso8859-1 é o visual arcaico; num editor ele **corromperia** todo caractere fora do latin-1 ao salvar |
 | `Ctrl+C` da bancada **não** entra no `XGrabKey` | com grab ele deixaria de chegar ao Claude da aba 0, onde é o "interrompe isso". Só o `Ctrl+Tab` é capturado; o resto depende do foco, que é o certo aqui |
+| modificador sozinho sai cedo do `tecla()` | apertar `Ctrl` gera um `KeyPress` próprio, e o `state` de um evento X é o de **antes** dele: ali o `ControlMask` ainda não está ligado. Sem a saída, esse evento desce até a decisão da marca como "qualquer outra tecla" — nem movimento nem escrita, `n=0` — e cai no `sel_limpar()`. A seleção do mouse morria no `Ctrl`, antes do `C`, e o `Ctrl+C` copiava a linha do cursor. O intervalo `ISO_*` vai escrito à mão ao lado do `IsModifierKey()` porque essa parte do macro exige `<keysym.h>` **antes** do `<Xutil.h>`, e aqui é o contrário — sem ela o `AltGr` do ABNT2 fica de fora |
 | `apagar_selecao()` **não** guarda instantâneo de desfazer | quem chama é que sabe se aquilo é um passo sozinho (Delete) ou a primeira metade de um par (recortar, colar/digitar por cima). Guardar ali faria o `Ctrl+Z` andar meio passo — desfaria o colado sem devolver o apagado |
 | o texto colado passa por filtro | `\r` sai (senão `\r\n` do Windows vira **duas** quebras no `inserir_texto()`), e byte de controle abaixo de 32 que não seja `\n`/`\t` também. Quem decide `\r\n` no arquivo é a flag `crlf`, ao salvar |
-| a seleção da bancada morre na troca de aba | ela vive nos globais do editor, como o cursor — depois da troca eles apontam para o buffer de outro arquivo, e o intervalo não quer dizer nada lá |
+| a seleção da bancada morre na troca de aba | ela vive nos globais do editor, como o cursor — depois da troca eles apontam para o buffer de outro arquivo, e o intervalo não quer dizer nada lá. A barrinha de procurar cai junto, pelo mesmo motivo: a âncora dela é uma posição no arquivo que saiu de cena. O **termo** fica, e o `F3` o reaproveita no arquivo novo |
+| na bancada, resposta de filho vem **pelo pipe**, nunca do código de saída | o `main()` ignora `SIGCHLD` (senão xterm/`convert`/zenity viram zumbi), e com isso o `system()` devolve `-1`/`ECHILD` sempre. Ver a armadilha logo abaixo: era o que fazia toda pergunta responder "não" sozinha |
+| ninguém escreve `MARGEM` como origem do texto do editor: é `texto_x0()` | a coluna dos números come a esquerda e a barra de rolagem come a direita, e a origem aparecia em **cinco** lugares (`desenhar_editor`, `desenhar_selecao`, o cursor, `pos_do_clique`, `seguir_cursor`). Um esquecido não dá erro: só põe o cursor uns pixels fora do texto, ou deixa a última coluna debaixo da barra. A largura útil é o `cols_cabem()`, a altura útil é o `linhas_vis()` |
+| todo lugar que rola passa pelo `topo_max()`/`prender_topo()` | o teto é a última **tela**, não a última linha. Enquanto nada mostrava a posição, rolar até a última linha sozinha no alto era só feio; com a barra de rolagem desenhada vira mentira visível — o cursor dela desceria até o fim do trilho com o arquivo inteiro já na tela |
+| os números e a barra de rolagem são desenhados **depois** do texto | linha comprida com o texto rolado passa por baixo da barra; pintá-la por cima é de graça. Cortar cada `XftDrawStringUtf8` na largura útil exigiria medir a linha inteira em caracteres a cada quadro |
+| a saída da barra de rolagem vem antes dos outros ramos do clique no painel | aquele x também cai dentro do texto: sem ela o clique poria o cursor na última coluna da linha em vez de rolar |
+| a barrinha de procurar fica na barra de ferramentas, não numa faixa no pé | uma faixa embaixo teria de roubar altura do texto, e a altura do texto é a conta que o `desenhar_editor()`, o `desenhar_selecao()`, o `seguir_cursor()`, o `pos_do_clique()`, o `PageUp/PageDown` e o arraste usam — **seis** lugares. Um esquecido não dá erro: só põe o cursor debaixo da faixa |
+| o achado da busca **é** a seleção | de graça vêm o desenho, o `Ctrl+C` do achado e o digitar por cima. Um realce próprio poria dois intervalos marcados na tela, mentindo sobre qual deles o botão do meio cola |
+| a busca incremental parte da **âncora**, não do achado anterior | senão cada letra a mais do termo avança na lista e o texto vai embora rolando enquanto se digita |
+| `Ctrl+Shift+Z` sai do `ShiftMask`, nunca do keysym | com `CapsLock` ligado o `Ctrl+Z` chega como `XK_Z` **sem** Shift apertado; um `case XK_Z: refazer()` faria o desfazer virar refazer, calado, para quem estiver de CapsLock |
+| `esquecer_refazer()` mora dentro do `guardar_instante()` | é o único ponto chamado *antes de cada edição*, e é aí que o futuro tem de morrer. Fora dali, o `Ctrl+Y` reconstruiria um texto que nunca foi escrito. O par desfazer/refazer não dobra a memória: cada passo **tira de um anel e põe no outro** |
 | só a janela-mãe pede `KeyPressMask` na bancada | o X entrega a tecla à menor janela sob o ponteiro que a pediu, não à que tem foco. Com o filho pedindo, o `XFilterEvent` não reconhece o evento e o **acento morto do ABNT2 para de compor** |
 | a bancada precisa de `XSetErrorHandler` | trocar de aba desmapeia uma janela e mapeia outra; `XSetInputFocus` na recém-desmapeada dá `BadMatch`, e o tratador padrão do Xlib **mata o processo** |
 | o `terminal.c` **não** entra na bancada | ele existe por gosto de ter o próprio, não para trocar o xterm da aba 0 — que funciona. Mexer nisso traz de volta todo o trabalho das invariantes de janela adotada, para economizar 14 MB num par que gasta 195 |
@@ -164,6 +175,16 @@ entre eles são visíveis ao AST.
 - **Opções de janela do `xfce4-terminal` vêm antes das de aba.** `--maximize` depois de `--title` é ignorado **sem erro** — a janela abre no tamanho padrão.
 - **`pgrep -c` conta zumbi.** Filtre com `grep -v defunct` antes de concluir que
   há duas instâncias.
+- **`signal(SIGCHLD, SIG_IGN)` faz o `system()` devolver sempre `-1`** (medido em
+  02/08/2026). Com essa disposição o kernel recolhe o filho sozinho e o `wait()`
+  de dentro do `system()` não acha ninguém: volta `-1`/`ECHILD` tenha o comando
+  dado certo ou errado. O `bancada.c` ignora `SIGCHLD` para o xterm/`convert`/
+  zenity não virarem zumbi, e por isso o `return system(cmd) == 0` do `zenity()`
+  era **falso o tempo todo**: toda pergunta respondia "não" por baixo do clique —
+  aba suja não fechava ao clicar "Sim", e a janela com aba suja não saía. Quem
+  precisa da resposta de um filho **lê pelo pipe** (`popen` + `&& echo marca`),
+  nunca pelo código de saída. O `popen` sempre funcionou aqui; o `pclose`
+  devolvendo `-1` não atrapalha ninguém.
 - **Não tire screenshot no meio de um gesto com menu aberto.** O `import` quebra
   o `XGrabPointer` do menu da barra; o clique seguinte vai para a janela da barra
   com coordenadas relativas a ela, o menu fecha sem escolher, e parece bug de
@@ -177,6 +198,13 @@ entre eles são visíveis ao AST.
   preta. Antes de acreditar num print de teste, confira que a janela está
   visível (`xwininfo -root -children` dá o empilhamento) — ou, melhor, meça o
   estado por `fprintf` em vez de olhar a tela.
+- **Para testar programa X sem tocar na sessão viva** (02/08/2026): `#define main
+  <prog>_main` + `#include "<prog>.c"` num arquivo de teste alcança os `static`
+  de dentro. Monte o display de verdade e **não mapeie janela nenhuma**: o
+  desenho roda inteiro e não vira pixel. Para *ver* um widget, desenhe-o num
+  **Pixmap** e leia de lá — Pixmap não pode ser encoberto. Nada de `XTest` no
+  display vivo: ele injeta no servidor e a tecla vai para a janela com foco, que
+  pode ser um arquivo aberto do usuário.
 - ~~**`install.sh` derruba a sessão**~~ — **ele a duplica** (medido em
   02/08/2026). Reiniciar o xrdp apaga a tabela de sessões, que vive na memória do
   sesman; no reconnect ele abre um display novo e o antigo fica **órfão**, vivo e
