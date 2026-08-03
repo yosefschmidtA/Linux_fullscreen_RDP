@@ -2485,6 +2485,162 @@ Um efeito colateral sem conserto barato: ao encolher, o xfwm4 empilha as janelas
 no monitor que sobrou, e elas **não voltam sozinhas** ao lugar quando a sessão
 retoma o multimonitor.
 
+## Trazer o Word para dentro da sessão: a tentativa que não passou (03/08/2026)
+
+O pedido: em vez de ceder um monitor inteiro, trazer um app nativo do Windows
+— o Word — para **dentro** da sessão, numa janela gerenciada pelo xfwm4. A
+fonte seria uma pasta `Docs` na área de trabalho, irmã da `Coisas`.
+
+O desenho escolhido, depois de descartar captura de janela:
+
+```
+Word (nativo)  →  monitor virtual (VDD, ligado sob demanda)
+                       ↓ UltraVNC captura
+                  TCP pela vNIC da WSL
+                       ↓
+                  vncviewer = uma janela X normal
+```
+
+**Não passou.** O que segue é o que foi medido, incluindo duas conclusões
+anteriores que se provaram falsas. A decisão final foi manter o Word na pasta
+`Coisas` e continuar cedendo um monitor — o método da seção anterior.
+
+### As peças funcionaram, uma a uma
+
+Instalados e confirmados: o **Virtual Display Driver 25.7.23** (assinado,
+`ROOT\DISPLAY\0000`), que criou um monitor de 1920x1080 em X=4480; o
+**UltraVNC 1.8.2.4**; e o `tigervnc-viewer` do lado Linux.
+
+A rota WSL→Windows **não precisou de regra de firewall**: o `winvnc` escuta em
+`0.0.0.0:5900` e a vNIC da WSL alcança o host pelo gateway (`172.22.32.1`)
+direto — `RFB 003.008` respondeu na primeira tentativa.
+
+### Medir o protocolo, não a tela
+
+A pergunta "qual monitor está sendo servido?" foi respondida com uma sonda RFB
+de 60 linhas em Python que faz o aperto de mão até o `ServerInit` e lê a largura
+e a altura do framebuffer. **Nada de print de teste** — vale a armadilha já
+registrada aqui: captura de tela mente quando a janela está coberta, e o número
+que interessa vem do protocolo.
+
+Para a sonda autenticar foi preciso gerar o `passwd` do VNC: DES em ECB com a
+chave fixa `0xE84AD660C4721AE0` (é a chave do protocolo com os bits de cada byte
+invertidos) sobre a senha em 8 bytes. O mesmo blob de 8 bytes serve para o
+`ultravnc.ini` do servidor e para o `~/.vnc/passwd` do viewer. Detalhe do
+ambiente: o **OpenSSL 3 não faz mais DES-ECB** (`Error setting cipher`, o
+algoritmo saiu para o provider legado); o caminho que funciona é o
+`TripleDES` do `cryptography` com chave de 64 bits, que é DES simples.
+
+### Falso nº 1: "a seleção de monitor do servidor resolve"
+
+O `winvnc.exe` tem sim as chaves `primary` e `secondary` no `[UltraVNC]` — elas
+aparecem no bloco de chaves do binário, entre `DefaultScale` e `SocketConnect`,
+e a GUI as expõe como "Default screen: Primary / Secondary". Marcar
+**Secondary** na GUI **não recortou nada**: a sonda respondeu
+
+```
+RETANGULO SERVIDO: 6400x1080
+```
+
+que é a área de trabalho inteira (2560 + 1536 + 1920, em coordenadas lógicas).
+A seleção de monitor de verdade do UltraVNC é uma extensão **do viewer dele**,
+proprietária — o binário tem `vncDesktopThread::handle_display_change : Request
+Monitor %d`, ou seja, quem pede o monitor é o cliente. O TigerVNC não fala isso.
+
+E não deu para insistir gravando `secondary=1` no arquivo: o
+`C:\ProgramData\UltraVNC\ultravnc.ini` é **só-admin por ACL** (o atributo não é
+ReadOnly — `Get-Item` devolve `Archive, NotContentIndexed`; é permissão mesmo).
+A alteração feita pela GUI do próprio `winvnc`, rodando sem elevação, **chegou
+ao processo mas nunca ao disco**: a senha nova autenticou na sonda e o `mtime`
+do ini não mudou. Configuração que funciona enquanto o processo vive e some no
+reinício é pior que configuração que falha.
+
+### O recorte no X funcionou — e está no `recorte-vnc.c`
+
+Como o servidor não recorta, o recorte foi feito do lado X: o `vncviewer` abre
+com `-geometry 6400x1080`, e o `recorte-vnc.c` **adota** a janela dele com
+`XReparentWindow` para dentro de uma moldura de 1920x1080, ancorada em
+`x = -4480`. O filho é maior que a mãe e começa fora dela; o X corta o excesso
+de graça, e o que sobra visível é exatamente o retângulo do monitor virtual.
+Clique e teclado chegam certos porque quem os traduz é o próprio viewer, que
+continua achando que tem 6400 px.
+
+Confirmado por `xwininfo -root -tree`, não por print:
+
+```
+0x2400001 "Windows": ("recorte-vnc")  1920x1056+0+24  +2560+24
+   0x2600005 "... - TigerVNC"         6400x1080+-4480+0
+```
+
+Três detalhes que o exercício ensinou:
+
+- **Adotar pede `_NET_CLIENT_LIST`**, não varredura dos filhos da raiz: o xfwm4
+  já reparentou o viewer para dentro de uma moldura, então o filho da raiz é a
+  *moldura*. Adotar a moldura traria a decoração junto.
+- **`RemoteResize=0` não é enfeite.** Sem ele o viewer manda o *servidor* mudar
+  a resolução para caber na janela — e a janela é redimensionada por nós o tempo
+  todo, o que mexeria na área de trabalho real do Windows.
+- **Janela desgarrada não recebe foco do gerenciador.** O repasse é na mão, no
+  `FocusIn` da moldura, como o xterm da bancada.
+
+### Falso nº 2: "o mstsc não absorve um monitor criado depois"
+
+Esta era a decisão que fazia o plano parecer seguro: como o mstsc enumera
+monitores **na conexão**, um display que nasce depois não entraria na sessão, e
+por isso o `.rdp` assinado poderia ficar intocado.
+
+A premissa está certa e a conclusão está errada, porque **o `abrir-windows`
+reconecta o mstsc toda vez que roda**. Ao ceder um monitor e devolvê-lo, o
+mstsc reconectou — e dessa vez o monitor virtual já existia. Ele entrou.
+
+Medido lado a lado, com o VDD ainda em `4480, 1920x1080` e o layout do Windows
+**inalterado**:
+
+| Windows | Sessão Linux (`xrandr`) |
+|---|---|
+| `DISPLAY5` 2560x1080 em 0 | `rdp1` 2560x1080 em 0 |
+| `DISPLAY1` 1536x864 em 2560 | `rdp0` 1920x1080 em 2560 |
+| `DISPLAY6` 1920x1080 em 4480 (o VDD) | `rdp2` 1920x1080 em 4480 |
+
+A sessão Linux passou a ter 3 monitores somando 6400x1080 — a área de trabalho
+do Windows inteira, VDD incluído. O sintoma foi uma "tela preta" no recorte: era
+a **própria sessão Linux** projetada no monitor que deveria hospedar o Word,
+preta porque aqui não há desktop environment nem papel de parede, e a
+janela-raiz do X é preta. Uma captura feita do lado Windows fechou a prova —
+aparecia o Thunar em `/home/yosef/`.
+
+Consertar isso exigiria `selectedmonitors:s:` no perfil que o `abrir-windows`
+gera, para o mstsc ignorar o monitor virtual. Deixaria de ser "o `.rdp` fica
+intocado".
+
+### Falso nº 3: "só retângulo sujo anda no fio"
+
+Dito antes de medir, sobre o custo de transportar 6400 px de largura para
+mostrar 1920: *"só retângulo sujo anda no fio, os outros monitores ficam
+parados"*. A estatística de saída do TigerVNC, depois de 6 minutos ligado:
+
+```
+Tight: 304.486 krects, 4,08 Gpixels, 813 MiB  (razão 1:19)
+```
+
+**813 MiB em 6 minutos**, cerca de 2,3 MB/s contínuos. Os outros monitores não
+ficam parados porque o mstsc está em ecrã cheio neles: o que o UltraVNC captura
+ali é a **sessão Linux**, com vídeo tocando e tudo. E a janela do recorte, dentro
+dessa sessão, mostrava aquilo de volta — espelho de frente para espelho.
+
+### Por que parar aqui
+
+Somadas, as três correções dizem que o desenho custaria: um driver de display em
+modo kernel, um servidor VNC com configuração que não persiste sem elevação, o
+`.rdp` assinado deixando de ser intocado, e um laço de espelho que só some
+depois de tudo isso. Contra um método que já funciona, sem instalar nada, e cujo
+único incômodo é o app ficar num monitor em vez de numa janela.
+
+O que ficou: o `recorte-vnc.c`, porque o problema que ele resolve — adotar a
+janela de um cliente de tela remota e recortá-la — é o **mesmo** que apareceria
+na ideia de trazer o Windows por Moonlight/Sunshine, que segue adiada. O resto
+foi desinstalado no mesmo dia.
+
 ## Arquivos instalados
 
 | Origem | Destino |
@@ -3682,6 +3838,73 @@ bytes:
 
 O arquivo repetido virou "traz a aba que já existe", que é o mesmo caminho de
 clicar duas vezes no mesmo arquivo na árvore.
+
+### Copiar de dentro da aba do Claude (03/08/2026)
+
+O pedido foi *"não dá, nem aparece a seleção e também não copia"*, marcando
+texto **na aba 0**. Não era uma falha só: eram duas, empilhadas, e as duas ficam
+fora do código da bancada.
+
+**A seleção não aparece porque o gesto nunca chega ao xterm.** O Claude Code
+liga o relato de mouse — os `\033[?1000h` e `\033[?1006h` estão dentro do binário
+2.1.220 —, então o arrasto vira evento para o programa e o xterm não marca nada.
+Isso já estava previsto no comentário do `claude_subir()`; o que faltava era a
+saída, que é do xterm e não nossa: **segurar `Shift` enquanto arrasta**. Com
+`Shift` o xterm intercepta o botão antes do relato e o realce azul aparece.
+`Ctrl+C` ali segue sendo o "interrompe isso" do Claude, por invariante — não é,
+e não vai ser, um copiar.
+
+**E o que foi marcado não chegava ao `Ctrl+V` do editor.** O `Shift`+arraste
+povoa só o `PRIMARY`, e o `pedir_cola()` pede o `CLIPBOARD` primeiro, caindo no
+`PRIMARY` **só se ninguém for dono**. Medido com `xclip` durante a sessão:
+
+```
+PRIMARY   → "```\nWindows …"                        (marca velha, do editor)
+CLIPBOARD → …/thinclient_drives/.clipboard/Methodology.docx
+```
+
+Ou seja: o `xrdp-chansrv` — o canal de área de transferência do RDP — fica de
+dono do `CLIPBOARD` o tempo todo, espelhando o Windows. **O plano B nunca
+dispara.** O `Ctrl+V` devolvia um caminho de arquivo do Windows no lugar do
+trecho marcado no terminal, e a conclusão natural de quem via aquilo era "o
+copiar não funcionou".
+
+O conserto é uma linha na chamada do xterm: `Ctrl+Shift+C` copiando para o
+`CLIPBOARD`. Ele **não** vem de fábrica — as `translations` compiladas no xterm
+390 só trazem `Shift+Insert` e o botão do meio, ambos `PRIMARY`:
+
+```
+$ strings /usr/bin/xterm | grep -n 'copy-selection\|insert-selection'
+4636:  Shift <KeyPress> Insert:insert-selection(SELECT, CUT_BUFFER0)
+4662:     ~Ctrl ~Meta <Btn2Up>:insert-selection(SELECT, CUT_BUFFER0)
+```
+
+Três detalhes que custam nada e evitam um atalho mudo:
+
+- **Não tira tecla do Claude Code.** No fio do terminal, `Ctrl+Shift+C` e
+  `Ctrl+Shift+V` chegariam como os mesmos `0x03`/`0x16` do `Ctrl+C` e do
+  `Ctrl+V` — o programa de dentro não teria como distingui-los. O `Ctrl+C`
+  sozinho continua intocado.
+- **Duas caixas por tecla.** Com `CapsLock` ligado, `Shift`+`c` entrega o keysym
+  **minúsculo**; uma entrada só deixaria o atalho calado justamente para quem
+  está de `CapsLock`. É a mesma armadilha do `Ctrl+Shift+Z`.
+- **`XTerm*vt100.translations`, não `XTerm*translations`.** O segundo valeria
+  também para o menu e a barra de rolagem.
+
+Verificado antes de instalar, com controle — porque "não reclamou" só prova algo
+se a reclamação for possível:
+
+| `-xrm` passado a um `xterm -iconic … -e true` | stderr |
+|---|---|
+| as quatro entradas boas | **nada** |
+| ação inexistente | `Actions not found: nao-existe-essa-acao` |
+| sintaxe quebrada | `translation table syntax error` |
+| as três boas + **a quarta** com ação falsa | `Actions not found: quarta-entrada-falsa` |
+
+A última linha é a que importa: ela prova que o `\n` separa mesmo as entradas e
+que o parser chegou até a quarta — sem ela, o silêncio da primeira linha poderia
+ser uma tabela inteira engolida. O `-iconic` é o que permite testar no display
+vivo sem janela piscando na cara de quem está usando a sessão.
 
 ### A conversa do Claude fica de fora, e isso é escolha
 

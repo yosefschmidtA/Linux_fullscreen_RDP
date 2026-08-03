@@ -185,6 +185,19 @@ entre eles são visíveis ao AST.
   precisa da resposta de um filho **lê pelo pipe** (`popen` + `&& echo marca`),
   nunca pelo código de saída. O `popen` sempre funcionou aqui; o `pclose`
   devolvendo `-1` não atrapalha ninguém.
+- **Numa sessão xrdp o `CLIPBOARD` tem dono o tempo todo** (medido em
+  03/08/2026): é o `xrdp-chansrv`, espelhando o Windows — `xclip -o -selection
+  clipboard` devolvia um caminho em `thinclient_drives/.clipboard/`. Todo plano B
+  do tipo "se ninguém for dono do CLIPBOARD, tenta o PRIMARY" **nunca dispara**
+  aqui. Era o que fazia o `Ctrl+V` da bancada colar um arquivo do Windows no
+  lugar do que se marcou no terminal.
+- **O Claude Code liga o relato de mouse** (`\033[?1000h`/`\033[?1006h` no
+  binário): arrastar dentro da aba 0 manda o gesto ao programa e o xterm nem
+  marca. Segure `Shift` para o xterm interceptar; `Ctrl+Shift+C` copia para o
+  CLIPBOARD desde 03/08/2026 (não vem de fábrica no xterm 390).
+- **Para testar `-xrm`/janela no display vivo, `xterm -iconic … -e true`**: roda
+  o caminho inteiro sem janela piscando na tela de quem está usando a sessão. E
+  teste com **controle** — silêncio só prova algo se o erro for possível.
 - **Não tire screenshot no meio de um gesto com menu aberto.** O `import` quebra
   o `XGrabPointer` do menu da barra; o clique seguinte vai para a janela da barra
   com coordenadas relativas a ela, o menu fecha sem escolher, e parece bug de

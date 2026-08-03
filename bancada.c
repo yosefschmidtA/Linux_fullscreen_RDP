@@ -171,7 +171,13 @@ static Atom      A_DELETE;
 static Atom      A_AREA, A_UTF8, A_ALVOS, A_TEXTO;   /* selecao/area de transf. */
 static Atom      A_COLA;                             /* onde a cola aterrissa */
 
+/* INK e a TINTA, nao "preto". No tema claro os tres calhavam de ser #000000 e
+ * um nome so bastava; no escuro eles divergem - a tinta clareia, a borda e o
+ * fundo do terminal continuam pretos. Um nome so faria o cursor do editor
+ * desaparecer OU o painel do Claude piscar branco antes do xterm pintar. */
 static unsigned long FACE, FACE_ESC, HI, SH, INK, PAPEL, SEL_FUNDO;
+static unsigned long BORDA;        /* a linha externa do bisel */
+static unsigned long FUNDO_TERM;   /* o painel onde o xterm do Claude mora */
 
 static int larg = 1100, alt = 700;   /* tamanho da janela */
 static int avanco, altura_lin, base_lin;   /* metrica da fonte monoespacada */
@@ -1100,8 +1106,8 @@ static void bisel(Drawable d, int x, int y, int w, int h, int fundo, int afundad
     XFillRectangle(dpy, d, gc, x, y, (unsigned) w, (unsigned) h);
     linha_px(d, x, y, x + w - 2, y, a);
     linha_px(d, x, y, x, y + h - 2, a);
-    linha_px(d, x, y + h - 1, x + w - 1, y + h - 1, INK);
-    linha_px(d, x + w - 1, y, x + w - 1, y + h - 1, INK);
+    linha_px(d, x, y + h - 1, x + w - 1, y + h - 1, BORDA);
+    linha_px(d, x + w - 1, y, x + w - 1, y + h - 1, BORDA);
     linha_px(d, x + 1, y + h - 2, x + w - 2, y + h - 2, b);
     linha_px(d, x + w - 2, y + 1, x + w - 2, y + h - 2, b);
 }
@@ -1805,7 +1811,7 @@ static void desenhar_rolagem(void)
         bisel(w_ed, x + 1, ty, ROL_W - 1, th, (int) FACE, 0);
 }
 
-/* A coluna dos numeros, no cinza da FACE para nao competir com o papel branco.
+/* A coluna dos numeros, na FACE para nao competir com o papel do editor.
  * O numero da linha do cursor sai em tinta cheia, e os outros em cinza: e assim
  * que se sabe "em que linha estou" sem uma barra de estado no pe - que custaria
  * altura do texto, exatamente o que a barrinha de procurar evitou. */
@@ -1934,7 +1940,7 @@ static unsigned long componente(unsigned long mascara, unsigned v)
 }
 
 /* Chama o convert UMA vez e recebe PPM cru pelo pipe: "P6", largura, altura,
- * 255, e os pixels. O alfa e achatado sobre o #DEDEDE da face ANTES de sair de
+ * 255, e os pixels. O alfa e achatado sobre o #3A3A3A da face ANTES de sair de
  * la, como o barra-apps ja faz com os icones - assim nao chega canal alfa aqui e
  * nao ha nada para compor.
  *
@@ -1970,7 +1976,7 @@ static void gerar_imagem(void)
     setenv("BANCADA_IMG", arquivo, 1);
     snprintf(cmd, sizeof cmd,
              "identify -format '%%w %%h\\n' \"$BANCADA_IMG\"'[0]' 2>/dev/null; "
-             "convert \"$BANCADA_IMG\"'[0]' -background '#DEDEDE' -alpha remove "
+             "convert \"$BANCADA_IMG\"'[0]' -background '#3A3A3A' -alpha remove "
              "-alpha off -resize '%dx%d>' -depth 8 ppm:- 2>/dev/null", cx, cy);
     p = popen(cmd, "r");
     if (!p) return;
@@ -2018,9 +2024,9 @@ static void gerar_imagem(void)
     img_h = h;
 }
 
-/* Fundo da FACE, e nao do PAPEL branco: e sobre o #DEDEDE que o convert achatou
- * o alfa, entao a moldura tem de ser a mesma cor, senao a borda de um PNG
- * transparente aparece como um retangulo cinza dentro do branco. */
+/* Fundo da FACE, e nao do PAPEL: e sobre o #3A3A3A que o convert achatou o
+ * alfa, entao a moldura tem de ser a mesma cor, senao a borda de um PNG
+ * transparente aparece como um retangulo cinza dentro do painel. */
 static void desenhar_imagem(void)
 {
     int w = cont_w(), h = cont_h();
@@ -2298,9 +2304,49 @@ static void abrir_claude(void)
     pid_term = fork();
     if (pid_term == 0) {
         setsid();
+        /* As tres linhas de highlight* existem porque o realce PADRAO do xterm
+         * e video reverso, e video reverso e um atributo que qualquer
+         * repintura da celula apaga - e o Claude Code repinta sozinho o tempo
+         * todo. Com cor explicita o realce vira cor de verdade e sobrevive.
+         * Sao as mesmas SEL_FUNDO/branco do editor, para as duas abas marcarem
+         * selecao do mesmo jeito.
+         *
+         * Isto NAO resolve o outro metade do problema: o Claude Code liga o
+         * relato de mouse, entao arrastar manda o gesto para o programa e o
+         * xterm nem chega a marcar. La e preciso segurar Shift para o xterm
+         * interceptar - e nao ha o que fazer daqui, quem pediu o relato foi o
+         * programa de dentro.
+         *
+         * A ultima linha resolve a metade que FALTAVA: o Shift+arraste povoa
+         * so o PRIMARY, e o xterm 390 nao traz Ctrl+Shift+C de fabrica (as
+         * translations compiladas so tem Shift+Insert e o botao do meio, ambos
+         * PRIMARY). Como o canal de area de transferencia do RDP - o
+         * xrdp-chansrv - fica de dono do CLIPBOARD o tempo todo espelhando o
+         * Windows, o plano B do pedir_cola() ("se ninguem tiver o CLIPBOARD,
+         * tenta o PRIMARY") NUNCA dispara: o Ctrl+V do editor devolvia o que
+         * estava no Windows em vez do trecho marcado no terminal, e parecia
+         * que o copiar nao tinha funcionado.
+         *
+         * Nao custa tecla ao Claude Code: no fio do terminal Ctrl+Shift+C e
+         * Ctrl+Shift+V chegariam como os mesmos bytes 0x03/0x16 do Ctrl+C e do
+         * Ctrl+V, entao o programa de dentro nao teria como distingui-los de
+         * qualquer jeito. O Ctrl+C sozinho segue intocado, que e o "interrompe
+         * isso". As duas caixas de cada tecla existem pelo CapsLock: com ele
+         * ligado o Shift+c entrega o keysym minusculo, e uma entrada so
+         * deixaria o atalho mudo justamente para quem esta de CapsLock.
+         * O "*vt100." e proposital: um "XTerm*translations" solto valeria
+         * tambem para o menu e a barra de rolagem. */
         execlp("xterm", "xterm", "-into", id,
                "-fa", "DejaVu Sans Mono", "-fs", "10",
                "-bg", "black", "-fg", "gray90", "-b", "2",
+               "-xrm", "XTerm*highlightColor: #264F78",
+               "-xrm", "XTerm*highlightTextColor: #FFFFFF",
+               "-xrm", "XTerm*highlightReverse: false",
+               "-xrm", "XTerm*vt100.translations: #override "
+                       "Ctrl Shift <Key>C: copy-selection(CLIPBOARD) \\n "
+                       "Ctrl Shift <Key>c: copy-selection(CLIPBOARD) \\n "
+                       "Ctrl Shift <Key>V: insert-selection(CLIPBOARD) \\n "
+                       "Ctrl Shift <Key>v: insert-selection(CLIPBOARD)",
                "-e", "sh", "-c", cmd, (char *) NULL);
         _exit(127);
     }
@@ -2822,14 +2868,23 @@ int main(int argc, char **argv)
     raiz = RootWindow(dpy, tela);
     cm   = DefaultColormap(dpy, tela);
 
+    /* Tema escuro (03/08/2026). O bisel dos anos 90 nao depende de ser claro:
+     * ele so precisa que HI seja mais claro que FACE e SH mais escuro. Com isso
+     * o relevo continua legivel e o painel do editor deixa de brigar com o
+     * xterm preto do Claude, que e a aba vizinha.
+     *
+     * PAPEL nao e preto puro de proposito: fica um degrau acima do xterm, para
+     * a fronteira entre as duas abas continuar visivel. */
 #define COR(s) (XParseColor(dpy, cm, s, &c), XAllocColor(dpy, cm, &c), c.pixel)
-    FACE  = COR("#DEDEDE");
-    FACE_ESC = COR("#C4C4C4");     /* face das abas de tras */
-    HI    = COR("#FFFFFF");
-    SH    = COR("#808080");
-    INK   = COR("#000000");
-    PAPEL = COR("#FFFFFF");
-    SEL_FUNDO = COR("#000080");        /* o azul de selecao dos anos 90 */
+    FACE  = COR("#3A3A3A");
+    FACE_ESC = COR("#2C2C2C");     /* face das abas de tras */
+    HI    = COR("#5A5A5A");
+    SH    = COR("#1A1A1A");
+    INK   = COR("#E5E5E5");        /* o mesmo gray90 do xterm do Claude */
+    PAPEL = COR("#1E1E1E");
+    SEL_FUNDO = COR("#264F78");    /* o azul dos anos 90 nao se ve em fundo escuro */
+    BORDA = COR("#000000");
+    FUNDO_TERM = COR("#000000");
 #undef COR
 
     /* A pasta inicial: o argumento, ou de onde a bancada foi chamada. */
@@ -2877,7 +2932,7 @@ int main(int argc, char **argv)
                          (unsigned) (larg - ARVORE_W), (unsigned) (alt - BARRA_H - ABAS_H), 0,
                          CopyFromParent, InputOutput, CopyFromParent,
                          CWBackPixel | CWEventMask, &at);
-    at.background_pixel = INK;
+    at.background_pixel = FUNDO_TERM;
     /* SubstructureNotifyMask: o xterm nasce depois, de forma assincrona, e com
      * "-into" ele mantem a geometria de 80x24 com que veio ao mundo. E este
      * aviso que diz a hora certa de estica-lo para o painel inteiro. */
@@ -2909,10 +2964,10 @@ int main(int argc, char **argv)
 
 #define XCOR(dst, r, g, b) do { rc.red=(r); rc.green=(g); rc.blue=(b); rc.alpha=0xffff; \
         XftColorAllocValue(dpy, DefaultVisual(dpy, tela), cm, &rc, (dst)); } while (0)
-    XCOR(&c_ink,    0x0000, 0x0000, 0x0000);
-    XCOR(&c_fraco,  0x5000, 0x5000, 0x5000);
+    XCOR(&c_ink,    0xe5e5, 0xe5e5, 0xe5e5);
+    XCOR(&c_fraco,  0x8a8a, 0x8a8a, 0x8a8a);   /* no escuro, "fraco" e mais claro */
     XCOR(&c_sel,    0xffff, 0xffff, 0xffff);
-    XCOR(&c_aberto, 0x1000, 0x3000, 0x9000);   /* na arvore: aberto em outra aba */
+    XCOR(&c_aberto, 0x7f7f, 0xb0b0, 0xffff);   /* na arvore: aberto em outra aba */
 #undef XCOR
 
     xim = XOpenIM(dpy, NULL, NULL, NULL);
