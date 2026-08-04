@@ -1,0 +1,76 @@
+#!/bin/bash
+# soltar-cache - devolve ao Windows a RAM que o page cache do Linux segura.
+#
+# POR QUE ISTO EXISTE
+#
+# O Gerenciador de Tarefas do Windows conta o vmmemWSL inteiro: processos MAIS
+# cache. O htop mostra so os processos. Medido em 03/08/2026, numa sessao com o
+# Brave fechado: 1063MB de processos, 2982MB de cache, e o Windows marcando
+# 4277MB. Quem quer jogar depois de usar o Linux perde 3GB por causa de cache
+# que ninguem mais vai ler.
+#
+# O `autoMemoryReclaim` do .wslconfig resolve METADE: ele devolve pagina LIVRE
+# ao host - com ele ligado o vao entre a soma do htop e o vmmem fica em 230-360MB
+# contra ~2800MB sem ele. Mas nao LARGA o cache. O modo `dropcache`, que promete
+# exatamente isso, nao disparou em 6 minutos de silencio (WSL 2.7.11.0, kernel
+# 6.18.33.2). Este script e a metade que falta.
+#
+# Medicao que o justifica (03/08/2026, sessao parada):
+#     antes   linux 1063+2982=4045MB   vmmem 4277MB
+#     depois  linux 1031+ 638=1669MB   vmmem 2033MB
+# O cache NAO voltou sozinho depois: 611MB -> 638MB em 5 minutos. O entulho era
+# do boot e do Brave, nao algo sendo relido - por isso larga-lo e ganho que fica.
+#
+# QUANDO ELE AGE
+#
+# So com a sessao ociosa DE VERDADE, e so se houver cache que valha a pena. Nao
+# se mede ociosidade pelo /proc/loadavg aqui: com Xorg, xfwm4 e o Claude de pe a
+# carga fica em 0,2-0,3 mesmo sem ninguem tocar no teclado, e qualquer limiar
+# viraria chute. Mede-se a fracao de CPU ocupada por amostragem do /proc/stat,
+# que e a pergunta direta.
+#
+# O custo: ao voltar para a sessao, o primeiro acesso a arquivo le do disco de
+# novo. E a troca aceita - "sessao um tico mais lenta ao retomar" por "nao
+# precisar fechar o RDP para jogar".
+
+CACHE_MIN_MB=${CACHE_MIN_MB:-1200}   # abaixo disso nao compensa mexer
+CPU_MAX_PCT=${CPU_MAX_PCT:-10}       # acima disso a sessao esta em uso
+AMOSTRA_S=${AMOSTRA_S:-5}
+
+# Cached + Buffers, que e o que o `free -m` chama de buff/cache. Nao entra o
+# SReclaimable de proposito: e cache de kernel, e o `echo 1` nao o toca.
+cache_mb() { awk '/^Cached:/{c=$2} /^Buffers:/{b=$2} END{print int((c+b)/1024)}' /proc/meminfo; }
+
+# Fracao de CPU ocupada entre duas leituras do /proc/stat. A primeira coluna do
+# "cpu " agregado e user; a quarta e idle e a quinta iowait - as duas contam como
+# parado, senao uma sessao esperando disco pareceria ocupada.
+cpu_ocupada_pct() {
+    local a b t0 i0 t1 i1
+    a=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5+$6}' /proc/stat)
+    sleep "$AMOSTRA_S"
+    b=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5+$6}' /proc/stat)
+    t0=${a% *}; i0=${a#* }; t1=${b% *}; i1=${b#* }
+    [ "$t1" -le "$t0" ] && { echo 100; return; }   # sem delta: nao arrisca
+    echo $(( 100 - ( (i1 - i0) * 100 / (t1 - t0) ) ))
+}
+
+c=$(cache_mb)
+if [ "$c" -lt "$CACHE_MIN_MB" ]; then
+    echo "cache em ${c}MB, abaixo do minimo de ${CACHE_MIN_MB}MB - nada a fazer"
+    exit 0
+fi
+
+uso=$(cpu_ocupada_pct)
+if [ "$uso" -gt "$CPU_MAX_PCT" ]; then
+    echo "cache em ${c}MB, mas CPU a ${uso}% - sessao em uso, fica para depois"
+    exit 0
+fi
+
+# `echo 1` e nao `3`: 1 larga so o page cache, que e o volume; 3 levaria junto o
+# cache de dentry/inode, que aqui pesa ~50MB e cuja perda deixa todo caminho de
+# arquivo lento de novo. Medido em 03/08/2026: o `1` sozinho entrega o mesmo
+# resultado - ver README.
+sync
+echo 1 > /proc/sys/vm/drop_caches
+d=$(cache_mb)
+echo "cache ${c}MB -> ${d}MB (CPU a ${uso}%), $((c - d))MB soltos"

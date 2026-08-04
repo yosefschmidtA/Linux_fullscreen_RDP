@@ -217,9 +217,23 @@ install -m 644 "$SRC"/desktop/*.desktop /usr/share/applications/
 # nao recebe mais correcao. Vira lixo silencioso - o pior tipo.
 rm -f /usr/local/bin/jogo-windows /usr/share/applications/jogos-windows.desktop
 
+# O soltar-cache devolve ao Windows a RAM que o page cache do Linux segura. Ele
+# existe porque o autoMemoryReclaim do .wslconfig resolve so METADE do problema:
+# devolve pagina LIVRE ao host, mas nao LARGA o cache - e o modo `dropcache`,
+# que promete exatamente isso, nao disparou em 6 min de silencio (medido em
+# 03/08/2026, WSL 2.7.11.0). Sem ele o Gerenciador de Tarefas marca 4,3GB para
+# uma sessao de 1GB de processos. Ver README, "O cache que o Windows contava".
+#
+# Vai como timer do SISTEMA, e nao cron do usuario, porque escrever em
+# /proc/sys/vm/drop_caches e coisa de root: um cron pediria sudo e cairia na
+# regra de "nada de comando manual por sessao de uso".
+install -m 755 "$SRC/soltar-cache" /usr/local/bin/soltar-cache
+install -m 644 "$SRC/soltar-cache.service" "$SRC/soltar-cache.timer" /etc/systemd/system/
+
 update-desktop-database /usr/share/applications 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable --quiet x11-unix-writable.service
+systemctl enable --quiet --now soltar-cache.timer
 /usr/local/bin/fix-x11-unix
 
 echo

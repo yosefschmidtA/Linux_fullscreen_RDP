@@ -3978,6 +3978,48 @@ toda abertura cair na conversa velha, arrastando o contexto anterior junto e
 exigindo `/clear` para começar do zero. Quem quer a conversa anterior pede por
 ela, dentro da própria aba.
 
+#### Correção (03/08/2026): não havia onde pedir, e o padrão inverteu
+
+A última frase acima estava **errada**, e o erro durou dois dias. "Pede por ela
+dentro da própria aba" pressupõe um prompt de shell para digitar o comando — e
+não existe nenhum: o `abrir_claude()` monta `cd '…' && exec '…'`, e o `exec`
+substitui o shell pelo Claude. Enquanto ele roda não há prompt, e quando ele sai
+o `xterm -e` termina junto e a **aba morre**. A porta documentada dava para uma
+parede.
+
+O sintoma relatado foi "clico no ícone Claude e ela vem vazia", sem saída. O
+raciocínio do parágrafo original continua de pé — retomar sempre custa contexto
+—, mas ele comparava um custo real com uma alternativa que não existia. Com as
+duas pontas na mesa a conta virou: **começar limpo é `/clear` lá dentro, uma
+tecla; começar retomado não tinha caminho nenhum.** Desde 03/08/2026 a aba sobe
+com:
+
+```sh
+cd '<projeto>' || exit 1; '<claude>' --continue || exec '<claude>'
+```
+
+O `||` resolve a primeira abertura de um projeto novo sem caso especial: sem
+nada para retomar, o `--continue` **sai com código 1** (medido em 03/08/2026,
+em pasta sem histórico, com e sem as variáveis `CLAUDE*` herdadas) e o plano B
+abre a conversa nova. A alternativa seria adivinhar o nome que o Claude dá à
+pasta dele em `~/.claude/projects/` — que troca `/` por `-` — e reimplementar
+aqui uma regra que não é nossa.
+
+O `cd` leva `|| exit 1` próprio porque a precedência do shell agruparia
+`(cd && claude --continue) || exec claude`: com um `projeto` inexistente, o
+plano B abriria o Claude na pasta errada em vez de falhar. Os três caminhos
+foram testados com um `claude` de mentira, sem abrir Claude aninhado na sessão
+viva — sai 1 → cai na nova, na pasta certa; sai 0 → não abre duas vezes; `cd`
+falha → não lança nada.
+
+Detalhe de buffer que o `-Wextra` pegou: o `cmd` era `PATH_MAX * 2 + 64`, e o
+comando novo cita o caminho do Claude **duas** vezes. Passou para `* 3 + 64`.
+Truncar ali não corta um texto, corta o comando do shell no meio.
+
+O que **não** mudou: a sessão da bancada (`~/.config/bancada/sessoes/`) continua
+sem guardar nada da conversa. Quem retoma é o Claude Code, do histórico dele —
+que fica em disco e, por isso, sobrevive a `wsl --shutdown`.
+
 ### O Claude não sobe sozinho (01/08/2026)
 
 A aba do Claude existe desde o início — ela é a aba `[0]`, não fecha e não tem
@@ -4264,6 +4306,108 @@ Tarefas. Não compensa.
 
 O jeito seguro de recuperar memória é reduzir o teto (`memory=`) ou desligar o
 que não se usa — veja abaixo.
+
+### Correção (03/08/2026): era o kernel, não o recurso — e "cosmético" estava errado
+
+Tudo acima foi revisto, com medição. Duas coisas mudaram de conclusão.
+
+**1. Não era cosmético.** O parágrafo acima descarta o `autoMemoryReclaim` como
+"um número mais bonito no Gerenciador de Tarefas". Não é. O balão da WSL2 só
+infla, e isso tem preço real:
+
+| ação | liberado no Linux | devolvido ao Windows |
+|---|---|---|
+| `drop_caches` | 2,9 GB | **821 MB** |
+| fechar o Brave | 1,64 GB | **483 MB** |
+
+4,5 GB liberados aqui dentro viraram 1,3 GB lá fora. O resto o Windows só retoma
+**paginando o `vmmem` para o disco** — naquele momento já havia empurrado ~850 MB
+(`Private` 6369 MB contra `WorkingSet` 5518 MB). Isso é I/O de verdade, não
+enfeite. E o efeito prático é o que motivou a investigação: ter de fechar a
+sessão RDP inteira antes de jogar qualquer coisa no Windows.
+
+**2. A queda era do kernel antigo.** Religado em 03/08/2026 no kernel
+`6.18.33.2` (que traz `CONFIG_PAGE_REPORTING` e `CONFIG_VIRTIO_BALLOON`), o
+`autoMemoryReclaim=gradual` rodou sem **nenhum** desligamento espontâneo. A
+assinatura do `p9io.cpp` não reapareceu. O recurso funciona: alocados 2,5 GB em
+`/dev/shm` e liberados, o vão entre a soma do `htop` e o `vmmem` saiu de
+2589 MB e voltou a ~145 MB em menos de um minuto ocioso.
+
+Fica valendo `autoMemoryReclaim` ligado. O aviso antigo continua verdadeiro para
+kernels anteriores — o que não vale mais é a conclusão de que o recurso é
+dispensável.
+
+### O cache que o Windows contava (03/08/2026)
+
+Ligar o `autoMemoryReclaim` resolveu **metade**. Ele devolve página **livre** ao
+host; não **larga** o *page cache*. Com o Brave fechado a sessão ficava assim:
+1053 MB de processos, 3076 MB de cache parado, e o Gerenciador marcando 4753 MB.
+
+O modo `dropcache`, que promete exatamente largar esse cache, **não disparou**:
+seis minutos de silêncio absoluto e o cache imóvel em 2950 MB. Não é falta de
+suporte — a WSL aqui é a 2.7.11.0. Ele simplesmente não agiu.
+
+Três hipóteses foram levantadas e **derrubadas por medição**, o que importa
+porque cada uma apontaria para um conserto diferente:
+
+- **"É RAM disfarçada de tmpfs"** — não: `Shmem` em 21 MB, `/dev/shm` com 1,1 MB,
+  `/tmp` com 96 KB. É *page cache* de arquivo, legítimo e descartável.
+- **"É o Docker"** — não: o daemon sobe no boot mas estava com **zero
+  containers**; dockerd + containerd somam 230 MB e não explicam 3 GB.
+- **"É a própria medição que enche o cache"** — não. Chegou-se a suspeitar disso
+  porque cada leitura do `vmmem` sobe um `powershell.exe` pelo `/mnt/c`, o que é
+  CPU *e* leitura de arquivo. Mas o `t0`, 1,5 minuto após o boot e antes de
+  qualquer medição, já marcava 2395 MB de cache. A suspeita era falsa.
+
+O teste que decidiu o desenho: largar o cache e **ficar parado**.
+
+| | Linux (usado + cache) | vmmem |
+|---|---|---|
+| antes | 1063 + 2982 = 4045 MB | 4277 MB |
+| após `drop_caches` + 5 min quieto | 1031 + 638 = 1669 MB | **2033 MB** |
+
+E o cache **não voltou**: 611 → 638 MB em cinco minutos. Aqueles 3 GB eram
+entulho do boot e do Brave, não algo sendo relido — então largá-los é ganho que
+fica enquanto a sessão estiver parada, que é justamente quando se quer a RAM de
+volta.
+
+Daí o **`soltar-cache`**: um timer do systemd que faz de dois em dois minutos o
+que o `dropcache` deveria fazer. Ele não age por relógio, age por medição — e
+desiste sozinho nos dois casos em que agir seria burrice:
+
+- cache abaixo de 1200 MB: não compensa;
+- CPU acima de 10%: a sessão está em uso, fica para depois.
+
+A ociosidade **não** é medida pelo `/proc/loadavg`. Com Xorg, xfwm4 e o Claude
+de pé a carga fica em 0,2–0,3 sem ninguém tocar no teclado, e qualquer limiar
+ali seria chute. Mede-se a fração de CPU ocupada amostrando o `/proc/stat`, que
+é a pergunta direta. O `iowait` conta como parado junto com o `idle`, senão uma
+sessão esperando disco pareceria ocupada.
+
+É `echo 1` e não `echo 3` em `/proc/sys/vm/drop_caches`: o `1` larga só o page
+cache, que é o volume, e o `3` levaria junto o cache de dentry/inode — aqui uns
+50 MB, cuja perda deixa todo caminho de arquivo lento de novo sem devolver quase
+nada. Medido: o `1` sozinho entregou 3907 MB.
+
+Teste ponta a ponta, com o timer já instalado — encheu-se o cache de propósito
+com `dd if=/dev/sdd of=/dev/null bs=1M count=3000` e não se tocou em mais nada:
+
+```
+cache 4433MB -> 526MB (CPU a 4%), 3907MB soltos
+cache em 552MB, abaixo do minimo de 1200MB - nada a fazer
+```
+
+O `vmmem` caiu de 5753 para **2021 MB** sozinho, e a passagem seguinte do timer
+desistiu por conta própria. Resultado da sessão inteira: de **5146 MB** de
+`vmmem` para uma sessão de 2,4 GB, para **~2033 MB** para uma sessão de 1,7 GB.
+
+**O piso é ~370 MB.** Sobra sempre esse vão entre a soma do `htop` e o `vmmem`:
+é custo fixo da VM, não cache. O número do Gerenciador não vai colar no `htop` —
+vai ficar uns 370 MB acima, e prometer zero seria mentira.
+
+O preço: depois de um tempo ocioso o cache vai embora, então o primeiro acesso a
+arquivo ao voltar lê do disco de novo. É a troca aceita de propósito — "sessão
+um tico mais lenta ao retomar" por "não precisar fechar o RDP para jogar".
 
 > **Comentei a linha e o problema continuou.** Comentar/apagar
 > `autoMemoryReclaim` no `.wslconfig` **não muda nada sozinho** - esse arquivo só

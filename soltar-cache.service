@@ -1,0 +1,12 @@
+[Unit]
+Description=Solta o page cache quando a sessao esta ociosa, devolvendo RAM ao Windows
+Documentation=file:/home/yosef/linux-fullscreen/README.md
+
+[Service]
+Type=oneshot
+# Precisa de root: quem escreve em /proc/sys/vm/drop_caches e o root. Como
+# servico do sistema ele ja nasce assim - e por isso que isto NAO e um cron do
+# usuario, que pediria sudo e cairia na regra de "nada de comando manual".
+ExecStart=/usr/local/bin/soltar-cache
+Nice=19
+IOSchedulingClass=idle

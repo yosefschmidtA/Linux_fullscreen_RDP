@@ -1,0 +1,14 @@
+[Unit]
+Description=Verifica de 2 em 2 minutos se da para soltar o page cache
+
+[Timer]
+# 2 min depois do boot e a cada 2 min. O intervalo curto nao e agressivo: o
+# proprio script desiste na hora se a CPU estiver ocupada ou se o cache for
+# pequeno, entao a passagem normal custa uma leitura do /proc/meminfo e 5s de
+# amostragem. Quem decide agir e a medicao, nao o relogio.
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

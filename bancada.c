@@ -64,8 +64,10 @@
  * As abas abertas voltam na proxima vez, por projeto, de
  * ~/.config/bancada/sessoes/. Grava-se so o que da para reconstruir do disco:
  * caminho, cursor e rolagem — nunca conteudo nao salvo. A conversa do Claude
- * nao entra; a aba dele sobe limpa, e quem quiser a anterior usa
- * `claude --continue` dentro dela.
+ * nao entra no arquivo de sessao e nem precisa: desde 03/08/2026 a aba dele
+ * sobe com `claude --continue`, que retoma a ultima conversa DESTE projeto
+ * sozinho, do historico que o proprio Claude guarda em ~/.claude/projects/.
+ * Para comecar limpo, /clear la dentro. Ver abrir_claude().
  *
  * O QUE ESTE EDITOR NAO TEM, DE PROPOSITO
  *
@@ -2293,13 +2295,37 @@ static void caminho_claude(char *fora, size_t n)
 
 static void abrir_claude(void)
 {
-    char id[32], cmd[PATH_MAX * 2 + 64], cla[PATH_MAX];
+    /* *3 e nao *2: o comando cita `projeto` uma vez e `cla` DUAS (a tentativa
+     * de retomar e o plano B). Com *2 o gcc avisa de truncamento, e truncar
+     * aqui nao corta um texto: corta o comando do shell no meio. */
+    char id[32], cmd[PATH_MAX * 3 + 64], cla[PATH_MAX];
 
     if (pid_term > 0) { kill(pid_term, SIGTERM); pid_term = 0; }
 
     caminho_claude(cla, sizeof cla);
     snprintf(id, sizeof id, "%lu", (unsigned long) w_term);
-    snprintf(cmd, sizeof cmd, "cd '%s' && exec '%s'", projeto, cla);
+
+    /* `--continue` com plano B, e nao `claude` puro: a aba sobe RETOMANDO a
+     * ultima conversa DESTE projeto - o `--continue` e por diretorio, como as
+     * abas. Sem isso a unica porta para a conversa anterior era digitar o
+     * comando num prompt que nao existe: o `exec` daqui substitui o shell, e a
+     * aba morre junto com o Claude. Era o que fazia toda abertura vir vazia.
+     *
+     * O `||` funciona porque, sem nada para retomar, o `--continue` sai com
+     * codigo 1 (medido em 03/08/2026, em pasta sem historico, com e sem as
+     * variaveis CLAUDE* herdadas). Entao a primeira vez num projeto novo cai
+     * sozinha na conversa nova, sem caso especial e sem adivinhar o nome que o
+     * Claude da a pasta dele em ~/.claude/projects/ (que troca '/' por '-' e
+     * que nao queremos reimplementar aqui).
+     *
+     * O `cd` leva `|| exit 1` proprio: sem ele, a precedencia do shell e
+     * `(cd && claude --continue) || exec claude`, e um `projeto` inexistente
+     * abriria o Claude na pasta errada em vez de falhar.
+     *
+     * Comecar limpo continua barato - e o /clear la dentro, que o usuario ja
+     * usa. O contrario e que nao tinha caminho nenhum. */
+    snprintf(cmd, sizeof cmd, "cd '%s' || exit 1; '%s' --continue || exec '%s'",
+             projeto, cla, cla);
 
     pid_term = fork();
     if (pid_term == 0) {
