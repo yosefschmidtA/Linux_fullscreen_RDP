@@ -1723,6 +1723,76 @@ transferir-usb detectar
 > `grep -a` mais um `tr -cd '[:print:]\t\n'`. O VID:PID é ASCII, então só o nome
 > exibido perde os acentos.
 
+### Ela nunca rodou uma vez sequer (corrigido em 04/08/2026)
+
+Tudo o que a seção acima descreve estava escrito e **nenhuma linha executava**.
+Descoberto ao levar o notebook para o trabalho: os três monitores funcionaram, o
+headset de lá não veio — "tento e fica preso lá". Eram dois defeitos
+independentes, cada um bastando sozinho para matar a detecção.
+
+**1. `estado_de()` chamava de "presente" um aparelho na gaveta.** O
+`usbipd bind` grava um registro **persistente**, e ele sobrevive a desligar o
+aparelho — só o `BusId` cai para `null`. Com o G435 fora da máquina, o
+`usbipd state` ainda o trazia inteirinho:
+
+```json
+{ "BusId": null, "ClientIPAddress": null,
+  "PersistedGuid": "64d5b482-ef78-4f54-b36a-31124d352cfe",
+  "InstanceId": "USB\\VID_046D&PID_0ADF\\V001008005.1" }
+```
+
+A função olhava só o `PersistedGuid`, então respondia **`windows`** — exatamente
+a mesma resposta que dava para a câmera, que estava ligada de verdade. O
+`resolver_audio()` sai na primeira linha quando a resposta é `windows`, e por
+isso **nunca chegava a perguntar ao Windows quais headsets existem**. A regra
+"está presente?" da tabela acima nunca foi implementada: o que o código perguntava
+era "está na lista?", e para um aparelho já *bind*-ado a resposta é sim para
+sempre. Quem responde de verdade é o **`BusId`** — medido no mesmo dia com a
+câmera anexada, ele continua lá (`BusId: "1-6"`, `ClientIPAddress:
+"172.22.38.242"`), então serve aos três estados vivos.
+
+O estrago no trabalho: `ID_AUDIO` continuava o headset de casa, o `para_linux()`
+tentava anexar um aparelho a 30 km dali, falhava três vezes, **derrubava e subia
+o mstsc no meio** e terminava no aviso genérico.
+
+**2. `-ListarUsb` devolvia lista vazia, calado e com código de saída 0.** A
+chave do hardware era `{b3f8fa53-…},39`, e ela **não tem valor em nenhum**
+endpoint desta máquina. Quem carrega o caminho da instância é a `,2` do mesmo
+GUID — medido nos oito endpoints ativos:
+
+```
+Render | Alto-falantes | k39=[] | k2=[{1}.USB\VID_0951&PID_170B&MI_00\...]
+```
+
+O `resolver_audio()` lia a lista vazia como *"nenhum áudio USB encontrado;
+mantendo o de antes"* e desistia. Ou seja: mesmo que o defeito 1 não existisse, a
+detecção não teria achado nada.
+
+**E o defeito 2 era maior que a detecção.** O `Hw` vazio ia para o `-Evitar` e o
+`-Restaurar`, que casam com `$_.Hw -like "*VID_xxxx&PID_xxxx*"` — e em PowerShell
+`'' -like '*VID_…*'` é **`False`**. Então:
+
+| Caminho | O que se pensava | O que acontecia |
+|---|---|---|
+| `-Evitar` antes do attach | tira o headset de padrão no Windows | `continue` nos dois tipos, imprime *"nada a trocar"* e **não troca nada** |
+| `-Restaurar` depois do detach | devolve o headset a padrão | roda 12 tentativas em ~11 s e sai com *"não reapareceu"* |
+
+Isto é uma **correção da seção "Transferir áudio"**: o attach que funciona em
+casa nunca teve a ajuda do `-Evitar`. Fechar o mstsc, sozinho, sempre foi o que
+soltava o aparelho. O comentário de 30/07/2026 que trocou o casamento por nome
+pelo casamento por VID:PID resolveu o problema certo com a chave errada, e ficou
+oito dias parecendo que funcionava porque o outro passo do par cobria a falha.
+
+**O intervalo de 60 s.** Com o `ausente` passando a ser verdade, uma sessão sem
+nenhum headset ligado pediria a lista ao Windows duas vezes por minuto, para
+sempre — a barra roda `transferir-usb estado` a cada 30 s, e cada pergunta é um
+`powershell.exe` inteiro. Medido: 1,26 s na primeira chamada contra 0,31 s dentro
+do intervalo. **O clique no botão não passa pelo intervalo**: ele é um pedido
+direto e pergunta na hora.
+
+O que sobra de manual no trabalho é o `usbipd bind` de sempre, uma vez por
+máquina — e agora o aviso traz o comando com o VID:PID **certo** já preenchido.
+
 ### Pré-requisito, uma vez por máquina
 
 Em **PowerShell administrador**:

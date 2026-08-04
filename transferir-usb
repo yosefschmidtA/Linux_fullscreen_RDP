@@ -251,6 +251,17 @@ audios_usb_do_windows() {   # "VID:PID<TAB>Nome" por linha
         | grep -aE '^[0-9a-f]{4}:[0-9a-f]{4}'
 }
 
+# $1 = "barato" quando quem chama e o refresh periodico da barra (a cada 30 s).
+#
+# A pergunta ao Windows custa um powershell.exe inteiro, ~1 s. Enquanto o
+# aparelho certo estava presente isso nunca acontecia; agora que o "ausente" e
+# de verdade (veja estado_de), uma sessao sem nenhum headset ligado pediria essa
+# lista duas vezes por minuto, para sempre. O intervalo corta isso sem custar
+# reacao: quem clica no botao NAO passa por aqui - o clique e um pedido direto,
+# e pergunta na hora.
+INTERVALO_DETECCAO=60
+MARCA_DETECCAO="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/transferir-usb.deteccao"
+
 resolver_audio() {
     [ "$FIXO_PELO_USUARIO" = sim ] && return 0
 
@@ -258,6 +269,14 @@ resolver_audio() {
     case "$(estado_de "$ID_AUDIO")" in
         linux|windows|nao-compartilhado) return 0 ;;
     esac
+
+    if [ "${1:-}" = barato ]; then
+        local agora antes
+        agora=$(date +%s)
+        antes=$(cat "$MARCA_DETECCAO" 2>/dev/null) || antes=0
+        [ $((agora - ${antes:-0})) -lt "$INTERVALO_DETECCAO" ] && return 0
+        printf '%s' "$agora" > "$MARCA_DETECCAO"
+    fi
 
     local lista n escolha
     lista=$(audios_usb_do_windows) || return 0
@@ -288,6 +307,30 @@ resolver_audio() {
 
 # "linux" (anexado aqui), "windows" (disponivel la), "nao-compartilhado" (falta o
 # bind) ou "ausente" (desligado da maquina).
+#
+# QUEM DIZ SE O APARELHO ESTA PRESENTE E O BusId, nao a existencia do registro.
+# Medido em 04/08/2026, com o G435 DESLIGADO desta maquina, o 'usbipd state'
+# ainda o trazia na lista inteirinho:
+#
+#   { "BusId": null, "ClientIPAddress": null, "PersistedGuid": "64d5b482-...",
+#     "InstanceId": "USB\\VID_046D&PID_0ADF\\V001008005.1" }
+#
+# O 'usbipd bind' grava um registro PERSISTENTE, que sobrevive a desconectar o
+# aparelho - so o BusId cai para null. Ate esta correcao a funcao olhava so o
+# PersistedGuid, entao um headset guardado na gaveta respondia "windows", exato
+# igual a um ligado (a camera, presente, tinha PersistedGuid e BusId "1-6").
+#
+# O estrago nao ficava aqui: o resolver_audio sai na primeira linha quando a
+# resposta e "windows", e por isso NUNCA perguntava ao Windows quais headsets
+# existem. Levando o notebook para o trabalho, o ID_AUDIO continuava o do
+# headset de casa, o para_linux tentava anexar um aparelho a 30 km dali, falhava
+# tres vezes, derrubava e subia o mstsc no meio e terminava no aviso generico -
+# com o headset do trabalho intocado, "preso" no Windows. A deteccao automatica
+# que existe justamente para casa/trabalho era codigo morto em qualquer maquina
+# onde algum headset ja tivesse sido "bind"-ado uma vez.
+#
+# Anexado o BusId continua la (medido no mesmo dia: com a camera anexada, BusId
+# "1-6" e ClientIPAddress "172.22.38.242"), entao ele serve aos tres estados.
 estado_de() {
     local vidpid="$1"
     ( cd /tmp && "$USBIPD" state 2>/dev/null ) | python3 -c '
@@ -300,6 +343,11 @@ except Exception:
 for d in devs:
     inst = (d.get("InstanceId") or "").upper()
     if ("VID_" + alvo.upper()) not in inst:
+        continue
+    # sem BusId o registro e so a lembranca de um bind: o aparelho nao esta na
+    # maquina. Segue procurando em vez de decidir, para o caso de o usbipd
+    # trazer duas entradas do mesmo VID:PID (uma velha e uma viva).
+    if not d.get("BusId"):
         continue
     if d.get("ClientIPAddress"):
         print("linux")
@@ -458,7 +506,7 @@ escrever_cache() {
 }
 
 case "${1:-}" in
-    estado) resolver_audio; escrever_cache; cat "$CACHE" ;;
+    estado) resolver_audio barato; escrever_cache; cat "$CACHE" ;;
     detectar)
         # forca a redeteccao, ignorando o que foi gravado antes
         rm -f "$DETECTADO"

@@ -154,7 +154,21 @@ $K_ADAPTADOR = '{b3f8fa53-0004-438e-9003-51a46e139bfc},6'
 # (medido em 30/07/2026: o -Evitar nao excluia nada e o -Restaurar nao achava
 # nada), alem de quebrar em Windows de outro idioma. O VID:PID e o mesmo
 # identificador que o usbipd usa, entao as duas metades falam a mesma lingua.
+#
+# SAO DUAS CHAVES, e a primeira vem vazia aqui. Medido em 04/08/2026: a ",39"
+# nao tem valor em NENHUM dos oito endpoints ativos desta maquina - quem carrega
+# o caminho da instancia e a ",2" do mesmo GUID:
+#
+#   Render | Alto-falantes | k39=[] | k2=[{1}.USB\VID_0951&PID_170B&MI_00\...]
+#
+# Com a ",39" sozinha o -ListarUsb devolvia LISTA VAZIA sempre, calado e com
+# codigo de saida 0. O resolver_audio lia isso como "nenhum audio USB
+# encontrado; mantendo <id antigo>" e desistia - o segundo motivo de o headset
+# do trabalho nunca ser detectado. A ",39" fica como primeira tentativa por ser
+# a que ja estava aqui: se em outra build do Windows ela for a preenchida, o
+# codigo continua certo.
 $K_HARDWARE  = '{b3f8fa53-0004-438e-9003-51a46e139bfc},39'
+$K_HARDWARE2 = '{b3f8fa53-0004-438e-9003-51a46e139bfc},2'
 
 # "046d:0adf" -> "VID_046D&PID_0ADF"
 function ConvertTo-Padrao-Hw {
@@ -195,7 +209,11 @@ function Get-Dispositivos {
             Tipo = $Tipo
             Nome = $nome
             Id   = "$prefixo.$guid"
-            Hw   = "$($props.$K_HARDWARE)".ToUpper()
+            Hw   = $(
+                     $h = "$($props.$K_HARDWARE)"
+                     if (-not $h) { $h = "$($props.$K_HARDWARE2)" }
+                     $h.ToUpper()
+                   )
         }
     }
 }
