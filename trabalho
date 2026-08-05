@@ -7,6 +7,7 @@
 #   trabalho claude     so o Claude Code, num terminal
 #   trabalho arquivos   so o ranger, num terminal
 #   trabalho onde       mostra o binario do claude que foi encontrado
+#   trabalho onde-gemini  o mesmo para o agy (Antigravity CLI)
 #   trabalho instalar   cria os .desktop e o icone (uma vez por maquina)
 #
 # POR QUE ISTO EXISTE. O VS Code custava 845 MB de PSS (medido em 01/08/2026,
@@ -59,6 +60,25 @@ onde_claude() {
               "$HOME"/.vscode-server/extensions/anthropic.claude-code-*/resources/native-binary/claude \
            2>/dev/null | sort -V | tail -1)
     [ -n "$c" ] && [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+    return 1
+}
+
+# O SEGUNDO agente: "agy", o Antigravity CLI.
+#
+# POR QUE NAO E O GEMINI CLI. Em 18/06/2026 o Google parou de servir o Gemini CLI
+# para conta individual — Google AI Pro e Ultra incluidos. Ele responde
+# IneligibleTierError/UNSUPPORTED_CLIENT e manda migrar. Hoje o Gemini CLI so
+# atende chave de API (cobrada por token) ou licenca enterprise, e quem usa a
+# ASSINATURA no terminal e este binario. Medido em 05/08/2026, na versao 0.53.1
+# do Gemini CLI, que era a mais recente no npm.
+#
+# O caminho absoluto importa: o PATH da sessao grafica do xrdp nao tem
+# ~/.local/bin (medido no environ do xfwm4, 05/08/2026). Quem chamar "agy" pelo
+# nome de dentro de um .desktop ou da bancada nao acha nada.
+onde_agy() {
+    local c
+    c=$(command -v agy 2>/dev/null) && { printf '%s\n' "$c"; return 0; }
+    [ -x "$HOME/.local/bin/agy" ] && { printf '%s\n' "$HOME/.local/bin/agy"; return 0; }
     return 1
 }
 
@@ -182,6 +202,7 @@ case "${1:-abrir}" in
     claude)   cmd_claude ;;
     arquivos) cmd_arquivos ;;
     onde)     onde_claude || { msg "nao achei o Claude Code"; exit 1; } ;;
+    onde-gemini) onde_agy || { msg "nao achei o agy (Antigravity CLI)"; exit 1; } ;;
     instalar) cmd_instalar ;;
-    *) msg "uso: trabalho [abrir|claude|arquivos|onde|instalar]"; exit 1 ;;
+    *) msg "uso: trabalho [abrir|claude|arquivos|onde|onde-gemini|instalar]"; exit 1 ;;
 esac

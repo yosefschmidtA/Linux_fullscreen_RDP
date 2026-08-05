@@ -4244,6 +4244,120 @@ cima, pelo motivo já registrado aqui: `import` mente quando a janela está cobe
 A rolagem do hex foi conferida pelo mesmo caminho — sessão com `topo 100`, e a
 tela abriu no deslocamento `0x640`, que é 100 × 16.
 
+## O segundo agente, e o fim da aba fixa (05/08/2026)
+
+O pedido era simples: "tenho o Gemini assinado, dá para usar como uso o Claude
+aqui?". A resposta levou uma troca de produto no caminho.
+
+### O Gemini CLI não serve mais a assinatura
+
+Instalei o Gemini CLI (`@google/gemini-cli` 0.53.1, a `latest` no npm no dia) e a
+autenticação pela conta Google foi **recusada**:
+
+```
+IneligibleTierError: This client is no longer supported for Gemini Code Assist
+for individuals. To continue using Gemini, please migrate to the Antigravity
+suite of products
+reasonCode: UNSUPPORTED_CLIENT   tierId: free-tier
+```
+
+Minha primeira hipótese foi credencial velha em cache — o token em
+`~/.gemini/oauth_creds.json` tinha vencido em 31/07. **Estava errada.** Em
+**18/06/2026** o Google parou de servir o Gemini CLI para conta individual,
+**incluindo Google AI Pro e Ultra**. O que continua funcionando lá é chave de API,
+que cobra por token e ignora a assinatura, e licença enterprise.
+
+Vale registrar a parte que mais custa tempo: a **documentação oficial do próprio
+pacote** ainda diz, na tabela de métodos de autenticação, que assinante AI Pro
+deve usar "Sign in with Google". Ela está desatualizada. Foi a mensagem de erro do
+servidor, e não a documentação, que disse a verdade — o mesmo padrão do `Hw` do
+`audio-padrao.ps1` e do `AdapterRAM` do WMI: **campo documentado não é campo
+confiável**.
+
+O substituto é o **Antigravity CLI** (`agy`), binário em Go. Ele resolve de graça
+o problema que o Gemini CLI trouxe: o pacote npm instala um `.js` com shebang
+`#!/usr/bin/env node`, e o PATH da sessão gráfica do xrdp **não tem** o node do
+nvm — mas tem um `/usr/bin/node` **v18.19.1**, e o pacote exige `>=20`. Com o v18
+ele morre em `SyntaxError: Invalid regular expression flags`, erro que não fala
+nada de versão. Achar "um node" não basta; tem de checar a versão. O `agy` não
+tem node no caminho, então nada disso se aplica.
+
+Números medidos no dia, para comparar:
+
+| | PSS |
+|---|---|
+| `claude --continue` nesta sessão | 372 MB |
+| `claude daemon run` | 133 MB |
+| **Claude, total** | **505 MB** |
+| `agy` na tela de login | 222 MB |
+
+O 222 MB é o programa **parado na tela de login**, sem conversa nem contexto
+carregado — o número de trabalho é maior. Não meça isto como se fosse o custo em
+uso.
+
+### A aba de agente deixou de ser fixa
+
+A aba 0 era a do Claude, existia desde o início e não fechava. Com dois agentes
+isso ficou insustentável: seriam duas abas reservadas na faixa para processos que
+podem nunca subir. E contradizia a invariante que já estava escrita — a bancada
+não levanta agente sozinha justamente para não custar 490 MB a quem abriu para
+olhar um arquivo.
+
+Agora **nenhuma aba é fixa**. A de agente nasce no clique do botão, fecha no `×`,
+e a bancada abre com **zero** abas. Fechar não custa a conversa: o `--continue` do
+próximo clique traz de volta a mesma conversa daquele projeto. O que se perde é
+uma tarefa a meio caminho — e isso está na tela antes do clique.
+
+O terminal deixou de ser singular: havia um `w_term` e um `pid_term` globais, e o
+estado desceu para dentro de um `agentes[]` indexado por tipo de agente. Cada um
+tem janela própria, criada no `main()` e nunca destruída — janela desmapeada não
+custa pixmap, e reparentar um xterm nascido com `-into` dá `BadMatch` por um fio.
+
+Duas coisas quebraram calado nessa mudança, e as duas foram achadas antes de
+instalar:
+
+- **`Ctrl+Tab` fazia `(atual + 1) % n_abas`.** Com zero abas isso é divisão por
+  zero e o processo morre com `SIGFPE`. Era impossível enquanto a aba 0 existia
+  sempre. O teste confirmou o risco **com controle**: um filho fazendo a conta sem
+  a guarda morreu de verdade com `SIGFPE`, o que é o que faz o teste da versão com
+  guarda significar algo.
+- **O `atual` gravado na sessão era o índice cru.** Aba de agente não entra na
+  sessão, então o índice gravado e a posição entre as abas escritas divergem.
+  Enquanto a aba 0 era sempre a do Claude os dois calhavam de bater, porque a
+  restauração também punha uma aba antes das de arquivo. Com o Gemini na frente
+  dos arquivos, restaurar abriria **o arquivo vizinho**, sem erro nenhum.
+
+O teste foi escrito pelo método que já está registrado aqui — `#define main
+bancada_main` e `#include "bancada.c"`, para alcançar os `static`, com janelas
+criadas de verdade e **nenhuma mapeada**. Os agentes foram substituídos por um
+dublê que ignora os argumentos e dorme, e o `projeto` apontado para uma pasta do
+scratchpad, para o `salvar_sessao()` não encostar na sessão real. 44 asserções,
+todas passando.
+
+### O `AGENTS.md` não pode ser symlink
+
+Para o `agy` não entrar cego no projeto, ele precisa de um `AGENTS.md` — é o nome
+que ele procura, junto com `GEMINI.md`. A primeira tentativa foi um **symlink**
+para o `CLAUDE.md`: zero duplicação, sempre em sincronia.
+
+**Não funciona.** O log em `~/.gemini/antigravity-cli/log/` trouxe
+`Failed to parse rule file .../CLAUDE.md: failed to parse frontmatter yaml`, e uma
+pergunta direta ao `agy` confirmou: ele respondeu sabendo do ambiente (isso vem do
+`~/.gemini/GEMINI.md` global, que **funciona**) e **não** sabendo nada do mapa do
+projeto. O erro não aparece na tela e nem sempre aparece no log — o modo de falhar
+é a conversa subir sem o mapa, calada.
+
+A saída foi um `AGENTS.md` de arquivo de verdade, curto, que **manda ler** o
+`CLAUDE.md` em vez de copiá-lo. Cópia daria duas fontes da verdade e a segunda
+envelhece; o ponteiro custa um `Read` no começo da conversa.
+
+De passagem apareceu outra coisa: o **`trabalho` não estava no `install.sh`**. A
+cópia em `/usr/local/bin` era quatro dias mais velha que a do repositório. Era
+inofensivo enquanto ninguém dependia dela; deixou de ser quando a bancada passou a
+perguntar a ele onde cada agente mora — uma cópia velha faz o botão `[Gemini]`
+abrir um xterm que não acha binário nenhum, e o sintoma é uma aba que pisca e
+fecha.
+
 ## Trocar o VS Code por 31 MB (01/08/2026)
 
 O VS Code servia de **árvore de arquivos** — o resto do trabalho já era no

@@ -73,6 +73,12 @@ install -m 755 "$SRC/transferir-usb"     /usr/local/bin/transferir-usb
 install -m 755 "$SRC/audio-dispositivos" /usr/local/bin/audio-dispositivos
 install -m 755 "$SRC/camera-rede"        /usr/local/bin/camera-rede
 install -m 755 "$SRC/barra-apps"          /usr/local/bin/barra-apps
+# O `trabalho` faltava nesta lista: estava instalado em /usr/local/bin mas nada no
+# projeto o punha la (descoberto em 05/08/2026, com a copia instalada 4 dias mais
+# velha que a do repositorio). Deixou de ser detalhe quando a bancada passou a
+# perguntar a ELE onde cada agente mora - uma copia velha faz o botao Gemini abrir
+# um xterm que nao acha binario nenhum, e o sintoma e uma aba que pisca e fecha.
+install -m 755 "$SRC/trabalho"            /usr/local/bin/trabalho
 install -m 644 "$SRC/x11-unix-writable.service" /etc/systemd/system/
 
 # A ponte de video precisa do v4l2loopback, que NAO vem no kernel da WSL e nao

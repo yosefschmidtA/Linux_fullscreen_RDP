@@ -151,7 +151,7 @@
  * arquivo e o convert, e o que volta pelo pipe ja vem reduzido ao painel. */
 #define MAX_IMG  (64 * 1024 * 1024)
 #define HEX_COLS   16                /* bytes por linha do hex dump */
-#define MAX_ABAS   16                /* incluindo a do Claude */
+#define MAX_ABAS   16                /* abas de arquivo e de agente, juntas */
 #define UNDO_N     32                /* instantaneos guardados, POR ABA */
 /* Teto de memoria do desfazer, POR ABA. Era 8 MB quando havia um buffer so;
  * com 16 abas o mesmo numero viraria 128 MB de teto, o que briga com a premissa
@@ -162,10 +162,13 @@
 /* ---- estado do X --------------------------------------------------------- */
 static Display  *dpy;
 static int       tela;
-static Window    raiz, win, w_arv, w_ed, w_term;
+static Window    raiz, win, w_arv, w_ed;
 static GC        gc;
 static XftFont  *fonte;
-static XftDraw  *dr_barra, *dr_arv, *dr_ed, *dr_term;
+/* Sem dr_term: nada nosso desenha no painel de agente desde 02/08/2026, quando o
+ * convite ao clique saiu. Manter um XftDraw por agente seria criar dois objetos
+ * mortos. */
+static XftDraw  *dr_barra, *dr_arv, *dr_ed;
 static XftColor  c_ink, c_fraco, c_sel, c_aberto;
 static XIM       xim;
 static XIC       xic;
@@ -179,7 +182,7 @@ static Atom      A_COLA;                             /* onde a cola aterrissa */
  * desaparecer OU o painel do Claude piscar branco antes do xterm pintar. */
 static unsigned long FACE, FACE_ESC, HI, SH, INK, PAPEL, SEL_FUNDO;
 static unsigned long BORDA;        /* a linha externa do bisel */
-static unsigned long FUNDO_TERM;   /* o painel onde o xterm do Claude mora */
+static unsigned long FUNDO_TERM;   /* o painel onde o xterm de um agente mora */
 
 static int larg = 1100, alt = 700;   /* tamanho da janela */
 static int avanco, altura_lin, base_lin;   /* metrica da fonte monoespacada */
@@ -235,8 +238,39 @@ static int      busca_on;            /* a barrinha esta aberta e com o teclado *
 static int      achou;               /* a ultima procura deu em alguma coisa */
 static int      anc_l, anc_c;        /* de onde a procura incremental parte */
 
-/* ---- terminal embutido --------------------------------------------------- */
-static pid_t    pid_term;
+/* ---- os agentes de terminal ----------------------------------------------
+ * Sao DOIS, e por isso o terminal deixou de ser singular: havia um w_term e um
+ * pid_term globais, e dois agentes de pe ao mesmo tempo precisam de um xterm
+ * cada. O estado desceu para ca.
+ *
+ * O indice 0 vale "esta aba e de arquivo". Gastar um slot morto sai mais barato
+ * que um "-1" a subtrair em cada conta, e deixa `if (abas[i].agente)` ser a
+ * pergunta "e aba de agente?" em todo lugar.
+ *
+ * Cada agente tem a JANELA PROPRIA, criada no main() e nunca destruida. Duas
+ * janelas desmapeadas nao custam pixmap - o servidor so as respalda quando
+ * aparecem -, e assim continua valendo a regra de que editor e agente ocupam o
+ * MESMO retangulo com um so mapeado. A alternativa seria reparentar um xterm de
+ * uma janela para a outra na troca de aba, que e caro e da BadMatch por um fio.
+ *
+ * QUEM ACHA O BINARIO e o script `trabalho`, nunca um caminho escrito aqui: e o
+ * unico lugar do projeto que sabe onde cada CLI mora, e o PATH da sessao grafica
+ * nao ajuda (nao tem ~/.local/bin). */
+enum { AG_NENHUM = 0, AG_CLAUDE, AG_GEMINI, N_AG };
+
+typedef struct {
+    const char *rotulo;      /* na aba e no botao da barra */
+    const char *onde;        /* subcomando do `trabalho` que devolve o binario */
+    const char *plano_b;     /* se o `trabalho` falhar, tenta este nome no PATH */
+    Window      w;           /* o painel; o xterm nasce dentro dele com "-into" */
+    pid_t       pid;         /* do xterm, nao do agente: e o xterm que forkamos */
+} Agente;
+
+static Agente agentes[N_AG] = {
+    { NULL,     NULL,                  NULL,     0, 0 },
+    { "Claude", "trabalho onde",        "claude", 0, 0 },
+    { "Gemini", "trabalho onde-gemini", "agy",    0, 0 },
+};
 
 /* ---- sessao -------------------------------------------------------------- */
 static int      restaurando;         /* lendo a sessao gravada agora */
@@ -246,9 +280,9 @@ static void redimensionar(void);
 static void abrir_arquivo(const char *caminho);
 static void carregar_pasta(const char *p);
 static void seguir_cursor(void);
-static void esticar_terminal(void);
+static void esticar_agente(int ag);
 static void mostrar_painel(void);
-static int  claude_vivo(void);
+static int  agente_vivo(int ag);
 static void ativar(int i);
 static void fechar_aba(int i);
 static void contar_achados(int *total, int *qual);
@@ -482,8 +516,18 @@ static void talvez_guardar(int tipo)
 /* =========================================================================
  * Abas
  *
- * A aba 0 e sempre a do Claude: nao tem buffer, nao fecha, e o painel dela e o
- * xterm. As demais sao arquivos.
+ * Ha dois tipos de aba: de ARQUIVO e de AGENTE. A de agente nao tem buffer e o
+ * painel dela e um xterm; a de arquivo e o editor.
+ *
+ * NENHUMA ABA E FIXA, e desde 05/08/2026 isso vale tambem para as de agente:
+ * elas nascem no clique do botao e fecham no x como qualquer outra. Antes a aba 0
+ * era a do Claude e existia desde o inicio, reservando lugar na faixa para algo
+ * que podia nunca subir. Fechar nao custa conversa: o `--continue` do proximo
+ * clique traz de volta a mesma conversa daquele projeto. O que ele NAO traz e um
+ * comando a meio caminho — fechar no meio de uma tarefa perde a tarefa.
+ *
+ * Consequencia que atinge o resto do arquivo: `n_abas` pode ser ZERO. Todo lugar
+ * que dividia ou indexava por n_abas precisa da guarda (o Ctrl+Tab dividia).
  *
  * O TRUQUE, e o motivo de isto caber em poucas linhas: a aba nao e um contexto
  * que as funcoes de edicao recebem, e um LUGAR ONDE OS GLOBAIS DORMEM. Trocar
@@ -494,11 +538,11 @@ static void talvez_guardar(int tipo)
  *
  * "carregada" e a aba cujo buffer esta nos globais neste momento, ou -1 quando
  * nenhuma esta (no inicio, e quando a ultima aba de arquivo fecha). Ela NAO e
- * a mesma coisa que "atual": com a aba do Claude a frente, o buffer da ultima
+ * a mesma coisa que "atual": com uma aba de agente a frente, o buffer da ultima
  * aba de arquivo continua carregado, so nao aparece.
  * ========================================================================= */
 typedef struct {
-    int      claude;                  /* a aba do terminal */
+    int      agente;                  /* AG_NENHUM = aba de arquivo */
     char     arquivo[PATH_MAX];
     char   **linhas;
     int      n_linhas, cap_linhas;
@@ -591,7 +635,14 @@ static int aba_do_arquivo(const char *caminho)
 {
     int i;
     for (i = 0; i < n_abas; i++)
-        if (!abas[i].claude && !strcmp(abas[i].arquivo, caminho)) return i;
+        if (!abas[i].agente && !strcmp(abas[i].arquivo, caminho)) return i;
+    return -1;
+}
+
+static int aba_do_agente(int ag)
+{
+    int i;
+    for (i = 0; i < n_abas; i++) if (abas[i].agente == ag) return i;
     return -1;
 }
 
@@ -599,7 +650,7 @@ static int aba_do_arquivo(const char *caminho)
 static const char *rotulo_aba(int i)
 {
     static char r[300];
-    if (abas[i].claude) snprintf(r, sizeof r, "Claude");
+    if (abas[i].agente) snprintf(r, sizeof r, "%s", agentes[abas[i].agente].rotulo);
     else snprintf(r, sizeof r, "%s%s", nome_base(abas[i].arquivo),
                   abas[i].sujo ? " *" : "");
     return r;
@@ -836,8 +887,11 @@ static void abrir_arquivo(const char *caminho)
  * fechar com alteracao pendente continua perguntando, que e a garantia simples
  * e que ja funciona.
  *
- * A conversa do Claude nao entra: a aba dele sobe limpa. Quem quiser a anterior
- * usa `claude --continue` dentro da propria aba.
+ * ABA DE AGENTE NAO ENTRA NA SESSAO, e nao e esquecimento: restaurar uma faria a
+ * bancada levantar um agente sozinha ao abrir, que e exatamente o custo de 490 MB
+ * que a regra do "nao levanta por conta propria" existe para evitar. Quem abriu
+ * para olhar um arquivo pagaria por dois. As duas portas continuam sendo o botao
+ * e o clique no painel.
  * ========================================================================= */
 static void caminho_sessao(char *fora, size_t n)
 {
@@ -865,7 +919,7 @@ static void salvar_sessao(void)
     const char *casa = getenv("HOME");
     size_t np;
     FILE *f;
-    int i;
+    int i, escritas, quer;
 
     if (restaurando || !casa) return;
     caminho_sessao(caminho, sizeof caminho);
@@ -880,10 +934,25 @@ static void salvar_sessao(void)
     if (!f) return;
 
     np = strlen(projeto);
-    fprintf(f, "# bancada: sessao de %s\n", projeto);
-    fprintf(f, "atual %d\n", atual);
+
+    /* O "atual" gravado e a posicao ENTRE AS ABAS ESCRITAS, nao o indice cru.
+     * Enquanto a aba 0 era sempre a do Claude os dois numeros calhavam de bater,
+     * porque a restauracao tambem punha uma aba antes das de arquivo. Sem aba
+     * fixa isso deixou de valer: com o Gemini aberto na frente dos arquivos, o
+     * indice cru apontaria uma aba adiante da certa, e o erro seria silencioso —
+     * abriria o arquivo vizinho. */
+    escritas = 0; quer = 0;
     for (i = 0; i < n_abas; i++) {
-        if (abas[i].claude) continue;
+        if (abas[i].agente) continue;
+        if (strncmp(abas[i].arquivo, projeto, np) != 0) continue;
+        if (i == atual) quer = escritas;
+        escritas++;
+    }
+
+    fprintf(f, "# bancada: sessao de %s\n", projeto);
+    fprintf(f, "atual %d\n", quer);
+    for (i = 0; i < n_abas; i++) {
+        if (abas[i].agente) continue;
         /* So o que esta DENTRO do projeto. Sem isto, trocar de projeto pelo
          * botao levaria os arquivos do projeto velho para a sessao do novo, e
          * a proxima abertura viria com arquivos que nao sao dali. */
@@ -1120,9 +1189,23 @@ static void texto(XftDraw *dr, int x, int y, const char *s, XftColor *cor)
 }
 
 /* --- botoes da barra de ferramentas --------------------------------------- */
-typedef struct { const char *rotulo; int x, w; } Botao;
-static Botao botoes[] = { { "Projeto", 0, 74 }, { "Salvar", 0, 66 }, { "Claude", 0, 66 } };
+/* Botao com "agente" preenchido e um botao de agente, e o rotulo dele sai do
+ * agentes[] - o nome aparece tambem na aba, e um nome escrito duas vezes e um
+ * nome que sai de sincronia calado. */
+typedef struct { const char *rotulo; int x, w; int agente; } Botao;
+enum { B_PROJETO = 0, B_SALVAR = 1 };
+static Botao botoes[] = {
+    { "Projeto", 0, 74, AG_NENHUM },
+    { "Salvar",  0, 66, AG_NENHUM },
+    { NULL,      0, 66, AG_CLAUDE },
+    { NULL,      0, 66, AG_GEMINI },
+};
 #define N_BOTOES ((int) (sizeof botoes / sizeof botoes[0]))
+
+static const char *rotulo_botao(int i)
+{
+    return botoes[i].rotulo ? botoes[i].rotulo : agentes[botoes[i].agente].rotulo;
+}
 
 static void desenhar_barra(void)
 {
@@ -1135,7 +1218,7 @@ static void desenhar_barra(void)
     for (i = 0; i < N_BOTOES; i++) {
         botoes[i].x = x;
         bisel(win, x, PAD, botoes[i].w, BARRA_H - 2 * PAD, (int) FACE, 0);
-        texto(dr_barra, x + 10, PAD + base_lin + 3, botoes[i].rotulo, &c_ink);
+        texto(dr_barra, x + 10, PAD + base_lin + 3, rotulo_botao(i), &c_ink);
         x += botoes[i].w + GAP;
     }
 
@@ -1207,8 +1290,7 @@ static void desenhar_abas(void)
 
     for (i = 0; i < n_abas; i++) {
         const char *r = rotulo_aba(i);
-        int w = MARGEM + colunas_ate(r, (int) strlen(r)) * avanco + MARGEM;
-        if (!abas[i].claude) w += FECHAR_W;
+        int w = MARGEM + colunas_ate(r, (int) strlen(r)) * avanco + MARGEM + FECHAR_W;
         if (w > ABA_W_MAX) w = ABA_W_MAX;
         larguras[i] = w;
         soma += w + PAD;
@@ -1222,7 +1304,7 @@ static void desenhar_abas(void)
     for (i = 0; i < n_abas; i++) {
         const char *r = rotulo_aba(i);
         int w = larguras[i], ativa = (i == atual);
-        int reservado = MARGEM + (abas[i].claude ? MARGEM : FECHAR_W);
+        int reservado = MARGEM + FECHAR_W;
         int cabe = (w - reservado) / avanco;
         char corte[300];
 
@@ -1236,8 +1318,8 @@ static void desenhar_abas(void)
         snprintf(corte, sizeof corte, "%.*s", byte_da_coluna(r, cabe), r);
         texto(dr_barra, x + MARGEM, linha_base, corte, ativa ? &c_ink : &c_fraco);
 
-        if (!abas[i].claude)
-            desenhar_x(x + w - FECHAR_W + 2, BARRA_H + ABAS_H / 2 - 3);
+        /* TODA aba tem x, agora que as de agente tambem fecham. */
+        desenhar_x(x + w - FECHAR_W + 2, BARRA_H + ABAS_H / 2 - 3);
 
         x += w + PAD;
     }
@@ -2067,8 +2149,8 @@ static void desenhar_imagem(void)
           h - MARGEM - altura_lin + base_lin, legenda, &c_fraco);
 }
 
-/* O painel da aba do Claude, enquanto ele nao subiu, e um retangulo preto e
- * mudo — e isso e o pedido, nao um esquecimento.
+/* O painel de uma aba de agente, enquanto o processo nao subiu, e um retangulo
+ * preto e mudo — e isso e o pedido, nao um esquecimento.
  *
  * Ate 02/08/2026 ele trazia um convite em duas linhas ("O Claude nao sobe
  * sozinho." / "Clique aqui, ou no botao Claude da barra, para abrir."), pela
@@ -2087,10 +2169,11 @@ static void desenhar(void)
     desenhar_barra();
     desenhar_abas();
     desenhar_arvore();
-    /* Na aba do Claude quem desenha o painel e o xterm, e o w_ed nem esta
-     * mapeado. Sem esta guarda, a aba do Claude sem arquivo nenhum carregado
-     * cairia num linhas[cur_l] com linhas == NULL. */
-    if (!abas[atual].claude && carregada >= 0) {
+    /* Na aba de agente quem desenha o painel e o xterm, e o w_ed nem esta
+     * mapeado. Sem esta guarda, uma aba de agente sem arquivo nenhum carregado
+     * cairia num linhas[cur_l] com linhas == NULL. O n_abas == 0 entra na mesma
+     * guarda: sem aba nenhuma, abas[atual] e a struct zerada. */
+    if (n_abas > 0 && !abas[atual].agente && carregada >= 0) {
         if (modo == MODO_HEX)      desenhar_hex();
         else if (modo == MODO_IMG) desenhar_imagem();
         else                       desenhar_editor();
@@ -2278,32 +2361,37 @@ static void receber_cola(const unsigned char *bruto_t, size_t n)
 }
 
 /* =========================================================================
- * O Claude, embutido
+ * Os agentes, embutidos
  *
- * O binario vem do `trabalho onde`, que ja sabe procura-lo (nesta maquina ele
- * mora dentro da extensao do VS Code, num caminho com a versao). Assim ha um
- * lugar so no projeto que sabe disso.
+ * O binario vem sempre do script `trabalho` (`onde` / `onde-gemini`), que e o
+ * unico lugar do projeto que sabe onde cada CLI mora. Escrever caminho aqui
+ * quebraria de dois jeitos: o do Claude carrega a versao quando ele vem pela
+ * extensao do VS Code, e o do agy esta em ~/.local/bin, que NAO esta no PATH da
+ * sessao grafica.
  * ========================================================================= */
-static void caminho_claude(char *fora, size_t n)
+static void caminho_agente(int ag, char *fora, size_t n)
 {
-    FILE *f = popen("trabalho onde 2>/dev/null", "r");
+    char cmd[128];
     char linha[PATH_MAX] = "";
+    FILE *f;
 
+    snprintf(cmd, sizeof cmd, "%s 2>/dev/null", agentes[ag].onde);
+    f = popen(cmd, "r");
     if (f) { if (fgets(linha, sizeof linha, f)) { char *nl = strchr(linha, '\n'); if (nl) *nl = '\0'; } pclose(f); }
-    snprintf(fora, n, "%s", linha[0] ? linha : "claude");
+    snprintf(fora, n, "%s", linha[0] ? linha : agentes[ag].plano_b);
 }
 
-static void abrir_claude(void)
+static void abrir_agente(int ag)
 {
-    /* *3 e nao *2: o comando cita `projeto` uma vez e `cla` DUAS (a tentativa
+    /* *3 e nao *2: o comando cita `projeto` uma vez e o binario DUAS (a tentativa
      * de retomar e o plano B). Com *2 o gcc avisa de truncamento, e truncar
      * aqui nao corta um texto: corta o comando do shell no meio. */
     char id[32], cmd[PATH_MAX * 3 + 64], cla[PATH_MAX];
 
-    if (pid_term > 0) { kill(pid_term, SIGTERM); pid_term = 0; }
+    if (agentes[ag].pid > 0) { kill(agentes[ag].pid, SIGTERM); agentes[ag].pid = 0; }
 
-    caminho_claude(cla, sizeof cla);
-    snprintf(id, sizeof id, "%lu", (unsigned long) w_term);
+    caminho_agente(ag, cla, sizeof cla);
+    snprintf(id, sizeof id, "%lu", (unsigned long) agentes[ag].w);
 
     /* `--continue` com plano B, e nao `claude` puro: a aba sobe RETOMANDO a
      * ultima conversa DESTE projeto - o `--continue` e por diretorio, como as
@@ -2311,24 +2399,30 @@ static void abrir_claude(void)
      * comando num prompt que nao existe: o `exec` daqui substitui o shell, e a
      * aba morre junto com o Claude. Era o que fazia toda abertura vir vazia.
      *
-     * O `||` funciona porque, sem nada para retomar, o `--continue` sai com
-     * codigo 1 (medido em 03/08/2026, em pasta sem historico, com e sem as
+     * O `||` funciona porque, sem nada para retomar, o `claude --continue` sai
+     * com codigo 1 (medido em 03/08/2026, em pasta sem historico, com e sem as
      * variaveis CLAUDE* herdadas). Entao a primeira vez num projeto novo cai
      * sozinha na conversa nova, sem caso especial e sem adivinhar o nome que o
      * Claude da a pasta dele em ~/.claude/projects/ (que troca '/' por '-' e
      * que nao queremos reimplementar aqui).
      *
+     * O `agy --continue` NAO sai (medido em 05/08/2026, pasta sem historico, com
+     * pty): a TUI sobe de qualquer jeito. O plano B fica na linha assim mesmo,
+     * porque um `||` que nunca dispara nao custa nada e um caminho so para os dois
+     * agentes e menos codigo para errar. Se um dia ele passar a sair com erro de
+     * verdade, o plano B ja esta aqui.
+     *
      * O `cd` leva `|| exit 1` proprio: sem ele, a precedencia do shell e
-     * `(cd && claude --continue) || exec claude`, e um `projeto` inexistente
-     * abriria o Claude na pasta errada em vez de falhar.
+     * `(cd && bin --continue) || exec bin`, e um `projeto` inexistente abriria o
+     * agente na pasta errada em vez de falhar.
      *
      * Comecar limpo continua barato - e o /clear la dentro, que o usuario ja
      * usa. O contrario e que nao tinha caminho nenhum. */
     snprintf(cmd, sizeof cmd, "cd '%s' || exit 1; '%s' --continue || exec '%s'",
              projeto, cla, cla);
 
-    pid_term = fork();
-    if (pid_term == 0) {
+    agentes[ag].pid = fork();
+    if (agentes[ag].pid == 0) {
         setsid();
         /* As tres linhas de highlight* existem porque o realce PADRAO do xterm
          * e video reverso, e video reverso e um atributo que qualquer
@@ -2379,33 +2473,46 @@ static void abrir_claude(void)
 }
 
 /* Como o SIGCHLD e SIG_IGN, o filho morto some sozinho: nao ha wait() para
- * colher status, e o kill(pid,0) e o teste que sobra. Serve tanto para o
- * Claude que nunca subiu (pid_term == 0) quanto para o que saiu. */
-static int claude_vivo(void)
+ * colher status, e o kill(pid,0) e o teste que sobra. Serve tanto para o agente
+ * que nunca subiu (pid == 0) quanto para o que saiu. */
+static int agente_vivo(int ag)
 {
-    return pid_term > 0 && kill(pid_term, 0) == 0;
+    return ag && agentes[ag].pid > 0 && kill(agentes[ag].pid, 0) == 0;
 }
 
-/* O botao "Claude" da barra traz a aba para a frente e, se o processo nao
- * estiver de pe, e ELE quem o levanta - na primeira vez como em qualquer
- * outra. E o unico caminho junto com o clique no painel vazio: nada de subir
- * Claude por conta propria. */
-static void ir_para_claude(void)
+/* O botao da barra e a UNICA porta junto com o clique no painel vazio: nada de
+ * subir agente por conta propria.
+ *
+ * Ele faz tres coisas em ordem, e as tres sao necessarias porque nada aqui e
+ * garantido: cria a aba se ela nao existe (nenhuma aba e fixa), levanta o
+ * processo se ele nao esta de pe, e traz a aba para a frente. Clicar no botao com
+ * tudo ja de pe e so trazer para a frente. */
+static void ir_para_agente(int ag)
 {
-    if (!claude_vivo()) abrir_claude();
-    ativar(0);
+    int i = aba_do_agente(ag);
+
+    if (i < 0) {
+        if (n_abas >= MAX_ABAS) { avisar("Abas demais abertas; feche alguma."); return; }
+        i = n_abas;
+        memset(&abas[i], 0, sizeof abas[0]);
+        abas[i].agente = ag;
+        n_abas++;
+    }
+    if (!agente_vivo(ag)) abrir_agente(ag);
+    ativar(i);
 }
 
 /* Depois de um resize, o xterm nao se estica sozinho: com "-into" ele e apenas
  * filho da nossa janela e mantem a geometria com que nasceu. Quem o acerta e
  * este laco, que redimensiona os filhos do painel. */
-static void esticar_terminal(void)
+static void esticar_agente(int ag)
 {
     Window r, pai, *filhos = NULL;
     unsigned n = 0, i;
     int w = cont_w(), h = cont_h();
 
-    if (XQueryTree(dpy, w_term, &r, &pai, &filhos, &n) && filhos) {
+    if (!ag) return;
+    if (XQueryTree(dpy, agentes[ag].w, &r, &pai, &filhos, &n) && filhos) {
         for (i = 0; i < n; i++)
             XMoveResizeWindow(dpy, filhos[i], 0, 0, (unsigned) w, (unsigned) h);
         XFree(filhos);
@@ -2415,46 +2522,63 @@ static void esticar_terminal(void)
 /* =========================================================================
  * Geometria
  * ========================================================================= */
-/* O editor e o xterm ocupam o MESMO retangulo; so um fica mapeado. */
+/* O editor e os paineis de agente ocupam o MESMO retangulo; so um fica mapeado.
+ * Os escondidos sao movidos junto: com "-into" o xterm nao descobre um resize por
+ * conta propria, e uma aba que voltasse a frente depois de o usuario esticar a
+ * janela apareceria com o tamanho antigo. */
 static void redimensionar(void)
 {
     unsigned w = (unsigned) cont_w(), h = (unsigned) cont_h();
+    int ag;
 
     XMoveResizeWindow(dpy, w_arv, 0, BARRA_H, ARVORE_W, (unsigned) (alt - BARRA_H));
     XMoveResizeWindow(dpy, w_ed,   CONT_X, CONT_Y, w, h);
-    XMoveResizeWindow(dpy, w_term, CONT_X, CONT_Y, w, h);
-    esticar_terminal();
+    for (ag = AG_CLAUDE; ag < N_AG; ag++) {
+        XMoveResizeWindow(dpy, agentes[ag].w, CONT_X, CONT_Y, w, h);
+        esticar_agente(ag);
+    }
     seguir_cursor();
 }
 
 /* =========================================================================
  * Troca de aba
  * ========================================================================= */
-static void focar_terminal(void)
+static void focar_agente(int ag)
 {
     Window r, pai, *f = NULL;
     unsigned n = 0;
 
-    if (XQueryTree(dpy, w_term, &r, &pai, &f, &n) && f && n)
+    if (!ag) return;
+    if (XQueryTree(dpy, agentes[ag].w, &r, &pai, &f, &n) && f && n)
         XSetInputFocus(dpy, f[0], RevertToParent, CurrentTime);
     if (f) XFree(f);
 }
 
+/* Com n_abas == 0 o painel fica com o editor vazio - e o mesmo estado de quem
+ * abriu a bancada e ainda nao clicou em nada. */
 static void mostrar_painel(void)
 {
-    if (abas[atual].claude) {
+    int ag = (n_abas > 0) ? abas[atual].agente : AG_NENHUM;
+    int k;
+
+    /* Desmapear os OUTROS antes de mapear o escolhido: os tres paineis ocupam o
+     * mesmo retangulo, e deixar dois mapeados poe o de cima na tela por acidente
+     * de empilhamento - o que apareceria seria o ultimo a subir, nao o da aba. */
+    for (k = AG_CLAUDE; k < N_AG; k++)
+        if (k != ag) XUnmapWindow(dpy, agentes[k].w);
+
+    if (ag) {
         XUnmapWindow(dpy, w_ed);
-        XMapWindow(dpy, w_term);
+        XMapWindow(dpy, agentes[ag].w);
         /* Enquanto esteve escondido o xterm nao soube dos resizes: com "-into"
          * ele so obedece a quem o redimensiona de fora, e isso somos nos. */
-        esticar_terminal();
+        esticar_agente(ag);
         /* Sem processo nao ha xterm para receber foco, e deixa-lo onde estava
          * daria uma aba que come as teclas sem ninguem para trata-las. O foco
          * volta para a mae, que e quem tem o XIC e o teclado. */
-        if (claude_vivo()) focar_terminal();
-        else               XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
+        if (agente_vivo(ag)) focar_agente(ag);
+        else                 XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
     } else {
-        XUnmapWindow(dpy, w_term);
         XMapWindow(dpy, w_ed);
         XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
     }
@@ -2462,6 +2586,17 @@ static void mostrar_painel(void)
 
 static void ativar(int i)
 {
+    /* Sem aba nenhuma nao ha o que ativar, mas o painel ainda precisa ser
+     * acertado: quem chegou aqui vindo do fechar_aba() acabou de tirar a ultima
+     * aba da tela, e sem isto o xterm dela continuaria mapeado e visivel. */
+    if (n_abas == 0) {
+        atual = 0;
+        sel_limpar();
+        busca_on = 0;
+        mostrar_painel();
+        salvar_sessao();
+        return;
+    }
     if (i < 0 || i >= n_abas) return;
 
     sincronizar();
@@ -2472,7 +2607,7 @@ static void ativar(int i)
      * fazendo sentido no arquivo novo, e o F3 o reaproveita la. */
     sel_limpar();
     busca_on = 0;
-    if (!abas[i].claude) { aba_para_globais(&abas[i]); carregada = i; }
+    if (!abas[i].agente) { aba_para_globais(&abas[i]); carregada = i; }
     atual = i;
     mostrar_painel();
 
@@ -2495,7 +2630,29 @@ static void fechar_aba(int i)
 {
     int k;
 
-    if (i < 0 || i >= n_abas || abas[i].claude) return;   /* a do Claude nao fecha */
+    if (i < 0 || i >= n_abas) return;
+
+    /* Aba de agente fecha derrubando o xterm, e com ele o agente. Nao ha pergunta
+     * de confirmacao: o `--continue` do proximo clique devolve a conversa, e
+     * perguntar em toda vez sobre algo recuperavel virava clique a mais. O que se
+     * perde e uma tarefa a meio caminho, e isso o usuario ve na tela antes de
+     * clicar no x.
+     *
+     * Sai por aqui ANTES do bloco de liberar buffer: aba de agente nao tem
+     * linhas, undo nem Pixmap. Os campos estao zerados e os free(NULL) passariam
+     * batido, mas depender disso e depender de um memset feito longe daqui. */
+    if (abas[i].agente) {
+        int ag = abas[i].agente;
+        if (agentes[ag].pid > 0) { kill(agentes[ag].pid, SIGTERM); agentes[ag].pid = 0; }
+        XUnmapWindow(dpy, agentes[ag].w);
+        memmove(&abas[i], &abas[i + 1], (size_t) (n_abas - i - 1) * sizeof *abas);
+        n_abas--;
+        if (carregada > i) carregada--;
+        if (atual > i || atual >= n_abas) atual--;
+        if (atual < 0) atual = 0;
+        ativar(atual);
+        return;
+    }
 
     sincronizar();
     if (abas[i].sujo) {
@@ -2564,7 +2721,7 @@ static void clique_abas(int x)
 
     for (i = 0; i < n_abas; i++)
         if (x >= abas[i].x && x < abas[i].x + abas[i].w) {
-            if (!abas[i].claude && x >= abas[i].x + abas[i].w - FECHAR_W) fechar_aba(i);
+            if (x >= abas[i].x + abas[i].w - FECHAR_W) fechar_aba(i);
             else ativar(i);
             return;
         }
@@ -2574,6 +2731,7 @@ static void escolher_projeto(void)
 {
     FILE *f;
     char linha[PATH_MAX] = "", cmd[PATH_MAX + 160];
+    int ag;
 
     snprintf(cmd, sizeof cmd,
              "zenity --file-selection --directory --title='Projeto' "
@@ -2587,10 +2745,11 @@ static void escolher_projeto(void)
     salvar_sessao();                      /* fecha a sessao do projeto que sai */
     snprintf(projeto, sizeof projeto, "%s", linha);
     carregar_pasta(projeto);
-    /* O Claude segue o projeto - mas so o que JA estava de pe. Trocar de
-     * projeto nao e pedir Claude: se ele nao subiu, continua nao subindo, e a
+    /* Os agentes seguem o projeto - mas so os que JA estavam de pe. Trocar de
+     * projeto nao e pedir agente: o que nao subiu continua nao subindo, e a
      * primeira abertura ja vai nascer na pasta nova, que e a de agora. */
-    if (claude_vivo()) abrir_claude();
+    for (ag = AG_CLAUDE; ag < N_AG; ag++)
+        if (agente_vivo(ag)) abrir_agente(ag);
     salvar_sessao();                      /* e abre a do que entra */
 }
 
@@ -2630,9 +2789,11 @@ static void tecla(XKeyEvent *ev)
     if (IsModifierKey(ks) || (ks >= XK_ISO_Lock && ks <= XK_ISO_Level5_Lock))
         return;
 
-    /* As teclas de ABA valem em qualquer aba, inclusive na do Claude - por isso
-     * vem antes da guarda logo abaixo. */
-    if (ctrl) {
+    /* As teclas de ABA valem em qualquer aba, inclusive nas de agente - por isso
+     * vem antes da guarda logo abaixo. O "n_abas > 0" nao e zelo: sem aba nenhuma
+     * o "% n_abas" e divisao por zero, e o processo morre com SIGFPE. Deixou de
+     * ser impossivel quando a aba de agente virou fechavel. */
+    if (ctrl && n_abas > 0) {
         switch (ks) {
         case XK_Tab:          ativar((atual + 1) % n_abas); desenhar(); return;
         case XK_ISO_Left_Tab: ativar((atual - 1 + n_abas) % n_abas); desenhar(); return;
@@ -2640,10 +2801,11 @@ static void tecla(XKeyEvent *ev)
         }
     }
 
-    /* Na aba do Claude o teclado e do xterm. As unicas teclas que chegam aqui
+    /* Na aba de agente o teclado e do xterm. As unicas teclas que chegam aqui
      * sao as capturadas por XGrabKey, ja tratadas acima; qualquer outra coisa
-     * seria editar as escondidas um arquivo que nem esta na tela. */
-    if (abas[atual].claude) return;
+     * seria editar as escondidas um arquivo que nem esta na tela. Sem aba nenhuma
+     * tambem nao ha o que editar. */
+    if (n_abas == 0 || abas[atual].agente) return;
 
     /* Com a barrinha aberta o teclado e dela - menos o Ctrl+alguma coisa, que
      * continua valendo: o achado esta marcado, e Ctrl+C sobre ele e justamente o
@@ -2689,8 +2851,10 @@ static void tecla(XKeyEvent *ev)
             return;
         case XK_q: case XK_Q:
             if (!algum_sujo() || perguntar("Ha alteracoes nao salvas. Sair mesmo assim?")) {
+                int ag;
                 salvar_sessao();
-                if (pid_term > 0) kill(pid_term, SIGTERM);
+                for (ag = AG_CLAUDE; ag < N_AG; ag++)
+                    if (agentes[ag].pid > 0) kill(agentes[ag].pid, SIGTERM);
                 exit(0);
             }
             return;
@@ -2881,6 +3045,7 @@ int main(int argc, char **argv)
     XGlyphInfo gi;
     XRenderColor rc;
     char inicial[PATH_MAX];
+    int ag;
 
     setlocale(LC_ALL, "");
     if (!XSupportsLocale()) fprintf(stderr, "bancada: locale sem suporte no X\n");
@@ -2966,12 +3131,18 @@ int main(int argc, char **argv)
      * mais nada nosso para desenhar aqui, e o preto do painel vazio vem do
      * background_pixel abaixo - o servidor X repinta a area exposta sozinho.
      * ButtonPressMask fica: o clique no painel vazio e uma das duas portas de
-     * entrada do Claude. */
+     * entrada de um agente. */
     at.event_mask = ButtonPressMask | SubstructureNotifyMask;
-    w_term = XCreateWindow(dpy, win, CONT_X, CONT_Y,
-                           (unsigned) (larg - ARVORE_W), (unsigned) (alt - BARRA_H - ABAS_H), 0,
-                           CopyFromParent, InputOutput, CopyFromParent,
-                           CWBackPixel | CWEventMask, &at);
+    /* Uma janela por agente, criadas AQUI e nunca destruidas, mesmo que o agente
+     * nunca suba. Desmapeada ela nao custa pixmap - o servidor so respalda o que
+     * aparece - e nascer junto poupa o caminho de criar janela no meio do clique,
+     * onde o "-into" do xterm precisaria de um id que ainda nao existe. */
+    for (ag = AG_CLAUDE; ag < N_AG; ag++)
+        agentes[ag].w = XCreateWindow(dpy, win, CONT_X, CONT_Y,
+                                      (unsigned) (larg - ARVORE_W),
+                                      (unsigned) (alt - BARRA_H - ABAS_H), 0,
+                                      CopyFromParent, InputOutput, CopyFromParent,
+                                      CWBackPixel | CWEventMask, &at);
     gc = XCreateGC(dpy, win, 0, NULL);
 
     fonte = XftFontOpenName(dpy, tela, "DejaVu Sans Mono:size=10");
@@ -2986,7 +3157,6 @@ int main(int argc, char **argv)
     dr_barra = XftDrawCreate(dpy, win,   DefaultVisual(dpy, tela), cm);
     dr_arv   = XftDrawCreate(dpy, w_arv, DefaultVisual(dpy, tela), cm);
     dr_ed    = XftDrawCreate(dpy, w_ed,  DefaultVisual(dpy, tela), cm);
-    dr_term  = XftDrawCreate(dpy, w_term, DefaultVisual(dpy, tela), cm);
 
 #define XCOR(dst, r, g, b) do { rc.red=(r); rc.green=(g); rc.blue=(b); rc.alpha=0xffff; \
         XftColorAllocValue(dpy, DefaultVisual(dpy, tela), cm, &rc, (dst)); } while (0)
@@ -3003,11 +3173,11 @@ int main(int argc, char **argv)
     if (!xic)
         fprintf(stderr, "bancada: sem XIM; acento morto do ABNT2 nao vai compor\n");
 
-    /* A aba 0 e a do Claude, e ela existe desde o inicio. Sem nenhum arquivo
-     * aberto nao ha buffer nenhum: "carregada" fica em -1 e os globais do
-     * editor ficam zerados ate a primeira aba de arquivo nascer. */
-    abas[0].claude = 1;
-    n_abas = 1;
+    /* A BANCADA NASCE SEM ABA NENHUMA. Nem de arquivo, nem de agente: a de agente
+     * deixou de ser fixa em 05/08/2026, e reservar a aba 0 para algo que pode nao
+     * subir era ocupar a faixa com uma promessa. "carregada" fica em -1 e os
+     * globais do editor ficam zerados ate a primeira aba de arquivo nascer. */
+    n_abas = 0;
     atual = 0;
     carregada = -1;
     globais_zerar();
@@ -3021,10 +3191,11 @@ int main(int argc, char **argv)
     XMapWindow(dpy, win);
     XSync(dpy, False);
     pegar_teclas();
-    /* SEM abrir_claude() aqui, e isso NAO e esquecimento. A bancada nao levanta
-     * o Claude por conta propria: a aba dele sobe com o painel vazio, esperando
-     * o clique. Ela serve de arvore e de editor sem custar os 490 MB do Claude
-     * Code para quem abriu so para olhar um arquivo. */
+    /* SEM abrir_agente() aqui, e isso NAO e esquecimento. A bancada nao levanta
+     * agente por conta propria: sem aba de agente nenhuma ela serve de arvore e de
+     * editor sem custar os 490 MB do Claude Code - nem os 222 MB do agy - a quem
+     * abriu so para olhar um arquivo. Com dois agentes a conta de errar isto
+     * dobrou, e e o motivo de a regra continuar aqui. */
     mostrar_painel();
     /* Depois de mapear: restaurar abre abas, e abrir aba mapeia e move o foco. */
     restaurar_sessao();
@@ -3048,10 +3219,13 @@ int main(int argc, char **argv)
             }
             break;
         case MapNotify:
-            esticar_terminal();
+            /* Estica os dois: o MapNotify diz que ALGUMA subwindow apareceu, e
+             * descobrir de qual agente ela e custaria um XQueryTree por evento.
+             * Esticar o painel vazio do outro nao faz nada. */
+            for (ag = AG_CLAUDE; ag < N_AG; ag++) esticar_agente(ag);
             /* O xterm nasce assincrono: quando o clique o pediu, ele ainda nao
              * existia para receber o foco. Este e o momento em que ele existe. */
-            if (abas[atual].claude) focar_terminal();
+            if (n_abas > 0 && abas[atual].agente) focar_agente(abas[atual].agente);
             break;
         case KeyPress:
             tecla(&ev.xkey);
@@ -3224,21 +3398,28 @@ int main(int argc, char **argv)
                     XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
                 }
                 desenhar();
-            } else if (ev.xbutton.window == w_term) {
+            } else if (ev.xbutton.window == agentes[AG_CLAUDE].w ||
+                       ev.xbutton.window == agentes[AG_GEMINI].w) {
                 /* Chega clique aqui de duas maneiras: no painel vazio, antes de
-                 * o Claude existir - e ai o clique E o pedido de abrir; ou na
+                 * o agente existir - e ai o clique E o pedido de abrir; ou na
                  * borda de 2px que o xterm deixa de fora, onde so cabe devolver
-                 * o foco a ele. */
-                if (!claude_vivo()) { abrir_claude(); desenhar(); }
-                else                focar_terminal();
+                 * o foco a ele.
+                 *
+                 * Qual agente sai da JANELA clicada, nao da aba da frente: sao a
+                 * mesma coisa hoje (so o painel da aba visivel recebe clique), e
+                 * ler da janela nao depende disso continuar verdade. */
+                int ag = (ev.xbutton.window == agentes[AG_CLAUDE].w)
+                         ? AG_CLAUDE : AG_GEMINI;
+                if (!agente_vivo(ag)) { abrir_agente(ag); desenhar(); }
+                else                  focar_agente(ag);
             } else if (ev.xbutton.window == win && ev.xbutton.y < BARRA_H) {
                 int i;
                 for (i = 0; i < N_BOTOES; i++)
                     if (ev.xbutton.x >= botoes[i].x &&
                         ev.xbutton.x < botoes[i].x + botoes[i].w) {
-                        if (i == 0) escolher_projeto();
-                        else if (i == 1) salvar();
-                        else ir_para_claude();
+                        if (botoes[i].agente)        ir_para_agente(botoes[i].agente);
+                        else if (i == B_PROJETO)     escolher_projeto();
+                        else                         salvar();
                         desenhar();
                         break;
                     }
@@ -3252,7 +3433,8 @@ int main(int argc, char **argv)
             if ((Atom) ev.xclient.data.l[0] == A_DELETE) {
                 if (!algum_sujo() || perguntar("Ha alteracoes nao salvas. Sair mesmo assim?")) {
                     salvar_sessao();
-                    if (pid_term > 0) kill(pid_term, SIGTERM);
+                    for (ag = AG_CLAUDE; ag < N_AG; ag++)
+                        if (agentes[ag].pid > 0) kill(agentes[ag].pid, SIGTERM);
                     return 0;
                 }
             }

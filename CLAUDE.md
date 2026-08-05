@@ -27,13 +27,15 @@ só a seção necessária. Ler tudo custa ~35 mil tokens e quase nunca é precis
 | `install.sh` | instalador principal, idempotente. Compila a barra no passo 2 |
 | `startwm.sh` | → `/etc/xrdp/startwm.sh`. Sobe a sessão inteira; limpa vars do WSLg |
 | `barra-tarefas.c` | C + Xlib cru, 2,9 MB de RSS (387 kB de PSS). Fonte **core**, iso8859-1. **Escura** desde 03/08/2026 (`#define BARRA_ESCURA`; a paleta clara amostrada do `Untitled.png` continua no código, atrás do `#else`), relógio em `fixed-bold-13` |
-| `bancada.c` | o "VS Code" próprio: árvore + **abas** + editor + xterm embutido com o Claude (que é a aba 0, **aberta sob demanda**). C + Xlib + **Xft**, 2,4 MB de PSS sem o Claude. Binário abre em **hex** e imagem em **preview**, ambos só-leitura. Sessão por projeto em `~/.config/bancada/sessoes/`. Desde 02/08/2026 é um editor de texto normal: seleção com mouse e `Shift`+setas, `Ctrl+C/X/V/A`, digitar substitui a marca, `Alt+↑/↓` move a linha, `Ctrl+F` procura (barrinha no lugar do título, `Enter`/`F3`/`Ctrl+G` andam), `Ctrl+Shift+Z`/`Ctrl+Y` refazem, e o painel tem **coluna de números** à esquerda e **barra de rolagem** arrastável à direita. Dona de PRIMARY e CLIPBOARD |
+| `bancada.c` | o "VS Code" próprio: árvore + **abas** + editor + xterm embutido com um **agente**. C + Xlib + **Xft**, 2,4 MB de PSS sem agente nenhum. **Dois agentes desde 05/08/2026** — `[Claude]` e `[Gemini]` (o `agy`), um botão cada, xterm e painel próprios. **Nenhuma aba é fixa**: a de agente nasce no clique e fecha no `×` como qualquer outra, e a bancada nasce com **zero** abas. Binário abre em **hex** e imagem em **preview**, ambos só-leitura. Sessão por projeto em `~/.config/bancada/sessoes/`. Desde 02/08/2026 é um editor de texto normal: seleção com mouse e `Shift`+setas, `Ctrl+C/X/V/A`, digitar substitui a marca, `Alt+↑/↓` move a linha, `Ctrl+F` procura (barrinha no lugar do título, `Enter`/`F3`/`Ctrl+G` andam), `Ctrl+Shift+Z`/`Ctrl+Y` refazem, e o painel tem **coluna de números** à esquerda e **barra de rolagem** arrastável à direita. Dona de PRIMARY e CLIPBOARD |
 | `terminal.c` | emulador de terminal próprio, do pty ao pixel. C + Xlib + Xft, 2,66 MB de PSS contra 8,12 do xterm. É o terminal **da sessão** desde 02/08/2026 (`Ctrl+Alt+T`), mas **não** o da bancada: a aba 0 segue no xterm. `SIGUSR1` despeja a grade em texto |
 | `panorama.c` | **aperta Win e vê tudo**: grade das janelas abertas, cada uma com a miniatura viva, em 0,6 MB de PSS parado. Daemon, sobe no `startwm.sh`. Detecta a tecla Win sozinha com **XInput2 cru** (sem grab, senão roubaria o Super do xfwm4); a miniatura vem do **Composite** redirecionado, escalada pelo **XRender** dentro do servidor. Desde 03/08/2026 |
+| `recorte-vnc.c` | **DEIXADO DE LADO — não mexa, não estude, não conte nos números do projeto.** Tentativa de adotar a janela de um visualizador VNC dentro da sessão (`subir_viewer()`, `achar_cliente()`, `adotar()`, `encaixar()`, `repassar_foco()`), na linha de trazer o Windows para dentro. Está no repositório desde o commit `6fe4ef9` e **continua aparecendo no grafo** (14 nós), o que já fez tempo ser gasto investigando-o como se fosse vivo — em 04/08/2026, inclusive. Se aparecer numa busca, é isto aqui e a resposta é "abandonado" |
 | `soltar-cache` | **devolve RAM ao Windows**: timer do systemd que larga o page cache quando a sessão está ociosa. Existe porque o `autoMemoryReclaim` do `.wslconfig` devolve página livre mas **não** larga cache, e o modo `dropcache` não dispara (medido 03/08/2026). Desiste sozinho se o cache < 1200 MB ou a CPU > 10%. Com ele, `vmmem` 2033 MB contra 4277 na mesma sessão |
 | `perfil.sh` | o pedaço do projeto que entra no shell: a função `bancada`, que abre na pasta atual e devolve o prompt, como o `code .` |
 | `barra-apps` | atalhos de aplicativo da barra: lê `.desktop`, converte o ícone e mantém o `apps.conf`. Programa nosso só entra na lista do `[+]` se tiver um `.desktop` em `desktop/` |
-| `trabalho` | substitui o VS Code: ranger + Claude Code lado a lado num tmux. `trabalho instalar` cria os `.desktop` |
+| `trabalho` | substitui o VS Code: ranger + Claude Code lado a lado num tmux. `trabalho instalar` cria os `.desktop`. É o **único lugar que sabe onde cada agente mora**: `onde` (claude) e `onde-gemini` (o `agy`), e é a quem a bancada pergunta |
+| `AGENTS.md` | ponteiro de três parágrafos para o `CLAUDE.md`, para agentes que procuram esse nome (o `agy`). **Arquivo de verdade, nunca symlink** — ver invariantes |
 | `transferir-usb` | passa headset/webcam entre Windows e Linux (usbipd) |
 | `camera-rede` | **a webcam de verdade**: ponte de vídeo por rede, sem tirar do Windows |
 | `compilar-v4l2loopback` | refaz o módulo quando a WSL troca de kernel (senão a câmera some) |
@@ -51,7 +53,37 @@ só a seção necessária. Ler tudo custa ~35 mil tokens e quase nunca é precis
 ## O grafo (graphify)
 
 Há um grafo de conhecimento do código em `graphify-out/` — derivado, está no
-`.gitignore`. Hoje: 121 nós, 205 arestas, 15 comunidades nomeadas.
+`.gitignore`. Hoje (04/08/2026, construído no commit `f6dea85`): **635 nós, 1266
+arestas, 45 comunidades**, sendo **461 nós de `code` e 174 de `document`** — os
+`document` saem do `README.md` e do próprio `CLAUDE.md`.
+
+**Nó de documento não quer dizer gasto com LLM.** Medido em 04/08/2026: os 174
+têm todos `_origin: "ast"` — saíram de leitura estrutural local (os títulos do
+markdown), zero token. O `update` até os acrescenta (o README foi de 146 para
+164 num único `graphify update .`), mas por AST, não por API. A regra do
+`--code-only` logo abaixo continua valendo e continua **não** tendo sido
+violada: o que ela evita é a extração *semântica*, que manda a prosa do README
+para um modelo — e essa não aconteceu aqui. Antes de concluir que o README foi
+parar num LLM, olhe o `_origin` dos nós, não o `file_type`.
+
+**Se o `graph.html` sumir, é o `update` que o traz de volta** (custou tempo em
+04/08/2026 procurando onde ele estava). O `update` regenera `graph.json`,
+`graph.html` e `GRAPH_REPORT.md` juntos; a flag `--no-viz` existe justamente
+para *pular* o HTML em grafos grandes. Nada de procurar arquivo perdido: rode o
+`update`.
+
+**Quanto o grafo economiza, medido em 04/08/2026.** O `graphify explain
+"bancada_erro_x"` devolveu **312 bytes** (~80 tokens) e apontou `bancada.c
+L2866`; ler o `bancada.c` inteiro custa **~30.000 tokens** (3.263 linhas), e o
+`README.md` ~35.000 (5.241 linhas). O fluxo barato é o grafo para **localizar**
+e um `Read` estreito em volta da linha — cerca de **30× mais barato** que abrir
+o arquivo todo. O protocolo genérico disso mora no `~/.claude/CLAUDE.md`, para
+valer em qualquer projeto; aqui ficam só os números que o justificam.
+
+Aviso que ele imprime e vale ler: *"community set changed since labeling"*. Quer
+dizer que as comunidades mudaram desde a última rotulagem e os nomes atuais
+foram **derivados do hub** de cada uma, não escritos pelo assistente. Para
+recuperar os nomes curados, `graphify label`.
 
 ```bash
 graphify update .                      # apos mexer no codigo. Zero tokens
@@ -148,7 +180,13 @@ entre eles são visíveis ao AST.
 | `setsid()` **antes** do `TIOCSCTTY` no filho do pty | sem virar líder de sessão primeiro, o pty não vira terminal de *controle*: tudo funciona e só o `Ctrl+C` não faz nada |
 | `globais_zerar()` e `fechar_aba()` **não** usam `limpar_buffer`/`esquecer_undo` | eles mexem nos globais, que apontam para o buffer de outra aba. Liberar ali destrói o texto da aba vizinha, e só aparece ao voltar para ela |
 | nada de `seguir_cursor()` ao ativar aba | ele arrasta a tela até o cursor, que só anda pelo teclado — desfaz a rolagem de quem desceu o arquivo com a roda do mouse. O `topo`/`col0` guardados na aba já são válidos |
-| a bancada **não** levanta o Claude sozinha | subir só com a janela custava 490 MB a quem abriu para olhar um arquivo. Só o botão `[Claude]` e o clique no painel vazio o abrem; abrir a bancada, restaurar sessão e `Ctrl+Tab` não. Trocar de projeto reabre **só** o que já estava de pé |
+| a bancada **não** levanta agente sozinha | subir só com a janela custava 490 MB (Claude) ou 222 MB (`agy`, medido na tela de login) a quem abriu para olhar um arquivo — e com **dois** agentes a conta de errar isto dobrou. Só o botão do agente e o clique no painel vazio o abrem; abrir a bancada, restaurar sessão e `Ctrl+Tab` não. Trocar de projeto reabre **só** o que já estava de pé |
+| **aba de agente não é fixa**, e por isso `n_abas` pode ser **zero** | a aba 0 era a do Claude e existia desde o início, reservando lugar na faixa para algo que podia nunca subir. Desde 05/08/2026 ela nasce no clique e fecha no `×`. A consequência atinge todo lugar que indexa ou divide por `n_abas`: o `Ctrl+Tab` fazia `(atual + 1) % n_abas` e sem a guarda o processo morre com **SIGFPE** (confirmado com controle no teste — o filho sem guarda morreu de verdade). O `ativar()` e o `desenhar()` também saem cedo com zero abas |
+| o `atual` gravado na sessão é a posição **entre as abas escritas**, não o índice cru | aba de agente não entra na sessão, então os dois números divergem. Enquanto a aba 0 era sempre a do Claude eles calhavam de bater, porque a restauração também punha uma aba antes das de arquivo. Com o Gemini aberto na frente dos arquivos, o índice cru aponta uma aba adiante — e o sintoma é **abrir o arquivo vizinho**, calado |
+| aba de agente fecha **sem perguntar**, e fechar mata o processo | o `--continue` do próximo clique devolve a conversa daquele projeto, então perguntar em toda vez sobre algo recuperável virava clique a mais. O que se perde é uma tarefa a meio caminho, e isso aparece na tela antes do clique no `×` |
+| cada agente tem **janela própria**, criada no `main()` e nunca destruída | dois agentes de pé ao mesmo tempo precisam de um xterm cada, e o `-into` fixa o xterm na janela em que nasceu. Reparentar na troca de aba dá `BadMatch` por um fio. Janela desmapeada não custa pixmap — o servidor só respalda o que aparece — então a regra "mesmo retângulo, um só mapeado" continua valendo, agora com três janelas |
+| quem acha o binário do agente é o `trabalho`, **nunca** um caminho no `bancada.c` | o do Claude carrega a versão quando vem pela extensão do VS Code, e o do `agy` mora em `~/.local/bin`, que **não está no PATH da sessão gráfica** (medido no `environ` do xfwm4, 05/08/2026). Uma cópia velha do `trabalho` instalado faz o botão abrir um xterm que não acha binário nenhum, e o sintoma é uma aba que pisca e fecha — foi por isso que o `trabalho` entrou no `install.sh` |
+| o `AGENTS.md` é arquivo de verdade com um **ponteiro**, nunca symlink nem cópia | medido em 05/08/2026: com `AGENTS.md` como symlink para o `CLAUDE.md`, o `agy` **não carrega o mapa** — a conversa sobe sem ele e sem erro na tela (só uma linha de `rules.go` no log, e nem sempre). Cópia daria duas fontes da verdade, e a segunda envelhece calada |
 | `salvar()` recusa `modo != MODO_TEXTO` | hex e imagem não têm buffer de linhas: o `Ctrl+S` percorreria zero linhas, e o `fopen(…,"wb")` **já truncou** antes disso. Um `.png` de 27 KB viraria 0 byte, calado |
 | qualquer `NUL` no arquivo **inteiro** manda para o hex | o cheiro olha só 512 bytes, mas o `texto_para_buffer()` varre com `strchr()`: um `NUL` no meio faria o resto do arquivo sumir do buffer e o salvar gravá-lo truncado |
 | nenhuma lib de imagem no `bancada.c` também | quem decodifica é o `convert` (16 MB de pico, 0,03 s, e morre), devolvendo PPM cru pelo pipe. A `libpng` até já está no processo pela freetype, mas resolveria só PNG — pelo pipe vêm seis formatos num caminho só |
@@ -183,6 +221,60 @@ entre eles são visíveis ao AST.
   caminho chumbado quebrar, **procure os outros no mesmo dia**.
 - **Saída do PowerShell não é UTF-8** (CP-850/1252). `grep` declara
   `binary file matches` e engole tudo. Use `grep -a` + `tr -cd '[:print:]\t\n'`.
+- **`Win32_VideoController.AdapterRAM` satura em 4 GB e mente calado** (medido
+  em 04/08/2026). O campo é inteiro de 32 bits com sinal: numa RTX 4060 Laptop
+  de 8 GB ele responde `4095MB`, que é um número **plausível** para uma placa de
+  entrada — ninguém desconfia. Não há erro nem aviso. As duas fontes que dão o
+  valor certo: `/usr/lib/wsl/lib/nvidia-smi --query-gpu=memory.total` (8188 MiB)
+  e a chave `HardwareInformation.qwMemorySize` em
+  `HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*`.
+  Mesmo padrão do `Hw` do `audio-padrao.ps1`, onde a chave documentada `,39` vem
+  vazia e a boa é a `,2`: **no WMI, campo documentado não é campo confiável** —
+  confira todo número vindo dele contra uma segunda fonte antes de decidir algo.
+- **A GPU passa para dentro da WSL mesmo com `guiApplications=false`** (medido em
+  04/08/2026). Ele corta o WSLg — os apps GTK/Qt fugindo para o desktop do
+  Windows, que é o motivo dele estar ligado aqui — e **não** o passthrough do
+  `dxgkrnl`: `/dev/dxg` e `/usr/lib/wsl/lib/libcuda.so.1` estão de pé e o CUDA
+  funciona, sem nada para configurar. O `nvidia-smi` existe mas **não está no
+  `PATH`**: mora em `/usr/lib/wsl/lib/`. Máquina: RTX 4060 Laptop, 8 GB de VRAM,
+  compute 8.9.
+- **O `df` de dentro da WSL não sabe quanto disco existe** (medido em
+  04/08/2026). Ele reporta o tamanho **virtual** do VHDX: respondeu `1007G` com
+  `765G` livres numa máquina cujo C: tem 476 GB e **35,9 GB livres**. O disco é
+  dinâmico — o ext4 nasce com 1 TB nominal e o arquivo por baixo só cresce
+  conforme o uso, limitado pelo SSD do Windows, que o `df` não enxerga. Quem
+  responde de verdade é o `Win32_LogicalDisk` (`DriveType=3`) pela interop. Aqui
+  o `ext4.vhdx` sozinho já ocupa ~200 GB dos 476 do C:, e o **D: tem 198 GB
+  livres** e está quase vazio — é para lá que vai coisa grande (modelo de LLM,
+  por exemplo), com `wsl --mount --vhd` em vez de `/mnt/d`, que é lento por 9p.
+- **O Gemini CLI não serve mais conta individual — nem Google AI Pro** (medido em
+  05/08/2026). Em **18/06/2026** o Google parou de atender Google AI Pro, Ultra e
+  nível gratuito no Gemini CLI: ele responde `IneligibleTierError` com
+  `reasonCode: UNSUPPORTED_CLIENT` e manda migrar para o Antigravity. Não é versão
+  velha — deu na 0.53.1, que era a `latest` no npm no dia. O que **continua**
+  funcionando lá é chave de API (cobrada por token, ignora a assinatura) e licença
+  enterprise. Quem usa a assinatura no terminal é o **`agy`**
+  (`curl -fsSL https://antigravity.google/cli/install.sh | bash`, binário Go em
+  `~/.local/bin/agy`, `--continue` por projeto igual ao do Claude). A documentação
+  oficial do Gemini CLI **ainda diz** que assinante AI Pro deve usar "Sign in with
+  Google" — ela está desatualizada, e seguir por ali custa tempo.
+- **Existe um `/usr/bin/node` v18 no PATH da sessão, e ele é velho demais**
+  (medido em 05/08/2026). Pacote de CLI em Node costuma exigir `>=20`; com o v18 o
+  Gemini CLI morre em `SyntaxError: Invalid regular expression flags`, que **não
+  diz nada sobre versão** e manda procurar no lugar errado. O node bom é o do nvm
+  (`~/.nvm/versions/node/*/bin/node`), e o caminho dele carrega a versão — quem
+  precisar de um wrapper resolve na hora com `sort -V | tail -1`, nunca chumbado.
+  Vale a regra maior: **achar "um node" não basta, tem de checar a versão.**
+- **`pkill -f` casa com a própria linha de comando de quem o chama** (custou dois
+  ciclos em 04/08/2026). O `-f` compara a linha **inteira** de cada processo — e
+  a linha do shell que executa o `pkill` contém o padrão escrito ali dentro.
+  `pkill -f 'llama-cli.*Bonsai'` matou o próprio shell (saída 144), e a segunda
+  tentativa com o truque do colchete (`'[l]lama-cli'`) morreu igual, porque a
+  mesma linha também trazia o caminho `.../llama-cli --help` mais adiante. O
+  colchete só protege o *padrão*, não o resto do comando. A saída é `pkill -x
+  <nome>`, que compara só o nome do processo — é o que o resto do projeto já usa
+  (`pkill -x barra-tarefas`, `pkill -x panorama`). Vale junto com a armadilha do
+  `pgrep -c` contando zumbi, logo abaixo.
 - **Lançar `.exe` do Windows:** `setsid --fork`, nunca `( cmd & )`. O proxy de
   interop segura o descritor de saída original e quem estiver **lendo** trava
   até a janela do Windows fechar.
