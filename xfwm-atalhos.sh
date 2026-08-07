@@ -144,11 +144,7 @@ cmd() {   # mesmo motivo do -r explicado no bind()
 #
 # Se o binario aparecer depois, o startwm.sh roda este script a cada login e a
 # tecla se corrige sozinha no proximo.
-if [ -x /usr/local/bin/terminal ]; then
-    cmd '<Primary><Alt>t' '/usr/local/bin/terminal'
-else
-    cmd '<Primary><Alt>t' 'exo-open --launch TerminalEmulator'
-fi
+cmd '<Primary><Alt>t' 'exo-open --launch TerminalEmulator'
 cmd '<Alt>F3'         'xfce4-appfinder'
 cmd '<Super>r'        'xfce4-appfinder -c'
 

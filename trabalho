@@ -77,6 +77,8 @@ onde_claude() {
 # nome de dentro de um .desktop ou da bancada nao acha nada.
 onde_agy() {
     local c
+    c=$(command -v agy-wrapper 2>/dev/null) && { printf '%s\n' "$c"; return 0; }
+    [ -x "$HOME/.local/bin/agy-wrapper" ] && { printf '%s\n' "$HOME/.local/bin/agy-wrapper"; return 0; }
     c=$(command -v agy 2>/dev/null) && { printf '%s\n' "$c"; return 0; }
     [ -x "$HOME/.local/bin/agy" ] && { printf '%s\n' "$HOME/.local/bin/agy"; return 0; }
     return 1

@@ -53,9 +53,11 @@ apt-get update -qq
 # e sem antialiasing, que e o que faz o texto ficar identico ao do dialogo do
 # xrdp em vez de so parecido.
 #
-# imagemagick e do barra-apps, NAO da barra: ele converte o icone do app UMA vez
-# (na hora em que voce o fixa) para pixels crus. E o que evita linkar libpng no
-# barra-tarefas.c e manter a barra sem dependencia de imagem nenhuma.
+# imagemagick e do barra-apps, NAO de quem desenha: ele converte o icone do app
+# UMA vez (na hora em que voce o fixa) para pixels crus. E o que evita linkar
+# libpng no programa que desenha e manter os dois sem dependencia de imagem
+# nenhuma. Desde 07/08/2026 quem desenha esses icones e a DOCA do panorama, nao
+# mais a barra - a barra ficou so com relogio e desligar.
 apt-get install -y --no-install-recommends \
     xrdp xorgxrdp xfwm4 xfce4-settings exo-utils xfce4-appfinder \
     i3 xfce4-terminal dbus-x11 x11-xserver-utils fonts-dejavu-core \

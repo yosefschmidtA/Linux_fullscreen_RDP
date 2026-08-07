@@ -4358,6 +4358,61 @@ perguntar a ele onde cada agente mora — uma cópia velha faz o botão `[Gemini
 abrir um xterm que não acha binário nenhum, e o sintoma é uma aba que pisca e
 fecha.
 
+### A árvore que piscava para sempre (06/08/2026)
+
+O `agy` recebeu a tarefa de fazer a árvore de arquivos se atualizar sozinha, e
+entregou funcionando: `inotify` na pasta, `select()` no laço de eventos ao lado do
+descritor do X. Depois de apagar vários `.o`, a bancada **começou a piscar a lista
+sem parar** e não parava mais.
+
+A causa é uma armadilha de API, não descuido de lógica:
+
+```c
+/* como estava */
+while (read(inotify_fd, buf, sizeof buf) > 0) {}   /* drena as cegas */
+carregar_pasta(projeto);                            /* e isto troca o watch... */
+    → inotify_rm_watch(fd, wd);                     /* ...e ENFILEIRA IN_IGNORED */
+```
+
+**`inotify_rm_watch()` gera um evento no próprio descritor.** Provado com controle,
+num programa de dez linhas: com o watch posto, o fd drenado e **ninguém tocando em
+arquivo nenhum**, basta chamar `rm_watch` para o `select()` voltar a dizer que há o
+que ler — mask `0x8000`, `IN_IGNORED`.
+
+Como a drenagem acontece *antes* da recarga, o evento que a própria recarga cria
+sobra para a volta seguinte: acorda, recarrega, troca o watch, gera outro evento,
+acorda... O gatilho é o **primeiro** arquivo criado ou apagado na pasta; dali não
+para mais. E como o `carregar_pasta()` zera o `arv_topo`, cada volta joga a árvore
+para o topo — é o piscar visível.
+
+Medido com controle, um `touch` só e mais nada depois:
+
+| | ticks de CPU nos 6 s seguintes, sem nenhuma mudança de arquivo |
+|---|---|
+| binário como estava | **+75** |
+| binário corrigido | **+0** |
+
+A correção tem três partes, e as duas últimas não estavam no relato:
+
+1. **O watch só é trocado quando a pasta muda de verdade.** Recarregar a mesma
+   pasta não mexe no watch, então não há evento para se alimentar.
+2. **Os eventos são lidos um a um**, e só os quatro pedidos (`CREATE`, `DELETE`,
+   `MOVED_TO`, `MOVED_FROM`) contam como mudança. `IN_IGNORED` não é mudança de
+   pasta. Testado nos dois sentidos: arquivo criado e apagado → recarrega; só o
+   `IN_IGNORED` → não recarrega.
+3. **A rolagem é preservada, e a pasta recarregada é a da tela.** O código
+   recarregava `projeto`, a raiz — quem estivesse dentro de uma subpasta era jogado
+   para fora dela a cada arquivo criado. E o `arv_topo = 0` do `carregar_pasta()`
+   existe para *entrar* numa pasta; num refresh ele arrastava a árvore para o topo
+   debaixo de quem estava lendo, que é o mesmo erro do `seguir_cursor()` na troca
+   de aba.
+
+Vale o registro do que isto diz sobre trabalhar com dois agentes: a função pedida
+**funcionava** — a árvore atualizava. O que faltou foi o efeito colateral de uma
+chamada de API que ninguém desconfia, e ele só aparece na segunda volta do laço.
+Testar "a lista atualiza?" dá verde. A pergunta que pega é "e depois que ela
+atualiza, o programa volta a dormir?".
+
 ## Trocar o VS Code por 31 MB (01/08/2026)
 
 O VS Code servia de **árvore de arquivos** — o resto do trabalho já era no
@@ -5222,6 +5277,143 @@ diálogo está ali.
   escutando a mesma tecla abririam dois painéis, e o de baixo ficaria com o grab
   preso. Se já há dono, a segunda invocação vira "mostre agora" e sai — é o que
   faz `panorama` na linha de comando servir de gatilho.
+
+## A barra mudou para dentro do painel (07/08/2026)
+
+Pedido de quem usa, e a razão foi de gosto antes de ser de engenharia: *"gostei
+demais do jeito que está o botão Win onde aparecem as abas abertas, quero levar a
+barra para lá e deixar aqui só o horário e o desligar."*
+
+Foi feito ao pé da letra. A barra ficou com **relógio e desligar**; volume,
+áudio/câmera, `Coisas`, os atalhos de aplicativo e o `[+]` viraram uma **doca** no
+rodapé do painel da tecla Win.
+
+### Por que isto não é só mudar de lugar
+
+A barra tem 28 px de altura numa faixa colada na borda de baixo, que é onde o
+ponteiro passa o tempo todo. O painel abre no meio da tela, já com as miniaturas.
+Três consequências, todas medidas ou verificadas:
+
+- **O ícone saiu de 20 px para 32.** Em 28 px de altura não cabia mais; no botão
+  de 44 px da doca, o de 20 cabia e parecia perdido.
+- **A barra parou de perguntar.** Ela chamava o `pactl` quatro vezes a cada 2 s e
+  o `transferir-usb estado` a cada 30 s, **para sempre**, porque ficava de pé a
+  sessão inteira. O painel só existe enquanto está aberto — normalmente um ou dois
+  segundos — e por isso pergunta uma vez, no `abrir()`. Fechado, o daemon volta a
+  ser um Xlib com um socket e mais nada.
+- **O gesto virou um só:** aperta Win, vê tudo, escolhe.
+
+### O que a mudança de RAM realmente foi
+
+Aqui há uma correção de expectativa minha, e ela vale mais que o número. Tirar
+854 linhas da barra (1484 → 630) **não** devolveu RAM proporcional:
+
+| | PSS | RSS |
+|---|---:|---:|
+| barra antiga, recém-iniciada | 435 kB | 3024 kB |
+| barra nova, recém-iniciada | **392 kB** | **2672 kB** |
+
+**43 kB de PSS.** Quase todo o peso de qualquer um destes programas é a Xlib e o
+que o servidor mapeia, não o código próprio — que é justamente o que a seção "Por
+que Xlib cru" já dizia, vista agora pelo avesso.
+
+E a primeira medição que fiz foi **inválida**, o que é o registro que importa: a
+barra antiga em pé havia dias marcava 228 kB de PSS, contra 400 kB da nova recém-
+nascida — parecia que a versão enxuta tinha *engordado* 75%. Não tinha: o processo
+velho já passara pelo aparo do kernel e pelo `soltar-cache`. **Processo antigo não
+se compara com processo novo**; para comparar, subir os dois na hora.
+
+Do lado do painel: **0,73 MB de PSS enquanto nunca foi aberto** (a doca é montada
+no `abrir()`, não no `main()`, então parado ele continua o de antes), **2,78 MB
+depois da primeira abertura** — fontconfig mais os Pixmaps dos ícones — e **~38 kB
+por abertura** dali em diante.
+
+### O menu não podia ser uma janela
+
+Na barra, cada menu suspenso era uma janela `override_redirect` com
+`XGrabPointer` próprio. Isso funcionava porque a barra não tinha grab nenhum.
+
+O painel tem o ponteiro **e** o teclado capturados, e o X entrega o ponteiro a
+**um** cliente só. Um segundo grab por cima do nosso ou falha, ou rouba os eventos
+de quem estava embaixo sem devolver. Então o menu passou a ser **desenhado dentro
+do painel**, no mesmo Pixmap de fundo duplo: custa um retângulo, não disputa grab
+com ninguém, e de graça vêm o teclado (setas e Enter andam nele) e o fechar sem
+derrubar o painel junto.
+
+O corolário desagradável é o **zenity**. O `Coisas` pergunta o monitor e o `[+]`
+mostra a lista de apps, os dois por zenity — e um diálogo aberto por baixo do
+nosso grab não recebe clique nem tecla: fica na tela sem responder a nada. Quem
+lança zenity **fecha o painel antes**. É o mesmo aviso que o comentário do
+`fechar_janela()` já dava sobre o diálogo de "salvar?".
+
+### O tamanho do ícone tinha de entrar no nome do cache
+
+O `barra-apps` guarda o ícone como pixels crus, `lado*lado*3` bytes, e o único
+teste que o `cmd_listar` faz nesse cache é `-s` — "não está vazio".
+
+Um `.rgb` de 20×20 tem 1200 bytes e passa nesse teste com folga. Trocando só o
+`LADO` para 32, o arquivo velho seria servido como se fosse de 32×32; o painel
+leria menos bytes do que espera, recusaria o arquivo e cairia no rótulo de texto
+— **para sempre**, porque nada jamais o regeneraria. Ou seja: aumentar o ícone
+**apagaria** os ícones.
+
+Foi visto na prática antes de instalar, e por acidente feliz: o teste rodou com o
+`barra-apps` **instalado** (ainda o de 20 px) e a doca desenhou `Brav…` e `Ges…`
+no lugar do Brave e do Thunar. Com o lado no nome (`brave-browser-32-333333.rgb`)
+os dois formatos convivem sem se pisarem, e a limpeza de cache que já existia
+varre o antigo sozinha.
+
+Pela mesma família de razão, **a face do botão de app não muda no hover**: o
+ícone vem com o alfa já achatado sobre `#333333`, e pintar a face de outro tom
+poria um quadrado da cor velha em volta dele. O realce vai na borda.
+
+### Um estouro de array que só aparece com a doca cheia
+
+O array da doca nasceu como `doca[D_FIXOS + MAX_APPS]`. Os lançadores entram no
+meio, em tempo de execução, e o `[+]` entra **depois** deles — então encher a doca
+até o teto faz o `[+]` ser escrito uma posição além do fim.
+
+Com os 2 atalhos fixados desta máquina, nada acontece. Com 14, é escrita fora do
+array. A barra antiga não tinha o defeito porque dimensionava
+`itens[N_ANTES + MAX_APPS + N_DEPOIS]`; o `+ N_DEPOIS` se perdeu na tradução.
+
+Medido com controle em 07/08/2026, `apps.conf` com 16 entradas, sob AddressSanitizer:
+
+```
+=== bugado ===
+ERROR: AddressSanitizer: global-buffer-overflow
+WRITE of size 4 ... SUMMARY: ... in montar_doca
+=== corrigido ===
+montou: n_doca=20 (teto de itens=20), ultimo tipo=4
+```
+
+O controle é o que faz isso valer: a versão com o defeito **estourou de verdade**,
+então o silêncio da corrigida quer dizer alguma coisa. A regra vira invariante no
+`CLAUDE.md`: o array soma os **três** grupos.
+
+Um índice vizinho tinha o mesmo cheiro e foi fechado junto — `arrastando` e
+`doca_sob` apontam para dentro do array, e quem o remonta agora os zera. Aqui nada
+estoura: eles passariam a designar **outro item, calado**, e o caminho real é tirar
+um atalho pelo botão direito, que remonta a doca com um item a menos.
+
+### Delegar a leitura ao `agy` não pagou desta vez
+
+Enquanto eu compilava, mandei ao `agy` uma varredura **ancorada** do código novo —
+"toda indexação de `doca[]`, com arquivo:linha e se há guarda antes", que é
+extração, não julgamento, a faixa em que ele foi medido 4/4 no MSCDATA.
+
+Ele devolveu 24 âncoras, todas corretas e verificáveis. E **nenhum defeito**: os
+três pontos que marcou como "sem teste de limite" (`abrir_menu`, `clique_doca`,
+`doca[arrastando]`) têm a guarda no **chamador**, o que confirmei com um `grep` de
+custo zero — `clique_doca` tem um chamador só, e o índice sai do `doca_em()`, que
+só devolve `-1` ou `[0, n_doca)`.
+
+O estouro de verdade saiu do **meu** `grep`, e já estava corrigido quando ele leu.
+Custo: ~50 s de parede e o mapa do projeto carregado na assinatura, para confirmar
+o que eu já sabia. Não é argumento contra o `agy` — é o item 3 da ordem de
+preferência do `~/.claude/CLAUDE.md` aparecendo na prática: **quando eu já li o
+arquivo, o custo de leitura já foi pago e não há mais o que economizar.** Delegar
+compensa antes de ler, não depois.
 
 ## O grafo do projeto (graphify, 31/07/2026)
 

@@ -4,6 +4,28 @@
  *   gcc -O2 -Wall -o barra-tarefas barra-tarefas.c -lX11 -lXrandr
  *   DISPLAY=:10 ./barra-tarefas &
  *
+ * O QUE SOBROU AQUI, E POR QUE (07/08/2026)
+ *
+ * Relogio e desligar. Mais nada.
+ *
+ * Ate 06/08/2026 esta barra tinha tambem os dois controles de volume, os botoes
+ * de audio e camera, o menu da pasta Coisas, os atalhos de aplicativo e o "[+]"
+ * — cerca de 700 linhas, tres menus suspensos e uma janela override_redirect
+ * propria para desenha-los. Tudo isso mudou para a DOCA do panorama, a tela que
+ * a tecla Win abre (veja "a doca" no panorama.c).
+ *
+ * A razao e de espaco e de uso, nao de codigo. Aqui ha 28px de altura e uma
+ * faixa colada na borda de baixo, onde o ponteiro passa o tempo todo; la ha uma
+ * tela inteira que abre no meio, ja com as miniaturas das janelas. Um icone que
+ * precisava caber em 20px agora tem 32, e o gesto ficou um so: aperta Win, ve
+ * tudo, escolhe. O que continua tendo de ser visto SEM abrir nada — as horas —
+ * e o que continua tendo de ser alcancavel sem depender de gesto nenhum — o
+ * desligar — ficaram.
+ *
+ * O efeito colateral que importa: esta barra nao pergunta mais nada a ninguem.
+ * Ela chamava o pactl quatro vezes a cada 2 s e o `transferir-usb estado` a cada
+ * 30 s, para sempre. Agora o unico motivo de ela acordar e o minuto virar.
+ *
  * POR QUE Xlib CRU, E NAO UM TOOLKIT
  *
  * A primeira versao era Python + Tk e pesava 21 MB de RSS. O visual exige
@@ -31,14 +53,12 @@
  *
  * PARA ACRESCENTAR UM ITEM
  *
- * Escreva a funcao de acao e ponha uma linha em "fixos_antes" ou "fixos_depois".
- * A largura da barra e calculada a partir delas; nada mais precisa mudar.
+ * Escreva a funcao de acao e ponha uma linha em "fixos". A largura da barra e
+ * calculada a partir dela; nada mais precisa mudar.
  *
- * Entre as duas tabelas entram, em tempo de execucao, os ATALHOS DE APLICATIVO
- * que o barra-apps reporta - por isso a tabela e dupla. Esses sao os unicos
- * itens com icone, e o unico lugar do arquivo onde a barra desenha pixels que
- * nao calculou ela mesma; veja "atalhos de aplicativo" mais abaixo para o porque
- * de isso nao ter trazido libpng junto.
+ * Mas pense duas vezes antes: o lugar de um controle novo provavelmente e a
+ * doca do panorama, que tem espaco, Xft (logo, acento) e um menu pronto. Esta
+ * barra e o que precisa ser visto sem gesto nenhum.
  */
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -51,7 +71,6 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/select.h>
-#include <sys/stat.h>
 
 #define ALTURA 28
 #define PAD     2          /* respiro entre a moldura da barra e os itens */
@@ -69,285 +88,38 @@ static GC           gc;
 static XFontStruct *fonte, *mono;
 static unsigned long FACE, LUZ, SOMBRA, BORDA, TINTA, POCO;
 static int          LARG;
-static time_t       mt_ref;      /* mtime do cache no instante do clique */
-static int          cam_ref;     /* estado da ponte de video no clique */
 
-enum { BOTAO, RELOGIO, BOTAO_USB, VOLUME, BOTAO_COISAS, BOTAO_APP, BOTAO_MAIS };
+enum { BOTAO, RELOGIO };
 
-/* Os quatro ultimos campos so existem para BOTAO_APP, que nasce em tempo de
- * execucao e por isso nao pode apontar para literal de string como os fixos.
- * Ficam no fim para que os inicializadores das tabelas fixas continuem valendo
- * sem mudanca (o C zera o que sobra). */
 typedef struct {
     int         tipo;
     const char *rotulo;
     int         larg;
     void      (*acao)(void);
-    const char *dev;        /* so BOTAO_USB: "audio" ou "camera" */
-    int         pendente;   /* clicado, esperando o transferir-usb responder */
     int         x;          /* preenchido pelo layout */
-    char        id[288];    /* BOTAO_APP: caminho do .desktop */
-    char        txt[64];    /* BOTAO_APP: nome, plano B quando nao ha icone */
-    Pixmap      icone;      /* BOTAO_APP: 0 = desenhar o nome */
-    int         ic_lado;
 } Item;
 
 static void acao_desligar(void);
 static void tick(void);
-static void aplicar_volume(Item *it, int mx);
 static void desenhar(void);
 static void levantado(int x, int y, int w, int h);
 static void gravado(int x, int y, int w, int h);
 static void primario(int *px, int *py, int *pw, int *ph);
 static void anunciar_dock(void);
 static void aplicar_strut(int bx, int my, int mh);
-static void fechar_popup(void);
-static void escolher_popup(int i);
-static void desenhar_popup(void);
-static void abrir_popup(Item *it);
-static void montar_itens(void);
-static void recarregar_apps(void);
 static void dicas_de_tamanho(void);
 static void reposicionar(void);
-static time_t apps_mtime(void);
-static Pixmap carregar_icone(const char *caminho, int lado);
-static time_t apps_ref;        /* mtime do apps.conf na ultima montagem */
-static int  arrastando = -1;   /* item de volume sob arrasto, ou -1 */
-
-/* Partes clicaveis de um controle de volume, da esquerda para a direita:
- *   [rotulo]  alterna o mudo
- *   [calha]   ajusta o nivel
- *   [seta]    abre o menu de dispositivos
- */
-#define VOL_LARG   116
-#define VOL_ROTULO  26
-#define VOL_SETA    12
-#define VOL_CALHA  (VOL_LARG - VOL_ROTULO - GAP - VOL_SETA - 2)
 
 /* A barra, da esquerda para a direita. Sem lista de janelas de proposito - o
  * caminho de volta para janela minimizada continua sendo o Alt+Tab
- * (cycle_hidden=true no xfwm4.xml).
- *
- * Os dois BOTAO_USB sao separados de proposito: bundle-los obrigaria a
- * tudo-ou-nada.
- *
- * ATENCAO - os dois botoes NAO fazem mais a mesma coisa por baixo (31/07/2026):
- *
- *   "Audio"  -> transferir-usb: move mesmo o headset por USB/IP.
- *   "Camera" -> camera-rede: liga/desliga uma ponte de VIDEO POR REDE, e o
- *               dispositivo USB nunca sai do Windows.
- *
- * O motivo esta medido no README: por USB/IP o navegador pede YUYV 640x480 a
- * 30 fps (18,4 MB/s) e o vhci_hcd satura em 0,25 MB/s - dava chuvisco. O audio
- * cabe nesse mesmo teto (0,18 MB/s) e por isso continua no USB/IP.
- *
- * O rotulo da camera diz "Rede" e nao "Linux" justamente para nao sugerir que o
- * dispositivo mudou de lado. Ele nao muda: enquanto a ponte esta ligada, o
- * ffmpeg.exe segura a camera no Windows e nenhum outro app de la a abre.
- * A largura cabe o rotulo mais longo ("Camera: Rede"). */
-/* A tabela virou DUAS, com os atalhos de aplicativo montados no meio em tempo
- * de execucao (veja carregar_apps). O "[+]" fecha o grupo dos lancadores: e o
- * botao que abre a lista de apps instalados para fixar ou tirar.
- *
- * Continua nao havendo lista de janelas, e isso e deliberado: estes botoes
- * LANCAM, nao alternam. Uma janela minimizada volta pelo Alt+Tab, como sempre
- * (cycle_hidden=true no xfwm4.xml). */
-static Item fixos_antes[] = {
-    { VOLUME,      "Vol",     VOL_LARG, NULL,       "sink",   0, 0 },
-    { VOLUME,      "Mic",     VOL_LARG, NULL,       "source", 0, 0 },
-    { BOTAO_USB,   "Audio",    92, NULL,          "audio",  0, 0 },
-    { BOTAO_USB,   "Camera",   92, NULL,          "camera", 0, 0 },
-    { BOTAO_COISAS, "Coisas",   56, NULL,          NULL,     0, 0 },
-};
-static Item fixos_depois[] = {
-    { BOTAO_MAIS,  "+",        20, NULL,          NULL,     0, 0 },
-    { RELOGIO,     NULL,       58, NULL,          NULL,     0, 0 },
-    { BOTAO,       "Desligar", 66, acao_desligar, NULL,     0, 0 },
+ * (cycle_hidden=true no xfwm4.xml), e agora tambem o painel da tecla Win, que
+ * mostra todas elas com miniatura. */
+static Item itens[] = {
+    { RELOGIO, NULL,       58, NULL,          0 },
+    { BOTAO,   "Desligar", 66, acao_desligar, 0 },
 };
 
-#define N_ANTES  ((int) (sizeof fixos_antes  / sizeof fixos_antes[0]))
-#define N_DEPOIS ((int) (sizeof fixos_depois / sizeof fixos_depois[0]))
-#define MAX_APPS 14
-#define APP_LADO 20                        /* casa com o LADO do barra-apps */
-#define APP_LARG (APP_LADO + 8)
-
-static Item itens[N_ANTES + MAX_APPS + N_DEPOIS];
-static int  n_itens;
-
-/* ---- menu suspenso -------------------------------------------------------
- * Serve a dois botoes, e a mecanica e a mesma nos dois: um comando externo
- * imprime as linhas, o menu mostra e o clique devolve a escolha ao mesmo
- * comando. A barra nao sabe nada sobre audio nem sobre o que abre no Windows.
- *
- * DISPOSITIVOS DE AUDIO. O Linux so tem dois dispositivos de cada lado (xrdp e,
- * quando anexada, a placa USB). Um menu feito so com o pactl mostraria
- * "xrdp-sink", que nao significa nada, e esconderia a caixa do notebook e o
- * monitor - que sao do Windows e so existem atras do canal RDP. Por isso a
- * lista vem do audio-dispositivos, que junta os dois mundos.
- *
- * COISAS. A lista vem do abrir-windows --listar-coisas, que le uma PASTA na
- * area de trabalho do Windows. Por que ler no clique, e nao guardar: assim um
- * item novo aparece sem reiniciar a barra - que e o ponto todo de usar uma
- * pasta - e nao ha nada a vigiar enquanto o menu esta fechado. Custa 48 ms
- * (medido em 31/07/2026, com o cache do caminho ja quente; remedido em
- * 02/08/2026 depois da generalizacao: 34 ms).
- *
- * Ate 02/08/2026 este botao se chamava "Jogos" e o script, jogo-windows. A
- * pasta passou a aceitar qualquer arquivo - um .docx dela abre no Word, no
- * monitor cedido - e por isso o rotulo virou "Coisas". A largura saiu de 52
- * para 56 px porque "Coisas" mede 34 px na helvetica-11 contra 30 de "Jogos",
- * e 56 mantem a mesma folga de 22 px que o botao tinha.
- *
- * O FORMATO E UM SO, e por isso os dois cabem no mesmo parser:
- *
- *     <id>\t<em uso: 0 ou 1>\t<rotulo ASCII>
- *
- * O id nunca e desenhado - e o que volta para o comando -, e por isso ele pode
- * ter acento enquanto o rotulo, que passa pelo XDrawString, nao pode.
- */
-#define MAX_POP 24        /* teto de linhas do menu; 24 itens e folgado */
-#define POP_LINHA 18
-
-/* Onde as primitivas de desenho pintam. Existe porque levantado/gravado/linha/
- * texto tinham a janela da BARRA chumbada: a moldura e o realce do menu eram
- * pintados sobre a barra, nas coordenadas do menu - aparecia um retangulo
- * fantasma algumas linhas abaixo do ponteiro, e o realce de verdade nunca
- * saia. Quem desenha ajusta este alvo antes. */
-static Drawable alvo;
-
-static Window pop = 0;              /* 0 = fechado */
-static int    pop_n, pop_sob = -1;  /* itens; linha sob o mouse */
-static int    pop_w, pop_h;
-static char   pop_id[MAX_POP][288];   /* cabe o caminho de um .desktop */
-static char   pop_rot[MAX_POP][120];
-static int    pop_atual[MAX_POP];
-static char   pop_lado[8];          /* so o menu de audio: "saida"/"entrada" */
-static int    pop_tipo;             /* qual botao abriu: decide o que o clique faz */
-
-/* Estado lido do cache que o transferir-usb escreve. A barra NAO chama o
- * usbipd.exe: uma chamada de interop leva quase um segundo e travaria o
- * desenho. */
-static char est_audio[24]  = "?";
-/* Nao ha est_camera: desde 31/07/2026 a camera nao passa pelo transferir-usb.
- * O estado dela e a ponte de rede estar viva, lido em camera_ligada(). */
-
-/* Volume, 0-100, e mudo. Aqui, ao contrario do estado USB, NAO ha cache: o
- * pactl responde em 7-9 ms (medido em 31/07/2026) porque fala por socket unix
- * local, entao da para perguntar a cada tick sem travar o desenho. E o interop
- * do Windows que e caro, nao um processo local.
- *
- * Sempre @DEFAULT_SINK@ / @DEFAULT_SOURCE@, nunca um nome fixo: assim o mesmo
- * controle serve para o headset USB nativo e para o xrdp-sink, e continua certo
- * depois de um clique em "Audio: Win". */
-static int vol_sink = -1, vol_source = -1;
-static int mudo_sink = 0, mudo_source = 0;
-
-/* Le a primeira porcentagem da saida do pactl. Retorna -1 se nao houver. */
-static int pactl_num(const char *cmd)
-{
-    FILE *f = popen(cmd, "r");
-    char buf[512], *p;
-    int v = -1;
-
-    if (!f)
-        return -1;
-    if (fgets(buf, sizeof buf, f)) {
-        p = strchr(buf, '%');
-        if (p) {
-            while (p > buf && (p[-1] == ' ' || (p[-1] >= '0' && p[-1] <= '9')))
-                p--;
-            v = atoi(p);
-        }
-    }
-    pclose(f);
-    return v;
-}
-
-static int pactl_mudo(const char *cmd)
-{
-    FILE *f = popen(cmd, "r");
-    char buf[128];
-    int m = 0;
-
-    if (!f)
-        return 0;
-    if (fgets(buf, sizeof buf, f))
-        m = strstr(buf, "yes") != NULL;
-    pclose(f);
-    return m;
-}
-
-static void ler_volumes(void)
-{
-    vol_sink   = pactl_num("pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null");
-    vol_source = pactl_num("pactl get-source-volume @DEFAULT_SOURCE@ 2>/dev/null");
-    mudo_sink   = pactl_mudo("pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null");
-    mudo_source = pactl_mudo("pactl get-source-mute @DEFAULT_SOURCE@ 2>/dev/null");
-}
-
-static void ler_cache(void)
-{
-    const char *rt = getenv("XDG_RUNTIME_DIR");
-    char caminho[256], linha[128];
-    FILE *f;
-
-    snprintf(caminho, sizeof caminho, "%s/transferir-usb.estado",
-             rt && *rt ? rt : "/run/user/1000");
-    f = fopen(caminho, "r");
-    if (!f)
-        return;
-    while (fgets(linha, sizeof linha, f)) {
-        char *nl = strchr(linha, '\n');
-        if (nl) *nl = '\0';
-        if (!strncmp(linha, "audio=", 6))
-            snprintf(est_audio, sizeof est_audio, "%.20s", linha + 6);
-    }
-    fclose(f);
-}
-
-/* A ponte de video esta de pe? Le o pidfile que o camera-rede escreve e
- * confere se o processo vive. E so um open + kill(0), sem fork: chamar
- * "camera-rede status" a cada tick custaria um shell por segundo. */
-static int camera_ligada(void)
-{
-    const char *rt = getenv("XDG_RUNTIME_DIR");
-    char caminho[256];
-    FILE *f;
-    int pid = 0;
-
-    snprintf(caminho, sizeof caminho, "%s/camera-rede-local.pid",
-             rt && *rt ? rt : "/run/user/1000");
-    f = fopen(caminho, "r");
-    if (!f)
-        return 0;
-    if (fscanf(f, "%d", &pid) != 1)
-        pid = 0;
-    fclose(f);
-    return pid > 0 && kill(pid, 0) == 0;
-}
-
-/* "Audio: Linux" quando esta aqui, "Audio: Win" quando esta no Windows,
- * "Audio: --" quando falta o 'usbipd bind' ou o aparelho esta desligado.
- *
- * A camera nao usa esse vocabulario: ela nunca "esta aqui". "Camera: Rede"
- * significa que a ponte esta transmitindo; "Camera: Win", que esta desligada e
- * o Windows tem a camera livre. */
-static void rotulo_usb(const Item *it, char *fora, size_t n)
-{
-    const char *lado;
-
-    if (it->pendente) {
-        lado = "...";
-    } else if (!strcmp(it->dev, "camera")) {
-        lado = camera_ligada() ? "Rede" : "Win";
-    } else {
-        if (!strcmp(est_audio, "linux"))        lado = "Linux";
-        else if (!strcmp(est_audio, "windows")) lado = "Win";
-        else                                    lado = "--";
-    }
-
-    snprintf(fora, n, "%s: %s", it->rotulo, lado);
-}
+#define N_ITENS ((int) (sizeof itens / sizeof itens[0]))
 
 /* ---- utilidades ------------------------------------------------------- */
 
@@ -373,250 +145,10 @@ static void solta(const char *cmd)
     }
 }
 
-/* Cita um texto para o shell, com a regra do apostrofo: fecha a aspa, escapa,
- * reabre. Existe porque o nome da coisa e um NOME DE ARQUIVO escolhido por voce -
- * "Assassin's Creed.lnk" e um nome perfeitamente normal, e sem isto o comando
- * sairia partido no meio. */
-static void cita(char *fora, size_t n, const char *s)
-{
-    size_t o = 0;
-
-    if (n < 3) { if (n) fora[0] = '\0'; return; }
-    fora[o++] = '\'';
-    for (; *s && o + 5 < n; s++) {
-        if (*s == '\'') { memcpy(fora + o, "'\\''", 4); o += 4; }
-        else            { fora[o++] = *s; }
-    }
-    fora[o++] = '\'';
-    fora[o]   = '\0';
-}
-
 static void acao_desligar(void)
 {
     /* o proprio linux-desktop-down pergunta antes, via zenity */
     solta("linux-desktop-down");
-}
-
-/* Clique ou arrasto num controle de volume. No rotulo alterna o mudo; na calha
- * ajusta o nivel.
- *
- * O valor local e atualizado na hora e o pactl e chamado solto: assim o cursor
- * acompanha o mouse sem esperar processo nenhum. O tick corrige depois se algo
- * mudou o volume por fora. */
-static void aplicar_volume(Item *it, int mx)
-{
-    int e_sink = !strcmp(it->dev, "sink");
-    int calha_x = it->x + VOL_ROTULO + GAP;
-    int util = VOL_CALHA - 8;
-    char cmd[160];
-    int v;
-
-    if (mx >= it->x + it->larg - VOL_SETA) {  /* seta: menu de dispositivos */
-        abrir_popup(it);
-        return;
-    }
-
-    if (mx < it->x + VOL_ROTULO) {          /* rotulo: alterna o mudo */
-        int novo = e_sink ? !mudo_sink : !mudo_source;
-        if (e_sink) mudo_sink = novo; else mudo_source = novo;
-        snprintf(cmd, sizeof cmd, "pactl set-%s-mute @DEFAULT_%s@ %d",
-                 e_sink ? "sink" : "source", e_sink ? "SINK" : "SOURCE", novo);
-        solta(cmd);
-        desenhar();
-        return;
-    }
-
-    v = ((mx - calha_x - 4) * 100 + util / 2) / (util > 0 ? util : 1);
-    if (v < 0)   v = 0;
-    if (v > 100) v = 100;
-
-    if (e_sink) vol_sink = v; else vol_source = v;
-    snprintf(cmd, sizeof cmd, "pactl set-%s-volume @DEFAULT_%s@ %d%%",
-             e_sink ? "sink" : "source", e_sink ? "SINK" : "SOURCE", v);
-    solta(cmd);
-    desenhar();
-}
-
-/* ---- o menu de dispositivos --------------------------------------------- */
-
-static void desenhar_popup(void)
-{
-    int i;
-
-    if (!pop)
-        return;
-    alvo = pop;
-    levantado(0, 0, pop_w, pop_h);
-
-    for (i = 0; i < pop_n; i++) {
-        int y = 2 + i * POP_LINHA;
-        int w = XTextWidth(fonte, pop_rot[i], strlen(pop_rot[i]));
-
-        if (i == pop_sob)
-            gravado(2, y, pop_w - 4, POP_LINHA);
-
-        /* O que esta em uso leva um marcador de texto, nao cor nova: a paleta
-         * tem cinco cores e nenhuma sobra para "estado". */
-        XSetFont(dpy, gc, fonte->fid);
-        XSetForeground(dpy, gc, TINTA);
-        XDrawString(dpy, alvo, gc, 8, y + POP_LINHA / 2 + 4,
-                    pop_atual[i] ? ">" : " ", 1);
-        XDrawString(dpy, alvo, gc, 20, y + POP_LINHA / 2 + 4,
-                    pop_rot[i], strlen(pop_rot[i]));
-        (void) w;
-    }
-    XFlush(dpy);
-}
-
-static void fechar_popup(void)
-{
-    if (!pop)
-        return;
-    XUngrabPointer(dpy, CurrentTime);
-    XDestroyWindow(dpy, pop);
-    pop = 0;
-    pop_sob = -1;
-}
-
-static void abrir_popup(Item *it)
-{
-    char cmd[160], linha[512];
-    XSetWindowAttributes at;
-    FILE *f;
-    int larg = 120, bx, by, mx, my, mw, mh;
-
-    fechar_popup();
-    pop_tipo = it->tipo;
-
-    /* Menu do botao direito num atalho de aplicativo. E o unico menu que a barra
-     * monta sozinha, sem perguntar a ninguem: e uma linha so.
-     *
-     * POR QUE UM MENU, E NAO REMOVER DIRETO. A barra mora na borda de baixo da
-     * tela, que e onde o ponteiro passa o tempo todo; um botao direito perdido
-     * apagaria um atalho sem aviso. Com o menu e preciso clicar de novo, e
-     * clicar fora cancela - a mesma mecanica dos outros dois menus, entao nao ha
-     * gesto novo para aprender. */
-    if (it->tipo == BOTAO_APP) {
-        snprintf(pop_id[0],  sizeof pop_id[0],  "%s", it->id);
-        snprintf(pop_rot[0], sizeof pop_rot[0], "Tirar %.90s da barra", it->txt);
-        pop_atual[0] = 0;
-        pop_n = 1;
-        larg = XTextWidth(fonte, pop_rot[0], strlen(pop_rot[0])) + 32;
-        goto montar;
-    }
-
-    if (it->tipo == BOTAO_COISAS) {
-        snprintf(cmd, sizeof cmd, "abrir-windows --listar-coisas 2>/dev/null");
-    } else {
-        snprintf(pop_lado, sizeof pop_lado, "%s",
-                 !strcmp(it->dev, "sink") ? "saida" : "entrada");
-        snprintf(cmd, sizeof cmd, "audio-dispositivos listar %s 2>/dev/null",
-                 pop_lado);
-    }
-
-    pop_n = 0;
-    f = popen(cmd, "r");
-    if (!f)
-        return;
-    while (pop_n < MAX_POP && fgets(linha, sizeof linha, f)) {
-        char *t1 = strchr(linha, '\t'), *t2;
-        int w;
-
-        if (!t1) continue;
-        *t1 = '\0';
-        t2 = strchr(t1 + 1, '\t');
-        if (!t2) continue;
-        *t2 = '\0';
-        { char *nl = strchr(t2 + 1, '\n'); if (nl) *nl = '\0'; }
-
-        snprintf(pop_id[pop_n],  sizeof pop_id[0],  "%.286s", linha);
-        snprintf(pop_rot[pop_n], sizeof pop_rot[0], "%.118s", t2 + 1);
-        pop_atual[pop_n] = atoi(t1 + 1);
-
-        w = XTextWidth(fonte, pop_rot[pop_n], strlen(pop_rot[pop_n])) + 32;
-        if (w > larg) larg = w;
-        pop_n++;
-    }
-    pclose(f);
-
-    /* Pasta vazia (ou nao encontrada) abriria um menu de zero linha, e o clique
-     * pareceria um botao morto. Uma linha de aviso, com id vazio para o
-     * escolher_popup a ignorar, diz o que fazer. */
-    if (pop_n == 0 && it->tipo == BOTAO_COISAS) {
-        pop_id[0][0] = '\0';
-        snprintf(pop_rot[0], sizeof pop_rot[0],
-                 "ponha um atalho ou arquivo na pasta Coisas");
-        pop_atual[0] = 0;
-        larg = XTextWidth(fonte, pop_rot[0], strlen(pop_rot[0])) + 32;
-        pop_n = 1;
-    }
-    if (pop_n == 0)
-        return;
-
-montar:
-    pop_w = larg;
-    pop_h = pop_n * POP_LINHA + 4;
-
-    /* Abre ACIMA da barra: ela vive na base da tela, entao para baixo nao ha
-     * espaco. E prende no monitor para o menu nao vazar pela lateral. */
-    primario(&mx, &my, &mw, &mh);
-    bx = itens[0].x;                       /* posicao da barra na tela */
-    bx = (LARG >= mw) ? mx : mx + (mw - LARG) / 2;
-    bx += it->x;
-    if (bx + pop_w > mx + mw) bx = mx + mw - pop_w;
-    if (bx < mx) bx = mx;
-    by = my + mh - ALTURA - pop_h;
-
-    at.override_redirect = True;
-    at.background_pixel  = FACE;
-    at.event_mask        = ExposureMask | ButtonPressMask | PointerMotionMask;
-    pop = XCreateWindow(dpy, DefaultRootWindow(dpy), bx, by, pop_w, pop_h, 0,
-                        CopyFromParent, InputOutput, CopyFromParent,
-                        CWOverrideRedirect | CWBackPixel | CWEventMask, &at);
-    XMapRaised(dpy, pop);
-
-    /* owner_events False: assim TODO clique vem para ca, inclusive fora do
-     * menu - e e assim que ele fecha ao clicar em qualquer outro lugar. */
-    XGrabPointer(dpy, pop, False,
-                 ButtonPressMask | PointerMotionMask | ButtonReleaseMask,
-                 GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
-    desenhar_popup();
-}
-
-static void escolher_popup(int i)
-{
-    char cmd[512], q[400];
-
-    if (i >= 0 && i < pop_n && pop_id[i][0]) {
-        cita(q, sizeof q, pop_id[i]);
-        if (pop_tipo == BOTAO_APP)
-            /* o apps.conf muda; o tick ve o mtime e remonta a barra */
-            snprintf(cmd, sizeof cmd, "barra-apps remover %s", q);
-        else if (pop_tipo == BOTAO_COISAS)
-            /* O abrir-windows faz o resto sozinho: pergunta o monitor, encolhe a
-             * sessao, abre e devolve o multimonitor quando voce fechar. A barra
-             * so passa o nome. Solto, porque ele vive enquanto a coisa estiver
-             * aberta - seja um jogo ou um .docx no Word. */
-            snprintf(cmd, sizeof cmd, "abrir-windows %s", q);
-        else
-            snprintf(cmd, sizeof cmd, "audio-dispositivos usar %s %s",
-                     pop_lado, q);
-        solta(cmd);
-    }
-    fechar_popup();
-}
-
-/* mtime do cache: e assim que sabemos que o transferir-usb terminou, sem
- * precisar esperar por ele (o attach leva segundos e travaria a barra) */
-static time_t cache_mtime(void)
-{
-    const char *rt = getenv("XDG_RUNTIME_DIR");
-    char caminho[256];
-    struct stat st;
-
-    snprintf(caminho, sizeof caminho, "%s/transferir-usb.estado",
-             rt && *rt ? rt : "/run/user/1000");
-    return stat(caminho, &st) == 0 ? st.st_mtime : 0;
 }
 
 /* ---- desenho ---------------------------------------------------------- */
@@ -624,7 +156,7 @@ static time_t cache_mtime(void)
 static void linha(int x0, int y0, int x1, int y1, unsigned long c)
 {
     XSetForeground(dpy, gc, c);
-    XDrawLine(dpy, alvo, gc, x0, y0, x1, y1);
+    XDrawLine(dpy, win, gc, x0, y0, x1, y1);
 }
 
 static void levantado(int x, int y, int w, int h)
@@ -632,7 +164,7 @@ static void levantado(int x, int y, int w, int h)
     int x1 = x + w - 1, y1 = y + h - 1;
 
     XSetForeground(dpy, gc, FACE);
-    XFillRectangle(dpy, alvo, gc, x, y, w, h);
+    XFillRectangle(dpy, win, gc, x, y, w, h);
     linha(x, y, x1, y, LUZ);                       /* topo */
     linha(x, y, x, y1, LUZ);                       /* esquerda */
     linha(x, y1, x1, y1, BORDA);                   /* baixo, externo */
@@ -651,7 +183,7 @@ static void gravado(int x, int y, int w, int h)
      * ficar MAIS ESCURO que a face, e nao mais claro. Era o unico lugar onde a
      * troca de tema nao era so trocar constante. */
     XSetForeground(dpy, gc, POCO);
-    XFillRectangle(dpy, alvo, gc, x, y, w, h);
+    XFillRectangle(dpy, win, gc, x, y, w, h);
     linha(x, y, x1, y, SOMBRA);
     linha(x, y, x, y1, SOMBRA);
     linha(x + 1, y + 1, x1 - 1, y + 1, BORDA);
@@ -666,13 +198,12 @@ static void texto(int cx, int cy, const char *s, XFontStruct *f)
 
     XSetFont(dpy, gc, f->fid);
     XSetForeground(dpy, gc, TINTA);
-    XDrawString(dpy, alvo, gc, cx - w / 2,
+    XDrawString(dpy, win, gc, cx - w / 2,
                 cy + (f->ascent - f->descent) / 2, s, strlen(s));
 }
 
 static void desenhar(void)
 {
-    alvo = win;
     char hm[8];
     time_t agora = time(NULL);
     struct tm *t = localtime(&agora);
@@ -683,70 +214,13 @@ static void desenhar(void)
 
     strftime(hm, sizeof hm, "%H:%M", t);
 
-    for (i = 0; i < n_itens; i++) {
+    for (i = 0; i < N_ITENS; i++) {
         Item *it = &itens[i];
         int cx = it->x + it->larg / 2;
 
         if (it->tipo == RELOGIO) {
             gravado(it->x, PAD + 1, it->larg, ALTURA - 2 * (PAD + 1));
             texto(cx, ALTURA / 2, hm, mono);
-        } else if (it->tipo == BOTAO_USB) {
-            char r[48];
-            rotulo_usb(it, r, sizeof r);
-            levantado(it->x, PAD, it->larg, ALTURA - 2 * PAD);
-            texto(cx, ALTURA / 2, r, fonte);
-        } else if (it->tipo == VOLUME) {
-            int e_sink = !strcmp(it->dev, "sink");
-            int v     = e_sink ? vol_sink  : vol_source;
-            int mudo  = e_sink ? mudo_sink : mudo_source;
-            int cx_r  = it->x + VOL_ROTULO;          /* fim do rotulo */
-            int calha_x = cx_r + GAP;
-            int calha_y = ALTURA / 2 - 5;
-            int util, pos;
-
-            /* O rotulo e o botao de mudo: afundado = mudo. Nao inventa cor
-             * nova para o estado - usa o bisel, como o resto da barra. */
-            if (mudo)
-                gravado(it->x, PAD, VOL_ROTULO, ALTURA - 2 * PAD);
-            else
-                levantado(it->x, PAD, VOL_ROTULO, ALTURA - 2 * PAD);
-            texto(it->x + VOL_ROTULO / 2, ALTURA / 2, it->rotulo, fonte);
-
-            /* calha gravada */
-            gravado(calha_x, calha_y, VOL_CALHA, 10);
-
-            if (v < 0)
-                continue;                 /* sem PulseAudio: calha vazia */
-
-            /* cursor levantado, transbordando a calha como num Motif */
-            util = VOL_CALHA - 8;
-            pos  = calha_x + 1 + (util * v) / 100;
-            levantado(pos, calha_y - 3, 7, 16);
-
-            /* seta do menu de dispositivos, no canto direito */
-            {
-                int sx = it->x + it->larg - VOL_SETA;
-                int cxs = sx + VOL_SETA / 2, cys = ALTURA / 2;
-                XPoint tri[3];
-
-                levantado(sx, PAD, VOL_SETA, ALTURA - 2 * PAD);
-                tri[0].x = cxs - 3; tri[0].y = cys - 1;
-                tri[1].x = cxs + 3; tri[1].y = cys - 1;
-                tri[2].x = cxs;     tri[2].y = cys + 3;
-                XSetForeground(dpy, gc, TINTA);
-                XFillPolygon(dpy, alvo, gc, tri, 3, Convex, CoordModeOrigin);
-            }
-        } else if (it->tipo == BOTAO_APP) {
-            levantado(it->x, PAD, it->larg, ALTURA - 2 * PAD);
-            if (it->icone)
-                /* o Pixmap ja esta na profundidade da tela: copiar e trabalho
-                 * do servidor, nao ha pixel passando pelo socket aqui */
-                XCopyArea(dpy, it->icone, alvo, gc, 0, 0,
-                          it->ic_lado, it->ic_lado,
-                          it->x + (it->larg - it->ic_lado) / 2,
-                          (ALTURA - it->ic_lado) / 2);
-            else
-                texto(cx, ALTURA / 2, it->rotulo, fonte);
         } else {
             levantado(it->x, PAD, it->larg, ALTURA - 2 * PAD);
             texto(cx, ALTURA / 2, it->rotulo, fonte);
@@ -755,72 +229,19 @@ static void desenhar(void)
     XFlush(dpy);
 }
 
-/* Redesenha so quando o que aparece na tela muda. Sem isto, redesenhar a cada
- * 2 s faria a barra piscar de leve (nao ha duplo buffer aqui). */
+/* Redesenha so quando o que aparece na tela muda - ou seja, quando o minuto
+ * vira. Sem isto, redesenhar a cada acordada faria a barra piscar de leve (nao
+ * ha duplo buffer aqui). */
 static void tick(void)
 {
-    static char antes[128] = "";
-    static int  ciclos = 0;
-    char agora[128], hm[8];
+    static char antes[8] = "";
+    char hm[8];
     time_t t = time(NULL);
-    int i, algum_pendente = 0, cam_agora;
-
-    /* Voce fixou ou tirou um app pelo "[+]". Um stat num arquivo local nao
-     * custa nada, e e o que faz a barra mudar sozinha em ate 2 s - sem
-     * reiniciar e sem a barra precisar falar com o zenity. */
-    if (apps_mtime() != apps_ref) {
-        recarregar_apps();
-        return;                  /* ja redesenhou tudo */
-    }
-
-    /* Revalida o estado de verdade a cada ~30 s. O cache so era reescrito
-     * quando NOS mexiamos, e por isso ficava mentindo quando o estado mudava
-     * por fora: um detach feito do lado Windows, o aparelho desplugado, ou um
-     * usbipd que nao confirmou. Visto em 30/07/2026, com o cache dizendo
-     * "camera=windows" enquanto o usbipd a mostrava como Attached.
-     *
-     * Solto, nunca em linha: a chamada de interop leva ~1 s e travaria a barra.
-     * Nao mexemos em nada aqui - so pedimos que o cache seja reescrito, e o
-     * proximo tick le o valor novo. */
-    if (++ciclos >= 15) {
-        ciclos = 0;
-        solta("transferir-usb estado");
-    }
-
-    ler_cache();
-
-    /* Nao perguntamos o volume no meio de um arrasto: o valor local e o que o
-     * mouse esta ditando, e o pactl ainda pode estar respondendo o antigo -
-     * o cursor pularia para tras. */
-    if (arrastando < 0)
-        ler_volumes();
-
-    for (i = 0; i < n_itens; i++)
-        if (itens[i].pendente)
-            algum_pendente = 1;
-
-    /* o transferir-usb reescreve o cache ao terminar; e o nosso sinal de fim */
-    if (algum_pendente && cache_mtime() != mt_ref)
-        for (i = 0; i < n_itens; i++)
-            if (strcmp(itens[i].dev ? itens[i].dev : "", "camera") != 0)
-                itens[i].pendente = 0;
-
-    /* A camera nao passa pelo cache do transferir-usb, entao precisa do proprio
-     * sinal de fim: o estado da ponte ter mudado em relacao ao do clique. */
-    cam_agora = camera_ligada();
-    for (i = 0; i < n_itens; i++)
-        if (itens[i].dev && !strcmp(itens[i].dev, "camera") &&
-            itens[i].pendente && cam_agora != cam_ref)
-            itens[i].pendente = 0;
 
     strftime(hm, sizeof hm, "%H:%M", localtime(&t));
-    snprintf(agora, sizeof agora, "%s|%s|%d|%d|%d%d|%d%d",
-             hm, est_audio, cam_agora, algum_pendente,
-             vol_sink, mudo_sink, vol_source, mudo_source);
-
-    if (strcmp(agora, antes) != 0) {
+    if (strcmp(hm, antes) != 0) {
         desenhar();
-        snprintf(antes, sizeof antes, "%s", agora);
+        snprintf(antes, sizeof antes, "%s", hm);
     }
 }
 
@@ -1026,10 +447,10 @@ static void layout(void)
     int i, x = PAD;
 
     LARG = 2 * PAD;
-    for (i = 0; i < n_itens; i++)
+    for (i = 0; i < N_ITENS; i++)
         LARG += itens[i].larg + (i ? GAP : 0);
 
-    for (i = 0; i < n_itens; i++) {
+    for (i = 0; i < N_ITENS; i++) {
         itens[i].x = x;
         x += itens[i].larg + GAP;
     }
@@ -1049,174 +470,11 @@ static void dicas_de_tamanho(void)
     XSetWMNormalHints(dpy, win, &sh);
 }
 
-/* Monta a barra inteira: fixos da esquerda, atalhos de aplicativo, fixos da
- * direita. Chamada no arranque e a cada mudanca do apps.conf. */
-static void montar_itens(void)
-{
-    char linha[512];
-    FILE *f;
-    int i, n = 0;
-
-    for (i = 0; i < n_itens; i++)          /* os Pixmaps antigos nao servem */
-        if (itens[i].icone)
-            XFreePixmap(dpy, itens[i].icone);
-
-    memset(itens, 0, sizeof itens);
-    for (i = 0; i < N_ANTES; i++)
-        itens[n++] = fixos_antes[i];
-
-    /* Mesmo formato tabulado dos menus: <id>\t<nome>\t<arquivo de pixels>. */
-    f = popen("barra-apps listar 2>/dev/null", "r");
-    if (f) {
-        while (n < N_ANTES + MAX_APPS && fgets(linha, sizeof linha, f)) {
-            char *t1 = strchr(linha, '\t'), *t2;
-            Item *it = &itens[n];
-
-            if (!t1) continue;
-            *t1 = '\0';
-            t2 = strchr(t1 + 1, '\t');
-            if (!t2) continue;
-            *t2 = '\0';
-            { char *nl = strchr(t2 + 1, '\n'); if (nl) *nl = '\0'; }
-
-            it->tipo = BOTAO_APP;
-            snprintf(it->id,  sizeof it->id,  "%.286s", linha);
-            snprintf(it->txt, sizeof it->txt, "%.62s",  t1 + 1);
-            it->rotulo  = it->txt;         /* aponta para dentro do proprio item */
-            it->icone   = carregar_icone(t2 + 1, APP_LADO);
-            it->ic_lado = APP_LADO;
-            /* Sem icone o botao nao some: vira um botao de texto com o nome do
-             * app. Um icone que nao converteu nao pode custar o atalho. */
-            it->larg    = it->icone ? APP_LARG
-                        : XTextWidth(fonte, it->txt, strlen(it->txt)) + 12;
-            n++;
-        }
-        pclose(f);
-    }
-
-    for (i = 0; i < N_DEPOIS; i++)
-        itens[n++] = fixos_depois[i];
-
-    n_itens  = n;
-    apps_ref = apps_mtime();
-    layout();
-}
-
-/* O apps.conf mudou (voce fixou ou tirou um app pelo "[+]"). A barra muda de
- * largura, entao nao basta redesenhar: e preciso reavisar o tamanho, redimen-
- * sionar, reposicionar - e o reposicionar refaz o strut, que depende da
- * largura. */
-static void recarregar_apps(void)
-{
-    montar_itens();
-    dicas_de_tamanho();
-    XResizeWindow(dpy, win, LARG, ALTURA);
-    reposicionar();
-    desenhar();
-}
-
-/* ---- atalhos de aplicativo -----------------------------------------------
- *
- * A DIVISAO. A barra nao sabe o que e um aplicativo: ela pede a lista ao
- * barra-apps, desenha os icones e devolve o id que voce clicou. .desktop, tema
- * de icones e linha de comando sao problema de la. Mesma divisao do
- * audio-dispositivos e do abrir-windows.
- *
- * POR QUE NAO HA libpng AQUI. Estes sao os primeiros pixels de verdade que a
- * barra desenha, e seria natural linkar uma biblioteca de imagem — seria
- * tambem o fim da premissa do arquivo (Xlib cru, 2,6 MB de RSS). Em vez disso o
- * barra-apps converte o icone UMA vez, na hora em que voce o fixa, e deixa no
- * cache um arquivo de PIXELS CRUS: lado*lado*3 bytes, RGB de 8 bits, sem
- * cabecalho, sem compressao e sem alfa (o alfa foi achatado sobre o #DEDEDE da
- * face, que e chapado, entao o resultado e identico ao de compor de verdade).
- * Ler isso e um fread. Nenhuma dependencia nova entrou.
- */
-
-/* Poe um componente 0-255 na posicao que ele ocupa na mascara do visual. Sem
- * isto seria preciso chumbar "0xRRGGBB", e num servidor com outro arranjo o
- * icone sairia com as cores trocadas — falha feia e silenciosa. */
-static unsigned long componente(unsigned long mascara, unsigned v)
-{
-    int desl = 0, bits = 0;
-    unsigned long m = mascara;
-
-    if (!mascara)
-        return 0;
-    while (!(m & 1)) { m >>= 1; desl++; }
-    while (m & 1)    { m >>= 1; bits++; }
-    if (bits < 8)
-        v >>= (8 - bits);
-    return ((unsigned long) v << desl) & mascara;
-}
-
-/* O Pixmap e montado UMA vez, no carregamento. Cada redesenho depois e so um
- * XCopyArea, que roda inteiro dentro do servidor X. */
-static Pixmap carregar_icone(const char *caminho, int lado)
-{
-    int tela = DefaultScreen(dpy);
-    Visual *vis = DefaultVisual(dpy, tela);
-    int prof = DefaultDepth(dpy, tela);
-    size_t n = (size_t) lado * lado * 3;
-    unsigned char *cru;
-    XImage *img;
-    Pixmap pm;
-    FILE *f;
-    int x, y;
-
-    if (!caminho || !*caminho)
-        return 0;
-    f = fopen(caminho, "rb");
-    if (!f)
-        return 0;
-
-    cru = malloc(n);
-    /* Tamanho errado = arquivo truncado ou de outro lado; melhor cair no rotulo
-     * de texto do que desenhar lixo. */
-    if (!cru || fread(cru, 1, n, f) != n) { free(cru); fclose(f); return 0; }
-    fclose(f);
-
-    img = XCreateImage(dpy, vis, prof, ZPixmap, 0, NULL, lado, lado, 32, 0);
-    if (!img) { free(cru); return 0; }
-    img->data = calloc((size_t) img->bytes_per_line, lado);
-    if (!img->data) { XDestroyImage(img); free(cru); return 0; }
-
-    for (y = 0; y < lado; y++)
-        for (x = 0; x < lado; x++) {
-            const unsigned char *p = cru + ((size_t) y * lado + x) * 3;
-            XPutPixel(img, x, y,
-                      componente(vis->red_mask,   p[0]) |
-                      componente(vis->green_mask, p[1]) |
-                      componente(vis->blue_mask,  p[2]));
-        }
-
-    pm = XCreatePixmap(dpy, DefaultRootWindow(dpy), lado, lado, prof);
-    XPutImage(dpy, pm, gc, img, 0, 0, 0, 0, lado, lado);
-    XDestroyImage(img);          /* leva o img->data junto */
-    free(cru);
-    return pm;
-}
-
-static const char *caminho_apps(void)
-{
-    static char c[256];
-    const char *h = getenv("HOME");
-
-    if (!c[0])
-        snprintf(c, sizeof c, "%s/.config/linux-fullscreen/apps.conf",
-                 h ? h : "");
-    return c;
-}
-
-static time_t apps_mtime(void)
-{
-    struct stat st;
-    return stat(caminho_apps(), &st) == 0 ? st.st_mtime : 0;
-}
-
 /* Poe a barra no lugar certo do monitor primario. Chamada no arranque e a cada
  * mudanca de monitor - o abrir-windows encolhe a sessao para um monitor so
- * enquanto a coisa esta aberta, e sem isto a barra ficaria fora da tela ate o proximo
- * login. Tambem cobre monitor plugado/desplugado e reconexao com layout novo. */
+ * enquanto a coisa esta aberta, e sem isto a barra ficaria fora da tela ate o
+ * proximo login. Tambem cobre monitor plugado/desplugado e reconexao com layout
+ * novo. */
 static void reposicionar(void)
 {
     int mx, my, mw, mh, bx, by;
@@ -1239,7 +497,7 @@ int main(void)
     XSetWindowAttributes at;
     int rr_base, rr_err;
 
-    signal(SIGCHLD, SIG_IGN);       /* nao deixar zumbi dos comandos soltos */
+    signal(SIGCHLD, SIG_IGN);       /* nao deixar zumbi do linux-desktop-down */
 
     dpy = XOpenDisplay(NULL);
     if (!dpy) {
@@ -1265,7 +523,7 @@ int main(void)
     SOMBRA = cor("#1A1A1A");   /* sombra interna */
     BORDA  = cor("#101010");   /* borda externa */
     TINTA  = cor("#E8E8E8");   /* texto */
-    POCO   = cor("#1E1E1E");   /* fundo de campo afundado: relogio, calha, mudo */
+    POCO   = cor("#1E1E1E");   /* fundo de campo afundado: o relogio */
 #else
     FACE   = cor("#DEDEDE");
     LUZ    = cor("#FFFFFF");
@@ -1300,21 +558,13 @@ int main(void)
      * acima. A barra precisa ser gerenciada pelo xfwm4 para que o strut valha;
      * o tipo DOCK e quem devolve o "sem moldura, sempre acima, sem foco". */
     at.background_pixel  = FACE;
-    at.event_mask        = ExposureMask | ButtonPressMask |
-                           ButtonReleaseMask | Button1MotionMask;
+    at.event_mask        = ExposureMask | ButtonPressMask;
 
-    /* Nasce 1x1 e so depois recebe o tamanho certo, porque a ordem aqui e
-     * circular: montar_itens() precisa do gc para converter os icones em
-     * Pixmap, o gc precisa de uma janela, e a largura da janela so e conhecida
-     * DEPOIS de saber quantos atalhos existem. Redimensionar antes de mapear
-     * nao custa nada e nao pisca. */
-    win = XCreateWindow(dpy, DefaultRootWindow(dpy), 0, 0, 1, ALTURA, 0,
+    layout();
+    win = XCreateWindow(dpy, DefaultRootWindow(dpy), 0, 0, LARG, ALTURA, 0,
                         CopyFromParent, InputOutput, CopyFromParent,
                         CWBackPixel | CWEventMask, &at);
     gc = XCreateGC(dpy, win, 0, NULL);
-
-    montar_itens();
-    XResizeWindow(dpy, win, LARG, ALTURA);
 
     /* avisos de mudanca de monitor; sem a extensao, so nao reposiciona */
     if (XRRQueryExtension(dpy, &rr_base, &rr_err))
@@ -1330,13 +580,6 @@ int main(void)
     reposicionar();
     XMapWindow(dpy, win);
 
-    /* O cache vive no XDG_RUNTIME_DIR e morre com a sessao - o que e correto,
-     * porque um 'wsl --shutdown' devolve tudo ao Windows. Mas entao no primeiro
-     * desenho nao ha estado, e os botoes sairiam "--" mesmo com o aparelho
-     * disponivel. Pedimos um refresh aqui, solto: a chamada de interop leva
-     * quase um segundo e nao pode bloquear o arranque da barra. */
-    solta("transferir-usb estado");
-
     for (;;) {
         fd_set fds;
         struct timeval tv;
@@ -1346,49 +589,6 @@ int main(void)
             XEvent ev;
             XNextEvent(dpy, &ev);
 
-            /* Com o menu aberto o ponteiro esta capturado (owner_events
-             * False), entao TODO evento de mouse chega aqui - inclusive os de
-             * fora do menu, e e assim que ele fecha ao clicar em outro lugar. */
-            if (pop) {
-                if (ev.type == Expose && ev.xany.window == pop) {
-                    desenhar_popup();
-                    continue;
-                }
-                if (ev.type == MotionNotify) {
-                    int novo = -1;
-                    if (ev.xmotion.x >= 0 && ev.xmotion.x < pop_w &&
-                        ev.xmotion.y >= 2 &&
-                        ev.xmotion.y < 2 + pop_n * POP_LINHA)
-                        novo = (ev.xmotion.y - 2) / POP_LINHA;
-                    if (novo < 0 || novo >= pop_n) novo = -1;
-                    if (novo != pop_sob) { pop_sob = novo; desenhar_popup(); }
-                    continue;
-                }
-                if (ev.type == ButtonPress) {
-                    /* A linha vem das COORDENADAS do clique, nao de pop_sob:
-                     * pop_sob so e preenchido por MotionNotify, e um clique
-                     * direto (sem passar por cima antes) nao gera movimento -
-                     * o menu fechava sem escolher nada.
-                     *
-                     * E o teste e por coordenada, nao por janela: com o
-                     * ponteiro capturado em owner_events False, um clique FORA
-                     * tambem chega com window == pop, so que com x/y fora do
-                     * retangulo. */
-                    int lin = -1;
-                    if (ev.xbutton.x >= 0 && ev.xbutton.x < pop_w &&
-                        ev.xbutton.y >= 2 && ev.xbutton.y < 2 + pop_n * POP_LINHA)
-                        lin = (ev.xbutton.y - 2) / POP_LINHA;
-
-                    if (lin >= 0 && lin < pop_n)
-                        escolher_popup(lin);
-                    else
-                        fechar_popup();
-                    continue;
-                }
-                if (ev.type == ButtonRelease)
-                    continue;
-            }
-
             if (ev.type == rr_base + RRScreenChangeNotify) {
                 /* obrigatorio: sem isto o Xlib segue com a tela antiga em cache
                  * e o reposicionamento usa geometria velha */
@@ -1397,82 +597,28 @@ int main(void)
                 desenhar();
             } else if (ev.type == Expose) {
                 desenhar();
-            } else if (ev.type == MotionNotify && arrastando >= 0) {
-                /* Comprime o rastro: o X entrega dezenas de MotionNotify por
-                 * segundo, e cada um viraria um pactl. Fica so o ultimo. */
-                while (XCheckTypedWindowEvent(dpy, win, MotionNotify, &ev))
-                    ;
-                aplicar_volume(&itens[arrastando], ev.xmotion.x);
-            } else if (ev.type == ButtonRelease) {
-                arrastando = -1;
             } else if (ev.type == ButtonPress) {
                 int i;
 
-                /* ATE 31/07/2026 NAO SE OLHAVA QUAL BOTAO ERA, e todos faziam a
-                 * acao do esquerdo: botao direito no icone do Brave abria o
-                 * Brave, botao do meio na calha de volume mexia no volume. Nunca
-                 * incomodou porque nao havia nada ligado ao direito - passou a
-                 * incomodar no instante em que ele virou "tirar da barra". */
-                if (ev.xbutton.button != Button1 &&
-                    ev.xbutton.button != Button3)
+                if (ev.xbutton.button != Button1)
                     continue;
 
-                for (i = 0; i < n_itens; i++) {
+                for (i = 0; i < N_ITENS; i++) {
                     Item *it = &itens[i];
 
                     if (ev.xbutton.x < it->x ||
                         ev.xbutton.x >= it->x + it->larg)
                         continue;
-
-                    /* O direito so tem sentido nos atalhos de aplicativo; nos
-                     * outros itens ele nao faz nada, em vez de fazer a acao do
-                     * esquerdo. */
-                    if (ev.xbutton.button == Button3) {
-                        if (it->tipo == BOTAO_APP)
-                            abrir_popup(it);
-                        break;
-                    }
-
-                    if (it->tipo == VOLUME) {
-                        aplicar_volume(it, ev.xbutton.x);
-                        arrastando = i;
-                    } else if (it->tipo == BOTAO_COISAS) {
-                        abrir_popup(it);
-                    } else if (it->tipo == BOTAO_APP) {
-                        char cmd[400], q[320];
-                        cita(q, sizeof q, it->id);
-                        snprintf(cmd, sizeof cmd, "barra-apps executar %s", q);
-                        solta(cmd);
-                    } else if (it->tipo == BOTAO_MAIS) {
-                        /* o barra-apps abre a lista pelo zenity e mexe no
-                         * apps.conf; o tick ve o mtime mudar e remonta */
-                        solta("barra-apps escolher");
-                    } else if (it->tipo == BOTAO_USB) {
-                        char cmd[128];
-                        /* a camera nao e mais transferencia USB: e a ponte de
-                         * rede. Ver o comentario da tabela 'itens'. */
-                        if (!strcmp(it->dev, "camera")) {
-                            snprintf(cmd, sizeof cmd, "camera-rede alternar");
-                            cam_ref = camera_ligada();
-                        } else {
-                            snprintf(cmd, sizeof cmd,
-                                     "transferir-usb %s alternar", it->dev);
-                            mt_ref = cache_mtime();
-                        }
-                        it->pendente = 1;
-                        solta(cmd);
-                        desenhar();          /* mostra o "..." na hora */
-                    } else if (it->acao) {
+                    if (it->acao)
                         it->acao();
-                    }
                     break;
                 }
             }
         }
 
-        /* Acorda a cada 2 s, mas so redesenha se algo mudou de verdade - o
-         * relogio, o estado de um dispositivo, ou um "..." que terminou. Ler o
-         * cache e um fopen de 30 bytes, nao ha custo em olhar com frequencia. */
+        /* Acorda a cada 2 s e so redesenha quando o minuto vira. Nao ha mais
+         * nada a vigiar aqui: volume, USB e atalhos foram para a doca do
+         * panorama, e o relogio e a unica coisa que muda sozinha. */
         FD_ZERO(&fds);
         FD_SET(fd, &fds);
         tv.tv_sec = 2;

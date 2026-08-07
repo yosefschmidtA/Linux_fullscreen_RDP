@@ -1,33 +1,38 @@
 #!/usr/bin/env bash
 #
-# barra-apps — os atalhos de aplicativo da barra de tarefas.
+# barra-apps — os atalhos de aplicativo da DOCA do panorama.
 #
-#   barra-apps listar          o que esta fixado, para a barra desenhar
+#   barra-apps listar          o que esta fixado, para o painel desenhar
 #   barra-apps escolher        abre a lista dos apps instalados e alterna
 #   barra-apps executar <id>   lanca o app
-#   barra-apps remover <id>    tira da barra (o botao direito no icone)
+#   barra-apps remover <id>    tira da doca (o botao direito no icone)
 #   barra-apps icone <id>      (re)gera so o icone, util para depurar
 #
-# COMO A BARRA E ESTE SCRIPT SE DIVIDEM. A barra nao sabe o que e um aplicativo:
-# ela pede a lista, desenha os icones e devolve o id que voce clicou. Todo o
-# conhecimento de .desktop, de tema de icones e de linha de comando vive aqui.
-# E a mesma divisao do audio-dispositivos e do jogo-windows.
+# O nome do script e da barra porque foi la que ele nasceu. Desde 07/08/2026 os
+# atalhos moram na doca do panorama (a tela que a tecla Win abre) e a barra so
+# tem relogio e desligar; o protocolo entre os dois lados nao mudou uma linha, e
+# por isso o nome ficou.
+#
+# COMO O PAINEL E ESTE SCRIPT SE DIVIDEM. O painel nao sabe o que e um
+# aplicativo: ele pede a lista, desenha os icones e devolve o id que voce
+# clicou. Todo o conhecimento de .desktop, de tema de icones e de linha de
+# comando vive aqui. E a mesma divisao do audio-dispositivos e do abrir-windows.
 #
 # POR QUE .desktop, E NAO UMA LISTA DE COMANDOS. O .desktop ja traz o nome
 # bonito, o comando certo (com o caminho absoluto do binario) e o nome do icone.
 # Fixar um app e guardar UM caminho de .desktop; se o pacote for atualizado e o
 # binario mudar de lugar, o atalho continua certo sozinho.
 #
-# O ICONE E CONVERTIDO AQUI, NA HORA DE FIXAR — nao pela barra, e nao a cada
-# desenho. A barra e Xlib cru, sem libpng e sem nenhuma biblioteca de imagem, e
-# a intencao e que continue assim (veja "Por que Xlib cru" no README). Entao o
-# icone vira um arquivo de PIXELS CRUS, 20x20 RGB de 8 bits = 1200 bytes exatos,
-# que a barra le com um fread e joga num XImage. Zero decodificacao no C.
+# O ICONE E CONVERTIDO AQUI, NA HORA DE FIXAR — nao pelo painel, e nao a cada
+# desenho. O panorama tem Xft, mas nenhuma biblioteca de IMAGEM, e a intencao e
+# que continue assim. Entao o icone vira um arquivo de PIXELS CRUS, 32x32 RGB de
+# 8 bits = 3072 bytes exatos, que o painel le com um fread e joga num XImage.
+# Zero decodificacao no C. Mesma divisao que o bancada.c faz com o `convert`.
 #
-# A transparencia tambem morre aqui: o -flatten achata o alfa sobre a cor da
-# FACE da barra (veja $FACE abaixo). Assim a barra nao precisa saber o que e
-# alfa — e como o fundo dela e chapado, o resultado e igual ao de compor de
-# verdade. O preco e que a cor achatada tem de CASAR com a paleta da barra:
+# A transparencia tambem morre aqui: o -flatten achata o alfa sobre a cor do
+# BOTAO da doca (veja $FACE abaixo). Assim o painel nao precisa saber o que e
+# alfa — e como o fundo do botao e chapado, o resultado e igual ao de compor de
+# verdade. O preco e que a cor achatada tem de CASAR com a paleta do painel:
 # achatar sobre claro e desenhar sobre escuro poe um quadrado claro em volta de
 # cada icone. Por isso a cor entra no nome do arquivo de cache - trocar a
 # paleta invalida os icones sozinho, sem passo manual nenhum.
@@ -38,11 +43,14 @@ CFG="$HOME/.config/linux-fullscreen"
 LISTA="$CFG/apps.conf"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/linux-fullscreen/apps"
 
-LADO=20            # o icone e quadrado; a barra tem 28px de altura
+# 32 desde 07/08/2026 (era 20, do tempo em que o icone tinha de caber nos 28px
+# de altura da barra). Na doca do painel ha 44px de botao e o icone de 20
+# aparecia perdido no meio.
+LADO=32
 BRUTO=$(( LADO * LADO * 3 ))
 
-# TEM de ser a mesma cor do FACE do barra-tarefas.c (procure BARRA_ESCURA la).
-# Mudou la, muda aqui: o cache se refaz sozinho porque a cor esta no nome.
+# TEM de ser a mesma cor do P_CARTAO do panorama.c, que e a face do botao da
+# doca. Mudou la, muda aqui: o cache se refaz sozinho porque a cor esta no nome.
 FACE='#333333'
 
 DIRS_APP=(
@@ -88,10 +96,10 @@ exec_do_app() {   # $1 = .desktop
 }
 
 # --- achar o arquivo do icone ----------------------------------------------
-# Icon= pode ser um caminho absoluto ou um NOME de tema. Procuramos do tamanho
-# mais util para baixo e para cima: 32 e o melhor ponto de partida para reduzir
-# a 20 sem virar borrao, e 16 subiria borrado.
-TAMS=(32x32 48x48 24x24 22x22 64x64 16x16 128x128 256x256 scalable)
+# Icon= pode ser um caminho absoluto ou um NOME de tema. A ordem e por QUALIDADE
+# no destino de 32px, nao por proximidade numerica: 32 casa exato, 48 e 64
+# reduzem limpo, e os menores que 32 vem por ultimo porque AMPLIAR borra.
+TAMS=(32x32 48x48 64x64 128x128 256x256 scalable 24x24 22x22 16x16)
 
 arquivo_do_icone() {   # $1 = nome ou caminho do Icon=
     local ic="$1" d t e
@@ -118,7 +126,7 @@ arquivo_do_icone() {   # $1 = nome ou caminho do Icon=
     return 1
 }
 
-# Gera os 1200 bytes crus. Sai 1 se nao deu — a barra entao cai no rotulo de
+# Gera os $BRUTO bytes crus. Sai 1 se nao deu — o painel entao cai no rotulo de
 # texto, que e sempre um plano B valido.
 gerar_icone() {   # $1 = .desktop  $2 = destino .rgb
     local ic org
@@ -127,8 +135,8 @@ gerar_icone() {   # $1 = .desktop  $2 = destino .rgb
     org=$(arquivo_do_icone "$ic") || return 1
 
     mkdir -p "$(dirname "$2")"
-    # -flatten sobre a cor da face da barra; -resize com "!" para forcar o
-    # quadrado exato (icone nao-quadrado sairia com bytes a menos e a barra
+    # -flatten sobre a face do botao da doca; -resize com "!" para forcar o
+    # quadrado exato (icone nao-quadrado sairia com bytes a menos e o painel
     # rejeitaria o arquivo).
     convert "$org" -background "$FACE" -alpha remove -alpha off \
             -resize "${LADO}x${LADO}!" -depth 8 "rgb:$2" 2>/dev/null || return 1
@@ -137,10 +145,19 @@ gerar_icone() {   # $1 = .desktop  $2 = destino .rgb
 
 id_de() { basename "$1" .desktop; }
 
-# O caminho do icone convertido. A cor da FACE entra no nome: assim trocar a
-# paleta da barra invalida o cache sozinho. Ha TRES chamadores (listar, fixar e
-# o "icone" de depuracao) - por isso e funcao, e nao a expressao repetida.
-caminho_rgb() { printf '%s\n' "$CACHE/$(id_de "$1")-${FACE#\#}.rgb"; }
+# O caminho do icone convertido. Entram no nome a COR do -flatten e o LADO, e os
+# dois pelo mesmo motivo: mudar qualquer um deles invalida o cache sozinho, sem
+# passo manual nenhum. Ha TRES chamadores (listar, fixar e o "icone" de
+# depuracao) - por isso e funcao, e nao a expressao repetida.
+#
+# O LADO entrou em 07/08/2026, junto com o 20 -> 32, e a razao e uma falha
+# SILENCIOSA: o unico teste que o cmd_listar faz no cache e "-s", ou seja "nao
+# esta vazio". Um .rgb de 20x20 tem 1200 bytes e passa nesse teste com folga,
+# entao ele seria servido como se fosse de 32x32; o painel leria menos bytes do
+# que espera, rejeitaria o arquivo e cairia no rotulo de texto - para sempre,
+# porque nada jamais o regeneraria. Sem o lado no nome, trocar o tamanho do
+# icone apaga os icones em vez de aumenta-los.
+caminho_rgb() { printf '%s\n' "$CACHE/$(id_de "$1")-${LADO}-${FACE#\#}.rgb"; }
 
 # --- os fixados ------------------------------------------------------------
 fixados() {   # imprime os caminhos .desktop, na ordem do arquivo
@@ -150,14 +167,14 @@ fixados() {   # imprime os caminhos .desktop, na ordem do arquivo
     done
 }
 
-# Formato para a barra:  <caminho .desktop>\t<nome>\t<arquivo .rgb ou vazio>
+# Formato para o painel:  <caminho .desktop>\t<nome>\t<arquivo .rgb ou vazio>
 cmd_listar() {
     local p rgb velho
     while IFS= read -r p; do
         rgb=$(caminho_rgb "$p")
         if [ ! -s "$rgb" ]; then
-            # sobrou icone achatado sobre outra cor: some com ele, senao o cache
-            # cresceria uma copia por paleta ja usada
+            # sobrou icone de outra cor ou de outro lado: some com ele, senao o
+            # cache cresceria uma copia por paleta e por tamanho ja usados
             for velho in "$CACHE/$(id_de "$p")".rgb "$CACHE/$(id_de "$p")"-*.rgb; do
                 [ -e "$velho" ] && [ "$velho" != "$rgb" ] && rm -f "$velho"
             done
@@ -171,7 +188,7 @@ cmd_remover() {   # $1 = caminho do .desktop
     [ -f "$LISTA" ] || return 0
     grep -vxF "$1" "$LISTA" > "$LISTA.novo" && mv "$LISTA.novo" "$LISTA"
     # O .rgb fica: reencaixar o mesmo app depois nao precisa reconverter, e sao
-    # 1200 bytes. Quem limpa e o proprio cache do sistema, se um dia limpar.
+    # 3072 bytes. Quem limpa e o proprio cache do sistema, se um dia limpar.
 }
 
 cmd_executar() {   # $1 = caminho do .desktop
@@ -227,8 +244,8 @@ cmd_escolher() {
         return 1
     fi
 
-    esc=$(zenity --list --title="Apps da barra" \
-        --text="Clique num app para colocar ou tirar da barra.
+    esc=$(zenity --list --title="Apps da doca" \
+        --text="Clique num app para colocar ou tirar da doca (a tela da tecla Win).
 Os que ja estao la aparecem com [*]." \
         --column="Aplicativo" --width=460 --height=560 \
         "${rotulos[@]}" 2>/dev/null) || return 0
@@ -242,7 +259,7 @@ Os que ja estao la aparecem com [*]." \
         else
             printf '%s\n' "$cam" >> "$LISTA"
             gerar_icone "$cam" "$(caminho_rgb "$cam")" ||
-                msg "aviso: sem icone para $cam; a barra usara o nome"
+                msg "aviso: sem icone para $cam; o painel usara o nome"
         fi
         return 0
     done

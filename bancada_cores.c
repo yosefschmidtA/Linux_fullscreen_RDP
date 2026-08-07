@@ -347,6 +347,8 @@ static void linhas_cabe(int n)
     if (n <= cap_linhas) return;
     cap_linhas = n + n / 2 + 64;
     linhas = realloc(linhas, (size_t) cap_linhas * sizeof *linhas);
+    static int *estados = NULL;
+    estados = realloc(estados, (size_t) cap_linhas * sizeof *estados);
     if (!linhas) morrer("sem memoria");
 }
 
@@ -1237,71 +1239,6 @@ static void texto(XftDraw *dr, int x, int y, const char *s, XftColor *cor)
     XftDrawStringUtf8(dr, cor, fonte, x, y, (const FcChar8 *) s, (int) strlen(s));
 }
 
-static void texto_n(XftDraw *dr, int x, int y, const char *s, int len, XftColor *cor)
-{
-    XftDrawStringUtf8(dr, cor, fonte, x, y, (const FcChar8 *) s, len);
-}
-
-static int is_kw(const char *w, int len) {
-    static const char *kws[] = {
-        "int", "void", "char", "if", "else", "for", "while", "return",
-        "static", "struct", "enum", "const", "size_t", "unsigned", "long", "short",
-        "break", "continue", "switch", "case", "default", "typedef", "sizeof"
-    };
-    int i;
-    for (i = 0; i < (int)(sizeof(kws)/sizeof(kws[0])); i++) {
-        if (len == (int)strlen(kws[i]) && strncmp(w, kws[i], (size_t)len) == 0) return 1;
-    }
-    return 0;
-}
-
-static int is_alpha_num(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
-}
-
-static void desenhar_linha_sintaxe(int y, const char *s, int m_col0) {
-    int i = 0, start = 0;
-    int len = (int)strlen(s);
-    while (i < len) {
-        start = i;
-        int cx = texto_x0() + (colunas_ate(s, start) - m_col0) * avanco;
-        
-        if (s[i] == '/' && i + 1 < len && s[i+1] == '/') {
-            texto_n(dr_ed, cx, y, s + start, len - start, &c_com);
-            break;
-        }
-        if (s[i] == '/' && i + 1 < len && s[i+1] == '*') {
-            i += 2;
-            while (i < len && !(s[i-1] == '*' && s[i] == '/')) i++;
-            if (i < len) i++;
-            texto_n(dr_ed, cx, y, s + start, i - start, &c_com);
-            continue;
-        }
-        if (s[i] == '"' || s[i] == '\'') {
-            char q = s[i++];
-            while (i < len && s[i] != q) {
-                if (s[i] == '\\' && i + 1 < len) i += 2;
-                else i++;
-            }
-            if (i < len) i++;
-            texto_n(dr_ed, cx, y, s + start, i - start, &c_str);
-            continue;
-        }
-        if (is_alpha_num(s[i])) {
-            while (i < len && is_alpha_num(s[i])) i++;
-            XftColor *cor = is_kw(s + start, i - start) ? &c_kw : &c_ink;
-            texto_n(dr_ed, cx, y, s + start, i - start, cor);
-            continue;
-        }
-        while (i < len && !is_alpha_num(s[i]) && s[i] != '"' && s[i] != '\'' && !(s[i] == '/' && i + 1 < len && (s[i+1] == '/' || s[i+1] == '*'))) {
-            i = prox_car(s, i);
-        }
-        if (i > start) {
-            texto_n(dr_ed, cx, y, s + start, i - start, &c_ink);
-        }
-    }
-}
-
 /* --- botoes da barra de ferramentas --------------------------------------- */
 /* Botao com "agente" preenchido e um botao de agente, e o rotulo dele sai do
  * agentes[] - o nome aparece tambem na aba, e um nome escrito duas vezes e um
@@ -2048,8 +1985,9 @@ static void desenhar_editor(void)
 
     for (i = 0; i < vis && topo + i < n_linhas; i++) {
         const char *s = linhas[topo + i];
+        int corte = byte_da_coluna(s, col0);
         int y = MARGEM + i * altura_lin + base_lin;
-        desenhar_linha_sintaxe(y, s, col0);
+        texto(dr_ed, texto_x0(), y, s + corte, &c_ink);
     }
 
     desenhar_selecao(buf);
@@ -3295,9 +3233,6 @@ int main(int argc, char **argv)
     XCOR(&c_fraco,  0x8a8a, 0x8a8a, 0x8a8a);   /* no escuro, "fraco" e mais claro */
     XCOR(&c_sel,    0xffff, 0xffff, 0xffff);
     XCOR(&c_aberto, 0x7f7f, 0xb0b0, 0xffff);   /* na arvore: aberto em outra aba */
-    XCOR(&c_kw,     0x7777, 0xcaca, 0xffff);   /* palavras-chave: ciano claro */
-    XCOR(&c_str,    0xa0a0, 0xdfdf, 0x8a8a);   /* strings: verde tenue */
-    XCOR(&c_com,    0x9a9a, 0x9a9a, 0x9a9a);   /* comentarios: cinza */
 #undef XCOR
 
     xim = XOpenIM(dpy, NULL, NULL, NULL);
